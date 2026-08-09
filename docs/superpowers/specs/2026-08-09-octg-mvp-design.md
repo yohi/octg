@@ -196,7 +196,9 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 - 要件第 29 章の `X-OCTG-*` ヘッダを付加（pool, limit, used, remaining, reset, route, request-id）。エラー応答にも同じヘッダを付すが、**pool が確定する前のエラー**（401 認証エラー、および 5.2 のモデル分類で STANDARD / MINI に分類されず pool が確定しなかった 403 モデル不許可・400 バリデーションエラー等）では pool 系ヘッダ（pool, limit, used, remaining, reset, route）は付与せず、`X-OCTG-Request-Id` のみを返す。一方、pool 確定後のエラー（429 無料枠不足・413 リクエスト過大など quota 判定に至ったもの）では pool 系ヘッダを全て付与し、`X-OCTG-Quota-Used` は pool 全体の confirmed+reserved+uncertain とする。
 - エラーコード（要件第 37 章。OpenAI SDK 互換の `{ error: { message, type, param, code } }` 形式に統一し、`request_id` は応答 body トップレベルに付与）:
 
-- **`message` の取り扱い**: 人間可読な英語 1 文とし、テスト・クライアントロジックは `message` 文字列をアサートせず `error.type` / HTTP status のみを参照する。`param` が `null` の場合は JSON にキーごと含めても省略してもよい（いずれも SDK 互換）。
+- **エラー body の共通契約**: `message`、`type`、`param`、`code` は必須キーとし、`param` が対象外の場合も `null` を返す。`message` は下表の固定値を使用する。テスト・クライアントロジックは原則として `message` ではなく `error.type` / `error.code` / HTTP status を参照するが、固定値はログ・互換性確認用の契約として扱う。
+- **pool 系ヘッダの値**: pool が確定したエラーでは、`X-OCTG-Pool` は小文字の `standard` / `mini`、`X-OCTG-Quota-Limit` は対象 DO の `limit`、`X-OCTG-Quota-Used` は `confirmedTokens + reservedTokens + uncertainTokens`、`X-OCTG-Quota-Remaining` は DO が返す `remaining`、`X-OCTG-Quota-Reset` は次の UTC 00:00 の RFC 3339 timestamp とする。`X-OCTG-Request-Id` は body の `request_id` と同一値にする。
+- **エラー別 route**: `429` は `reject:complimentary_quota`、`413` は `reject:request_too_large`、pool が確定した `403 model_not_allowed` は `reject:model_not_allowed` とする。pool が確定しないエラーでは `X-OCTG-Route` を含む pool 系ヘッダを付与しない。
 
 - 429 無料枠不足の完全な応答例（`pool` / `remaining_tokens` / `reset_at` は `error` オブジェクト**内**に置く。要件第 37 章の例と同一の構造）:
 
@@ -215,18 +217,71 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 }
 ```
 
-| 状況 | HTTP | `error.type` / `error.code` | `param` | 補足 |
-|------|------|------------------------------|---------|------|
-| 無料枠不足 | `429` | `complimentary_quota_exceeded` / `insufficient_quota` | `null` | `error` 内に `pool` / `remaining_tokens` / `reset_at` を含める（上記応答例参照） |
-| リクエスト過大 | `413` | `invalid_request_error` / `request_too_large` | `max_tokens` 等 | 予約量が pool limit 自体を超える等 |
-| モデル不許可 | `403` | `invalid_request_error` / `model_not_allowed` | `model` | tool-use 拒否を含む |
-| 不明モデルで paid 必須 | `403` | `invalid_request_error` / `model_requires_paid` | `model` | complimentary=NONE で paid 非許可の場合 |
-| 非テキスト入力（MVP 未対応） | `400` | `invalid_request_error` / `invalid_request` | `input` | 5.4 の予約前拒否 |
-| `max_tokens` / `max_completion_tokens` 衝突 | `400` | `invalid_request_error` / `invalid_request` | `max_tokens` | 5.4 の正規化規則 |
+| 状況 | HTTP | `error.message` | `error.type` / `error.code` | `param` | pool 系ヘッダ | 補足 |
+|------|------|-------------------|------------------------------|---------|----------------|------|
+| 無料枠不足 | `429` | `Complimentary quota exceeded for pool '{pool}'.` | `complimentary_quota_exceeded` / `insufficient_quota` | `null` | 付与 | 予約量が当日の `remaining` を超えるが、pool の `limit` 以下の場合。`error` 内に `pool` / `remaining_tokens` / `reset_at` を含める。 |
+| リクエスト過大 | `413` | `Request exceeds the complimentary quota limit for pool '{pool}'.` | `invalid_request_error` / `request_too_large` | `null` | 付与 | conservative upper bound が pool の `limit` 自体を超える場合。`remaining` 不足（limit 以下）は 429 とする。 |
+| モデル不許可 | `403` | `The requested model is not allowed for this client.` | `invalid_request_error` / `model_not_allowed` | `model` | pool 確定時のみ付与 | `tools` / `tool_choice` 等の PAID_ONLY リクエストを含む。pool を分類できない場合は `X-OCTG-Request-Id` のみ付与する。 |
+| 不明モデルで paid 必須 | `403` | `The requested model requires paid mode, which is not enabled.` | `invalid_request_error` / `model_requires_paid` | `model` | 付与しない | `complimentary=NONE` で、paid mode が許可されていない場合。 |
+| 非テキスト入力（MVP 未対応） | `400` | `Non-text input is not supported in the MVP.` | `invalid_request_error` / `invalid_request` | `input` | 付与しない | 5.4 の予約前拒否。 |
+| `max_tokens` / `max_completion_tokens` 衝突 | `400` | `max_tokens and max_completion_tokens must match when both are provided.` | `invalid_request_error` / `invalid_request` | `max_tokens` | 付与しない | 5.4 の正規化規則。 |
 
-いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて pool 系 `X-OCTG-*` ヘッダを上記の値で付与する（例: 429 の場合、`X-OCTG-Pool` = `pool`、`X-OCTG-Quota-Remaining` = `remaining_tokens`、`X-OCTG-Quota-Reset` = `reset_at` と対応させ、`X-OCTG-Quota-Used` = `X-OCTG-Quota-Limit` − `remaining_tokens` ではなく DO 集計値 confirmed+reserved+uncertain を使う）。
+いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
 
-> **要件第 37 章との差分メモ**: 要件の例は `error.type` に具体的コードを置く形式で示しているが、本設計では OpenAI SDK のコード分類体系（`type` = 理由コード、`code` = カテゴリ）に統一した。要件どおり「SDK 互換性を考慮した最終決定」の結論である。
+4 条件の canonical response は以下のとおりとする（`request_id`、pool の残量、reset 時刻、ヘッダ値はリクエストごとの実値に置換する）。
+
+```json
+{
+  "error": {
+    "message": "Complimentary quota exceeded for pool 'standard'.",
+    "type": "complimentary_quota_exceeded",
+    "param": null,
+    "code": "insufficient_quota",
+    "pool": "standard",
+    "remaining_tokens": 12500,
+    "reset_at": "2026-08-10T00:00:00Z"
+  },
+  "request_id": "req_01J4ZK8M2E5KQ0W0A2N1F9P3B2"
+}
+```
+
+```json
+{
+  "error": {
+    "message": "Request exceeds the complimentary quota limit for pool 'standard'.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "request_too_large"
+  },
+  "request_id": "req_01J4ZK8M2E5KQ0W0A2N1F9P3C3"
+}
+```
+
+```json
+{
+  "error": {
+    "message": "The requested model is not allowed for this client.",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "model_not_allowed"
+  },
+  "request_id": "req_01J4ZK8M2E5KQ0W0A2N1F9P3D4"
+}
+```
+
+```json
+{
+  "error": {
+    "message": "The requested model requires paid mode, which is not enabled.",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "model_requires_paid"
+  },
+  "request_id": "req_01J4ZK8M2E5KQ0W0A2N1F9P3E5"
+}
+```
+
+> **要件第 37 章との差分メモ**: 要件の例は `error.type` に具体的コードを置く形式で示しているが、本設計では OpenAI SDK のコード分類体系（`type` = 理由コード、`code` = カテゴリ）に統一した。要件どおり「SDK 互換性を考慮した最終決定」の結論である。要件が候補として示した `413 / 422` は `413`、`402 / 403` は `403` を採用する。
 - 監査ログの D1 への非同期書き込みは `ctx.waitUntil()` を用いた fire-and-forget とし、レスポンスレイテンシ目標 p50 < 50ms / p95 < 150ms（要件第 42 章）を阻害しない。**配送保証は best-effort とし、Worker 障害・同時実行制限超過時の監査ログ欠損を許容範囲として明示する**。authoritative な制御は DO が担い、監査は証跡用途に限定する（クォータ判定・課金制御を監査ログ到達に依存させない）。完全な配送保証が必要になった場合は、Cloudflare Queues 等の永続配送経路＋コンシューマでの重複排除（request_id 単位の idempotent upsert）への移行を、要件42章レイテンシ目標の再交渉とセットの設計判断として扱う。
 
 ## 6. データ永続化（D1）
