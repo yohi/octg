@@ -1,0 +1,26 @@
+{
+  "name": "octg-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "OCTG_UPSTREAM_BASE_URL": "https://api.cloudflare.com/client/v4/accounts/REPLACE_ACCOUNT_ID/ai/v1",
+    "QUOTA_LIMIT_STANDARD": "1000000",
+    "QUOTA_LIMIT_MINI": "10000000",
+    "ACCESS_TEAM_DOMAIN": "https://REPLACE_TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_ACCESS_AUD_TAG"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["QuotaController"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "octg",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../db/migrations"
+    }
+  ],
+  "triggers": { "crons": ["5 0 * * *"] }
+}
