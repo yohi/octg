@@ -17,7 +17,7 @@ CREATE TABLE client_policies (
 CREATE TABLE model_registry (
   model TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
-  complimentary_pool TEXT NOT NULL DEFAULT 'NONE',
+  complimentary_pool TEXT NOT NULL DEFAULT 'NONE' CHECK (complimentary_pool IN ('STANDARD', 'MINI', 'NONE')),
   enabled INTEGER NOT NULL DEFAULT 1,
   fallback_model TEXT,
   updated_at TEXT NOT NULL
@@ -26,10 +26,10 @@ CREATE TABLE model_registry (
 CREATE TABLE requests (
   request_id TEXT PRIMARY KEY,
   utc_day TEXT NOT NULL,
-  client_id TEXT NOT NULL,
+  client_id TEXT NOT NULL REFERENCES clients(id),
   requested_model TEXT,
   upstream_model TEXT,
-  pool TEXT,
+  pool TEXT CHECK (pool IN ('STANDARD', 'MINI')),
   eligibility TEXT,
   reserved_tokens INTEGER,
   input_tokens INTEGER,
@@ -46,7 +46,7 @@ CREATE INDEX idx_requests_client ON requests (client_id, utc_day);
 
 CREATE TABLE daily_usage (
   utc_day TEXT NOT NULL,
-  pool TEXT NOT NULL,
+  pool TEXT NOT NULL CHECK (pool IN ('STANDARD', 'MINI')),
   confirmed_tokens INTEGER NOT NULL DEFAULT 0,
   paid_tokens INTEGER NOT NULL DEFAULT 0,
   request_count INTEGER NOT NULL DEFAULT 0,
@@ -55,7 +55,7 @@ CREATE TABLE daily_usage (
 
 CREATE TABLE reconciliations (
   utc_day TEXT NOT NULL,
-  pool TEXT NOT NULL,
+  pool TEXT NOT NULL CHECK (pool IN ('STANDARD', 'MINI')),
   local_tokens INTEGER NOT NULL,
   openai_tokens INTEGER NOT NULL,
   difference INTEGER NOT NULL,

@@ -11,7 +11,11 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     const configuredLimit = Number(
       pool === "STANDARD" ? this.env.QUOTA_LIMIT_STANDARD : this.env.QUOTA_LIMIT_MINI,
     );
-    const limit = configuredLimit > 0 ? configuredLimit : pool === "STANDARD" ? 1_000_000 : 10_000_000;
+    const limit = Number.isFinite(configuredLimit) && configuredLimit > 0
+      ? configuredLimit
+      : pool === "STANDARD"
+        ? 1_000_000
+        : 10_000_000;
 
     return { pool, utcDay: day, limit };
   }

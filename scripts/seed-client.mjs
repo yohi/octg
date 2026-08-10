@@ -16,7 +16,7 @@ const esc = (s) => s.replaceAll("'", "''");
 
 console.log(
   `INSERT INTO clients (id, name, key_hash, enabled, created_at) VALUES ('${esc(id)}', '${esc(name)}', '${hash}', 1, datetime('now')) ` +
-    "ON CONFLICT(id) DO UPDATE SET key_hash=excluded.key_hash, enabled=1;"
+    "ON CONFLICT(id) DO UPDATE SET name=excluded.name, key_hash=excluded.key_hash, enabled=1;"
 );
 console.log(
   `INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES ('${esc(id)}', 'REJECT', 'REJECT', 0, 0) ` +

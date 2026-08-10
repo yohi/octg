@@ -15,6 +15,7 @@ export function remainingOf(s: PoolState): number {
 }
 
 export function tierOf(remaining: number, limit: number): PolicyTier {
+  if (!Number.isFinite(remaining) || !Number.isFinite(limit) || limit <= 0) return "STRICT";
   const ratio = remaining / limit;
   if (ratio <= STRICT_THRESHOLD) return "STRICT";
   if (ratio <= CAUTION_THRESHOLD) return "CAUTION";
