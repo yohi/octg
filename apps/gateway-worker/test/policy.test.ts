@@ -29,11 +29,12 @@ describe("policy and registry", () => {
 
   it("returns the default policy and loads CLAMP policy", async () => {
     await expect(loadPolicy(env, TEST_CLIENT_ID)).resolves.toEqual(DEFAULT_CLIENT_POLICY);
-    await seedPolicy(TEST_CLIENT_ID, { outputLimitMode: "CLAMP" });
+    await seedPolicy(TEST_CLIENT_ID, { outputLimitMode: "CLAMP", maxPaidUsdDay: 12.5 });
     invalidateConfigCaches();
     await expect(loadPolicy(env, TEST_CLIENT_ID)).resolves.toMatchObject({
       outputLimitMode: "CLAMP",
       overflowMode: "REJECT",
+      maxPaidUsdDay: 12.5,
       cacheEnabled: false,
     });
   });

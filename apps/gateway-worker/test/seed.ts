@@ -15,11 +15,22 @@ export async function seedClient(options?: { enabled?: boolean }): Promise<void>
 
 export async function seedPolicy(
   clientId: string,
-  policy: { overflowMode?: string; outputLimitMode?: string; cacheEnabled?: boolean },
+  policy: {
+    overflowMode?: string;
+    outputLimitMode?: string;
+    maxPaidUsdDay?: number;
+    cacheEnabled?: boolean;
+  },
 ): Promise<void> {
   await env.DB.prepare(
-    "INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES (?, ?, ?, 0, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, cache_enabled=excluded.cache_enabled",
+    "INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, max_paid_usd_day=excluded.max_paid_usd_day, cache_enabled=excluded.cache_enabled",
   )
-    .bind(clientId, policy.overflowMode ?? "REJECT", policy.outputLimitMode ?? "REJECT", policy.cacheEnabled ? 1 : 0)
+    .bind(
+      clientId,
+      policy.overflowMode ?? "REJECT",
+      policy.outputLimitMode ?? "REJECT",
+      policy.maxPaidUsdDay ?? 0,
+      policy.cacheEnabled ? 1 : 0,
+    )
     .run();
 }
