@@ -15,7 +15,7 @@
     {
       "binding": "DB",
       "database_name": "octg",
-      "database_id": "${CLOUDFLARE_D1_DATABASE_ID}",
+      "database_id": "42ffaeac-6bc2-431b-a5c1-a8016fae8b4f",
       "migrations_dir": "../../db/migrations"
     }
   ],
