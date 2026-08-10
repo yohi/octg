@@ -135,7 +135,7 @@ export async function handleProxy(
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
   }
-  ctx.waitUntil(setReservedTokens(env, requestId, reservation));
+  ctx.waitUntil(inserted.then(() => setReservedTokens(env, requestId, reservation)).catch(() => undefined));
 
   let upstream: Response;
   try {

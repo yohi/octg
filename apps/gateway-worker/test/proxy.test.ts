@@ -90,16 +90,21 @@ describe("proxy pipeline", () => {
   });
 
   it("supports the responses endpoint with usage settlement", async () => {
-    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
-      id: "resp-1",
-      usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10 },
-    }), { status: 200, headers: { "content-type": "application/json" } }));
+    let upstreamBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        id: "resp-1",
+        usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
     const response = await SELF.fetch("https://octg.test/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
       body: JSON.stringify({ model: "gpt-5", input: "hi", max_output_tokens: 10 }),
     });
     expect(response.status).toBe(200);
+    expect(upstreamBody?.max_output_tokens).toBe(10);
     const body = (await response.json()) as { usage: { total_tokens: number } };
     expect(body.usage.total_tokens).toBe(10);
   });

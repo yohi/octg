@@ -167,7 +167,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
   - `remaining <= 20%`: `max(512, estimatedInput * 0.05)`
   - `remaining <= 5%` : strict モード（要件第 28 章）
 - 予約量 = `estimated_input + max_output_tokens + safety_margin`。
-- **max_output_tokens の既定値**: クライアントが max output を指定しない場合、`DEFAULT_MAX_OUTPUT_TOKENS = 4096` を既定値として適用する。**上流にもこの値を注入する**（未指定 = 実質無制限の出力は reservation 不可能なため、MVP では fail-closed 側に倒す）。
+- **max_output_tokens の既定値と上流フィールド**: クライアントが max output を指定しない場合、`DEFAULT_MAX_OUTPUT_TOKENS = 4096` を既定値として適用する。`/v1/chat/completions` では内部値を上流の `max_completion_tokens` として、`/v1/responses` では上流の `max_output_tokens` として必ず注入する（未指定 = 実質無制限の出力は reservation 不可能なため、MVP では fail-closed 側に倒す）。予約値に使用する `max_output_tokens` と上流へ送信する出力上限値は、既定値および CLAMP 適用後を含め、両 endpoint で一致させる。テストでは両 endpoint についてこの一致と endpoint 固有のフィールド名を検証する。
 - **非テキスト入力の扱い（MVP）**: `/v1/responses` および `/v1/chat/completions` の予約処理で `input_image`・`input_audio` など非テキストのモダリティを検出した場合、tokenizer 推定が成立しないため**予約前に明示的に拒否**する（エラー契約は 5.7 の `invalid_request` を使用）。将来対応としてモダリティ別の保守的上限を `estimated_input` へ加算する方式を採る場合は、モダリティごとの上限表を本書に追加し、過少計上を防ぐ。
 - tokenizer 未知のモデルは UTF-8 バイト数等から保守的上限を使用する。
 

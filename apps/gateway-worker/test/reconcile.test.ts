@@ -91,4 +91,24 @@ describe("reconciliation", () => {
     expect((await env.DB.prepare("SELECT confirmed_tokens FROM daily_usage WHERE utc_day = ? AND pool = 'STANDARD'").bind(reconciliationDay).first<{ confirmed_tokens: number }>())?.confirmed_tokens).toBe(100);
     fetchMock.mockRestore();
   });
+
+  it("backfills daily usage when a completed reconciliation is replayed", async () => {
+    const reconciliationNow = new Date("2026-08-22T00:05:00Z");
+    const reconciliationDay = "2026-08-21";
+    await seedClient();
+    Object.assign(env, { OPENAI_USAGE_API_KEY: "test" });
+    await env.DB.prepare(
+      "INSERT INTO reconciliations (utc_day, pool, local_tokens, openai_tokens, difference, status, attempts, executed_at) VALUES (?, ?, ?, ?, ?, 'done', 1, ?)",
+    ).bind(reconciliationDay, "STANDARD", 100, 150, 50, reconciliationNow.toISOString()).run();
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, 'completed', ?), (?, ?, ?, ?, ?, 'failed', ?)",
+    ).bind("replayed-completed", reconciliationDay, "client_test", "STANDARD", 150, reconciliationNow.toISOString(), "replayed-failed", reconciliationDay, "client_test", "STANDARD", 10, reconciliationNow.toISOString()).run();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: [], has_more: false })));
+
+    const reports = await runReconciliation(env, reconciliationNow);
+
+    expect(reports[0]?.status).toBe("done");
+    expect(await env.DB.prepare("SELECT confirmed_tokens, request_count FROM daily_usage WHERE utc_day = ? AND pool = 'STANDARD'").bind(reconciliationDay).first<{ confirmed_tokens: number; request_count: number }>()).toEqual({ confirmed_tokens: 150, request_count: 1 });
+    fetchMock.mockRestore();
+  });
 });

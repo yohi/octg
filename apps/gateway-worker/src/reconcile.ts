@@ -44,7 +44,12 @@ export async function runReconciliation(env: Env, now: Date): Promise<Reconcilia
   const day = targetUtcDay(now); const reports: ReconciliationReport[] = [];
   for (const pool of ["STANDARD", "MINI"] as const) {
     const existing = await env.DB.prepare("SELECT local_tokens AS localTokens, openai_tokens AS openaiTokens, difference, status FROM reconciliations WHERE utc_day = ? AND pool = ?").bind(day, pool).first<ReconciliationReport>();
-    if (existing?.status === "done") { reports.push({ utcDay: day, pool, localTokens: existing.localTokens, openaiTokens: existing.openaiTokens, difference: existing.difference, status: existing.status }); continue; }
+    if (existing?.status === "done") {
+      const lower = pool.toLowerCase();
+      const completedCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'completed'").bind(day, lower).first<{ count: number }>();
+      await env.DB.prepare("INSERT INTO daily_usage (utc_day, pool, confirmed_tokens, paid_tokens, request_count) VALUES (?, ?, ?, 0, ?) ON CONFLICT(utc_day, pool) DO UPDATE SET confirmed_tokens = excluded.confirmed_tokens, request_count = excluded.request_count").bind(day, pool, existing.openaiTokens, completedCount?.count ?? 0).run().catch(() => undefined);
+      reports.push({ utcDay: day, pool, localTokens: existing.localTokens, openaiTokens: existing.openaiTokens, difference: existing.difference, status: existing.status }); continue;
+    }
     const lower = pool.toLowerCase();
     const local = await env.DB.prepare("SELECT COALESCE(SUM(total_tokens), 0) AS total FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'completed'").bind(day, lower).first<{ total: number }>();
     const uncertain = await env.DB.prepare("SELECT request_id, COALESCE(reserved_tokens, 0) AS reserved FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'uncertain'").bind(day, lower).all<{ request_id: string; reserved: number }>();
