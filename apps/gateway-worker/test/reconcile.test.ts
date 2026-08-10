@@ -28,7 +28,7 @@ describe("reconciliation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     const firstUrl = new URL(fetchMock.mock.calls[0]?.[0] as string);
     expect(firstUrl.searchParams.get("start_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000));
-    expect(firstUrl.searchParams.get("end_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000 + 48 * 3600));
+    expect(firstUrl.searchParams.get("end_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000 + 24 * 3600));
     expect(firstUrl.searchParams.get("bucket_width")).toBe("1h");
     expect(firstUrl.searchParams.get("limit")).toBe("24");
     expect(new URL(fetchMock.mock.calls[1]?.[0] as string).searchParams.get("page")).toBe("next");

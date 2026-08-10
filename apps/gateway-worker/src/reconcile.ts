@@ -11,7 +11,7 @@ type UsagePage = { data?: Array<{ results?: UsageResult[] }>; has_more?: boolean
 async function fetchUsage(env: Env, day: string): Promise<ReadonlyMap<string, number>> {
   const url = new URL("https://api.openai.com/v1/organization/usage/completions");
   const start = Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
-  url.searchParams.set("start_time", String(start)); url.searchParams.set("end_time", String(start + 48 * 3600)); url.searchParams.set("bucket_width", "1h"); url.searchParams.set("group_by", "model"); url.searchParams.set("limit", "24");
+  url.searchParams.set("start_time", String(start)); url.searchParams.set("end_time", String(start + 24 * 3600)); url.searchParams.set("bucket_width", "1h"); url.searchParams.set("group_by", "model"); url.searchParams.set("limit", "24");
   if (env.OPENAI_FREE_PROJECT_ID) url.searchParams.set("project_ids", env.OPENAI_FREE_PROJECT_ID);
   const totals = new Map<string, number>();
   do {
