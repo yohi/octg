@@ -150,7 +150,7 @@ export function buildOctgHeaders(args: {
 }
 
 export function errorResponse(err: OctgHttpError): Response {
-  return new Response(JSON.stringify(err.body), {
+  return new Response(JSON.stringify({ ...err.body, request_id: err.requestId }), {
     status: err.status,
     headers: {
       "content-type": "application/json",

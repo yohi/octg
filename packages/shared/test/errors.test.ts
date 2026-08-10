@@ -41,6 +41,16 @@ describe("canonical error bodies", () => {
     expect(response.headers.get("X-OCTG-Route")).toBe("reject:complimentary_quota");
   });
 
+  it("uses the error request id in the body and header", async () => {
+    const error = errModelRequiresPaid("req_2");
+    error.body.request_id = "stale-body-id";
+    const response = errorResponse(error);
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { request_id: string };
+    expect(body.request_id).toBe("req_2");
+    expect(response.headers.get("X-OCTG-Request-Id")).toBe("req_2");
+  });
+
   it("keeps pool headers out of pre-pool errors", async () => {
     const response = errorResponse(errModelRequiresPaid("req_2"));
     expect(response.status).toBe(403);
