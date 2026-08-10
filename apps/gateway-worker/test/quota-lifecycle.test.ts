@@ -142,6 +142,17 @@ describe("QuotaController.reconcileRequest", () => {
     expect(state.confirmedTokens).toBe(5_000);
   });
 
+  it("returns the saved result for a mismatched reconciliation retry", async () => {
+    const controller = stub("2026-09-24");
+    await controller.reserve("req-c-mismatch", 5_000, 5_000);
+    await controller.markUncertain("req-c-mismatch");
+    const applied = await controller.reconcileRequest("req-c-mismatch", "consumed");
+
+    const replayed = await controller.reconcileRequest("req-c-mismatch", "unused");
+
+    expect(replayed).toEqual(applied);
+  });
+
   it("rejects an invalid disposition without releasing uncertain usage", async () => {
     // Given: an uncertain reservation.
     const controller = stub("2026-09-17");
@@ -177,8 +188,30 @@ describe("QuotaController.finalizeDay", () => {
     const state = await controller.getState();
 
     // Then: storage remains intact and reports the guard count.
-    expect(result).toEqual({ ok: false, reason: "uncertain_remaining", uncertainCount: 1 });
+    expect(result).toEqual({
+      ok: false,
+      reason: "uncertain_remaining",
+      uncertainCount: 1,
+      reservedCount: 0,
+    });
     expect(state.uncertainTokens).toBe(10_000);
+  });
+
+  it("refuses deletion while reserved entries remain", async () => {
+    const controller = stub("2026-09-23");
+    await controller.reserve("req-f-reserved", 10_000, 10_000);
+
+    const result = await controller.finalizeDay();
+    const state = await controller.getState();
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "reserved_remaining",
+      uncertainCount: 0,
+      reservedCount: 1,
+    });
+    expect(state.reservedTokens).toBe(10_000);
+    expect(state.requestCount).toBe(1);
   });
 
   it("deletes the day after all uncertainty has been resolved", async () => {

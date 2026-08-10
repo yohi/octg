@@ -17,6 +17,7 @@ export interface RequestEntry {
   tokens: number;
   upperBoundTokens: number;
   reservedTokens: number;
+  requestedDisposition?: ReconcileDisposition;
   actualTokens?: number;
   results: RequestRpcResults;
   createdAt: string;
@@ -55,7 +56,12 @@ export interface RequestRpcResults {
 
 export type FinalizeResult =
   | { readonly ok: true; readonly deleted: true }
-  | { readonly ok: false; readonly reason: "uncertain_remaining"; readonly uncertainCount: number };
+  | {
+      readonly ok: false;
+      readonly reason: "uncertain_remaining" | "reserved_remaining";
+      readonly uncertainCount: number;
+      readonly reservedCount: number;
+    };
 
 export interface QuotaView extends PoolState {
   readonly pool: PoolName;

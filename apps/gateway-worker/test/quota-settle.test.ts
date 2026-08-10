@@ -93,23 +93,24 @@ describe("QuotaController.settle", () => {
     expect(state.confirmedTokens).toBe(0);
   });
 
-  it("rejects invalid actual usage without changing a reservation", async () => {
-    // Given: a pending reservation.
-    const controller = stub("2026-09-09");
+  it.each([
+    ["negative", "2026-09-09", -1],
+    ["fractional", "2026-09-10", 25.5],
+    ["unsafe integer", "2026-09-11", Number.MAX_SAFE_INTEGER + 1],
+  ])("rejects %s actual usage without changing a reservation", async (_description, day, actualTokens) => {
+    const controller = stub(day);
     await controller.reserve("req-invalid-actual", 40_000, 40_000);
 
-    // When: settlement receives a negative actual usage value.
     await expect(
       runInDurableObject(controller, async (instance) => {
         if (!hasSettlementController(instance)) {
           throw new TypeError("Expected a QuotaController instance.");
         }
-        return instance.settle("req-invalid-actual", -1);
+        return instance.settle("req-invalid-actual", actualTokens);
       }),
     ).rejects.toThrow(TypeError);
     const state = await controller.getState();
 
-    // Then: the reservation remains fail-closed rather than decreasing confirmed usage.
     expect(state.reservedTokens).toBe(40_000);
     expect(state.confirmedTokens).toBe(0);
   });

@@ -9,11 +9,12 @@ import type {
   SettleResult,
 } from "@octg/shared";
 import {
-  countUncertain,
   getEntry,
+  loadUnresolved,
   loadPool,
   putEntry,
   savePool,
+  saveUnresolved,
 } from "./store";
 import type { QuotaEnvLike, QuotaIdentity } from "./store";
 
@@ -60,6 +61,7 @@ export class QuotaLifecycle {
         ...stateAfterRelease,
         confirmedTokens: stateAfterRelease.confirmedTokens + actualTokens,
       };
+      const unresolvedState = await loadUnresolved(storage);
       const result: SettleResult = { ok: true };
       const nextEntry: RequestEntry = {
         ...entry,
@@ -70,6 +72,16 @@ export class QuotaLifecycle {
 
       await savePool(storage, nextState);
       await putEntry(storage, requestId, nextEntry);
+      await saveUnresolved(storage, {
+        uncertainCount: Math.max(
+          0,
+          unresolvedState.uncertainCount - (entry.state === "uncertain" ? 1 : 0),
+        ),
+        reservedCount: Math.max(
+          0,
+          unresolvedState.reservedCount - (entry.state === "reserved" ? 1 : 0),
+        ),
+      });
       if (remainingOf(nextState) < 0) {
         console.warn("quota settlement overage", {
           quotaId: this.context.quotaId,
@@ -112,6 +124,7 @@ export class QuotaLifecycle {
         reservedTokens: Math.max(0, poolState.reservedTokens - entry.reservedTokens),
         uncertainTokens: poolState.uncertainTokens + entry.reservedTokens,
       };
+      const unresolved = await loadUnresolved(storage);
       const result: MarkUncertainResult = { ok: true };
       const nextEntry: RequestEntry = {
         ...entry,
@@ -121,6 +134,10 @@ export class QuotaLifecycle {
 
       await savePool(storage, nextState);
       await putEntry(storage, requestId, nextEntry);
+      await saveUnresolved(storage, {
+        uncertainCount: unresolved.uncertainCount + 1,
+        reservedCount: Math.max(0, unresolved.reservedCount - 1),
+      });
       return result;
     });
   }
@@ -148,6 +165,7 @@ export class QuotaLifecycle {
         ...poolState,
         reservedTokens: Math.max(0, poolState.reservedTokens - entry.reservedTokens),
       };
+      const unresolved = await loadUnresolved(storage);
       const result: ReleaseResult = { ok: true };
       const nextEntry: RequestEntry = {
         ...entry,
@@ -157,6 +175,10 @@ export class QuotaLifecycle {
 
       await savePool(storage, nextState);
       await putEntry(storage, requestId, nextEntry);
+      await saveUnresolved(storage, {
+        ...unresolved,
+        reservedCount: Math.max(0, unresolved.reservedCount - 1),
+      });
       return result;
     });
   }
@@ -170,7 +192,17 @@ export class QuotaLifecycle {
       if (!entry) return { ok: true, applied: false };
 
       const priorResult = entry.results.reconcile;
-      if (priorResult) return priorResult;
+      if (priorResult) {
+        if (entry.requestedDisposition !== disposition) {
+          console.warn("quota reconcile disposition conflict", {
+            quotaId: this.context.quotaId,
+            requestId,
+            requestedDisposition: entry.requestedDisposition,
+            disposition,
+          });
+        }
+        return priorResult;
+      }
       if (entry.state !== "uncertain") return { ok: true, applied: false };
 
       const { pool, utcDay } = this.context.identityOf();
@@ -179,6 +211,7 @@ export class QuotaLifecycle {
         ...poolState,
         uncertainTokens: Math.max(0, poolState.uncertainTokens - entry.reservedTokens),
       };
+      const unresolved = await loadUnresolved(storage);
       const nextState =
         disposition === "consumed"
           ? {
@@ -192,21 +225,35 @@ export class QuotaLifecycle {
       const nextEntry: RequestEntry = {
         ...entry,
         state: nextRequestState,
+        requestedDisposition: disposition,
         results: { ...entry.results, reconcile: result },
       };
 
       await savePool(storage, nextState);
       await putEntry(storage, requestId, nextEntry);
+      await saveUnresolved(storage, {
+        uncertainCount: Math.max(0, unresolved.uncertainCount - 1),
+        reservedCount: unresolved.reservedCount,
+      });
       return result;
     });
   }
 
   async finalizeDay(): Promise<FinalizeResult> {
-    const uncertainCount = await countUncertain(this.context.storage);
-    if (uncertainCount > 0) {
-      return { ok: false, reason: "uncertain_remaining", uncertainCount };
-    }
+    const unresolved: FinalizeResult = await this.context.storage.transaction(async (storage) => {
+      const { uncertainCount, reservedCount } = await loadUnresolved(storage);
+      if (uncertainCount > 0 || reservedCount > 0) {
+        return {
+          ok: false,
+          reason: uncertainCount > 0 ? "uncertain_remaining" : "reserved_remaining",
+          uncertainCount,
+          reservedCount,
+        } as const;
+      }
+      return { ok: true, deleted: true } as const;
+    });
+    if (!unresolved.ok) return unresolved;
     await this.context.storage.deleteAll();
-    return { ok: true, deleted: true };
+    return unresolved;
   }
 }

@@ -11,7 +11,14 @@ import type {
   SettleResult,
 } from "@octg/shared";
 import { QuotaLifecycle } from "./quota-lifecycle";
-import { getEntry, loadPool, putEntry, savePool } from "./store";
+import {
+  getEntry,
+  loadPool,
+  loadUnresolved,
+  putEntry,
+  savePool,
+  saveUnresolved,
+} from "./store";
 import type { QuotaIdentity } from "./store";
 
 export interface QuotaControllerEnv {
@@ -94,6 +101,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         resetAt,
       };
       const now = new Date().toISOString();
+      const unresolved = await loadUnresolved(storage);
       await savePool(storage, {
         ...state,
         reservedTokens: state.reservedTokens + tokens,
@@ -107,6 +115,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         results: { reserve: result },
         createdAt: now,
         updatedAt: now,
+      });
+      await saveUnresolved(storage, {
+        ...unresolved,
+        reservedCount: unresolved.reservedCount + 1,
       });
       return result;
     });
