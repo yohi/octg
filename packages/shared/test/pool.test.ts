@@ -27,6 +27,8 @@ describe("pool utils", () => {
     // Given: one request that has produced several RPC outcomes.
     const entry = {
       state: "settled",
+      tokens: 4_000,
+      upperBoundTokens: 4_000,
       reservedTokens: 4_000,
       createdAt: "2026-08-09T00:00:00Z",
       updatedAt: "2026-08-09T00:00:01Z",
