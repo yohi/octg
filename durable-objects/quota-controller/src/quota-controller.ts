@@ -1,6 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
 import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
-import type { QuotaView, ReserveResult } from "@octg/shared";
+import type {
+  FinalizeResult,
+  MarkUncertainResult,
+  QuotaView,
+  ReconcileDisposition,
+  ReconcileResult,
+  ReleaseResult,
+  ReserveResult,
+  SettleResult,
+} from "@octg/shared";
+import { QuotaLifecycle } from "./quota-lifecycle";
 import { getEntry, loadPool, putEntry, savePool } from "./store";
 import type { QuotaIdentity } from "./store";
 
@@ -91,6 +101,44 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         updatedAt: now,
       });
       return result;
+    });
+  }
+
+  async settle(requestId: string, actualTokens: number): Promise<SettleResult> {
+    if (!Number.isSafeInteger(actualTokens) || actualTokens < 0) {
+      throw new TypeError("Actual tokens must be a non-negative safe integer.");
+    }
+    return this.lifecycle.settle(requestId, actualTokens);
+  }
+
+  async markUncertain(requestId: string): Promise<MarkUncertainResult> {
+    return this.lifecycle.markUncertain(requestId);
+  }
+
+  async release(requestId: string): Promise<ReleaseResult> {
+    return this.lifecycle.release(requestId);
+  }
+
+  async reconcileRequest(
+    requestId: string,
+    disposition: ReconcileDisposition,
+  ): Promise<ReconcileResult> {
+    if (disposition !== "consumed" && disposition !== "unused") {
+      throw new TypeError("Reconcile disposition must be consumed or unused.");
+    }
+    return this.lifecycle.reconcileRequest(requestId, disposition);
+  }
+
+  async finalizeDay(): Promise<FinalizeResult> {
+    return this.lifecycle.finalizeDay();
+  }
+
+  private get lifecycle(): QuotaLifecycle {
+    return new QuotaLifecycle({
+      storage: this.ctx.storage,
+      env: this.env,
+      quotaId: this.ctx.id.name,
+      identityOf: () => this.identity,
     });
   }
 
