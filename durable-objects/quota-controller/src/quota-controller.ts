@@ -4,6 +4,7 @@ import type {
   FinalizeResult,
   MarkUncertainResult,
   QuotaView,
+  ReconcileSnapshot,
   ReconcileDisposition,
   ReconcileResult,
   ReleaseResult,
@@ -152,6 +153,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
       throw new TypeError("Reconcile disposition must be consumed or unused.");
     }
     return this.lifecycle.reconcileRequest(requestId, disposition);
+  }
+
+  async getReconcileSnapshot(): Promise<ReconcileSnapshot> {
+    return this.lifecycle.getReconcileSnapshot();
   }
 
   async finalizeDay(): Promise<FinalizeResult> {

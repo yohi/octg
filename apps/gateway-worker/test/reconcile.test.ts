@@ -92,6 +92,31 @@ describe("reconciliation", () => {
     fetchMock.mockRestore();
   });
 
+  it("uses the Durable Object snapshot instead of D1 reservation amounts", async () => {
+    const reconciliationNow = new Date("2026-08-23T00:05:00Z");
+    const reconciliationDay = "2026-08-22";
+    Object.assign(env, { OPENAI_USAGE_API_KEY: "test" });
+    await seedClient();
+    const controller = env.QUOTA_CONTROLLER.get(
+      env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${reconciliationDay}`),
+    );
+    await controller.reserve("reconcile-do-source", 150, 150);
+    await controller.markUncertain("reconcile-do-source");
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("reconcile-do-source", reconciliationDay, "client_test", "STANDARD", 999, 0, "uncertain", reconciliationNow.toISOString()).run();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({
+      data: [{ results: [{ model: "gpt-5", input_tokens: 125, output_tokens: 25 }] }],
+      has_more: false,
+    })));
+
+    const reports = await runReconciliation(env, reconciliationNow);
+
+    expect(reports.find((report) => report.pool === "STANDARD")?.status).toBe("done");
+    expect((await controller.getState()).confirmedTokens).toBe(150);
+    fetchMock.mockRestore();
+  });
+
   it("backfills daily usage when a completed reconciliation is replayed", async () => {
     const reconciliationNow = new Date("2026-08-22T00:05:00Z");
     const reconciliationDay = "2026-08-21";

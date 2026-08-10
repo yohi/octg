@@ -4,6 +4,7 @@ import type {
   MarkUncertainResult,
   ReconcileDisposition,
   ReconcileResult,
+  ReconcileSnapshot,
   ReleaseResult,
   RequestEntry,
   SettleResult,
@@ -14,6 +15,7 @@ import {
   loadUnresolved,
   loadPool,
   putEntry,
+  ENTRY_PREFIX,
   savePool,
   saveUnresolved,
 } from "./store";
@@ -28,6 +30,18 @@ export interface QuotaLifecycleContext {
 
 export class QuotaLifecycle {
   constructor(private readonly context: QuotaLifecycleContext) {}
+
+  async getReconcileSnapshot(): Promise<ReconcileSnapshot> {
+    const entries = await this.context.storage.list<RequestEntry>({ prefix: ENTRY_PREFIX });
+    return {
+      requests: [...entries.entries()]
+        .filter(([, entry]) => entry.state === "uncertain")
+        .map(([requestId, entry]) => ({
+          requestId: String(requestId).slice(ENTRY_PREFIX.length),
+          reservedTokens: entry.reservedTokens,
+        })),
+    };
+  }
 
   async settle(requestId: string, actualTokens: number): Promise<SettleResult> {
     return this.context.storage.transaction(async (storage) => {

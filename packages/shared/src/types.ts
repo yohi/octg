@@ -45,6 +45,13 @@ export type ReleaseResult =
 
 export type ReconcileDisposition = "consumed" | "unused";
 export type ReconcileResult = { readonly ok: true; readonly applied: boolean };
+export interface UncertainRequest {
+  readonly requestId: string;
+  readonly reservedTokens: number;
+}
+export interface ReconcileSnapshot {
+  readonly requests: readonly UncertainRequest[];
+}
 
 export interface RequestRpcResults {
   reserve?: ReserveResult;
