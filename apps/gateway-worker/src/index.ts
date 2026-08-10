@@ -2,6 +2,7 @@ import { QuotaController } from "@octg/quota-controller";
 import { handleProxy } from "./proxy";
 import { handleModels } from "./models";
 import { handleQuota } from "./quota-api";
+import { errInternal, errorResponse } from "@octg/shared";
 import { ulid } from "ulid";
 
 export { QuotaController };
@@ -25,17 +26,21 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
-      return handleProxy(request, env, ctx, "chat");
-    }
-    if (request.method === "POST" && url.pathname === "/v1/responses") {
-      return handleProxy(request, env, ctx, "responses");
-    }
-    if (request.method === "GET" && url.pathname === "/v1/models") {
-      return handleModels(request, env);
-    }
-    if (request.method === "GET" && url.pathname === "/quota") {
-      return handleQuota(request, env, `req_${ulid()}`);
+    try {
+      if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+        return await handleProxy(request, env, ctx, "chat");
+      }
+      if (request.method === "POST" && url.pathname === "/v1/responses") {
+        return await handleProxy(request, env, ctx, "responses");
+      }
+      if (request.method === "GET" && url.pathname === "/v1/models") {
+        return handleModels(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/quota") {
+        return handleQuota(request, env, `req_${ulid()}`);
+      }
+    } catch {
+      return errorResponse(errInternal(`req_${crypto.randomUUID()}`));
     }
     return new Response("Not Found", { status: 404 });
   },

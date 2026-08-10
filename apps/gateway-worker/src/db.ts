@@ -23,7 +23,7 @@ export async function insertRequestRow(env: Env, row: RequestLogRow): Promise<vo
       row.clientId,
       row.requestedModel,
       row.upstreamModel,
-      row.pool,
+      row.pool?.toUpperCase() ?? null,
       row.eligibility,
       row.reservedTokens,
       new Date().toISOString(),

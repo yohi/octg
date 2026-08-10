@@ -33,6 +33,30 @@ import type { Env } from "./index";
 
 type Stub = DurableObjectStub<QuotaController>;
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+type Completion = Parameters<typeof completeRequestRow>[2];
+
+function completeAfterInsert(
+  inserted: Promise<void>,
+  env: Env,
+  requestId: string,
+  fields: Completion,
+): Promise<void> {
+  return inserted.then(() => completeRequestRow(env, requestId, fields));
+}
+
+function upstreamResponse(
+  upstream: Response,
+  requestId: string,
+  snapshot: QuotaSnapshot,
+): Response {
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+    },
+  });
+}
 
 export function snapshotOf(view: QuotaView): QuotaSnapshot {
   return {
@@ -73,18 +97,16 @@ export async function handleProxy(
     return errorResponse(errModelNotAllowed(requestId, snapshotOf(await stub.getState())));
   }
 
-  ctx.waitUntil(
-    insertRequestRow(env, {
+  const inserted = insertRequestRow(env, {
       requestId,
       utcDay: day,
       clientId: auth.id,
       requestedModel: requestData.model,
       upstreamModel: requestData.model,
-      pool: toPoolLower(pool),
+      pool: pool,
       eligibility: "COMPLIMENTARY",
       reservedTokens: null,
-    }),
-  );
+    });
 
   const before = await stub.getState();
   const snapshot = snapshotOf(before);
@@ -92,7 +114,7 @@ export async function handleProxy(
   const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
   const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
   if (upperBound > before.limit) {
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "failed", billingClass: "none" }));
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errRequestTooLarge(snapshot, requestId));
   }
   const output = decideOutput({
@@ -103,14 +125,14 @@ export async function handleProxy(
     outputLimitMode: policy.outputLimitMode,
   });
   if (output.action === "reject") {
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "failed", billingClass: "none" }));
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errQuotaExceeded(snapshot, requestId));
   }
 
   const reservation = estimatedInput + output.maxOutputTokens + margin;
   const reserved = await stub.reserve(requestId, reservation, upperBound);
   if (!reserved.ok) {
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "failed", billingClass: "none" }));
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
   }
 
@@ -132,32 +154,35 @@ export async function handleProxy(
   } catch (error) {
     if (error instanceof UpstreamConfigError) {
       await stub.release(requestId);
-      ctx.waitUntil(completeRequestRow(env, requestId, { status: "failed", billingClass: "none" }));
+      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
       return errorResponse(errInternal(requestId));
     }
     await stub.markUncertain(requestId);
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" }));
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
     return errorResponse(errInternal(requestId));
   }
 
   if (!upstream.ok) {
-    await stub.markUncertain(requestId);
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" }));
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") ?? "application/json",
-        ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
-      },
-    });
+    const uncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
+    if (uncertain) await stub.markUncertain(requestId);
+    else await stub.release(requestId);
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: uncertain ? "uncertain" : "failed", billingClass: "none" }));
+    return upstreamResponse(upstream, requestId, snapshot);
   }
 
-  if (requestData.stream) return proxyStream(upstream, stub, requestId, env, ctx, snapshot);
-  const data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
+  if (requestData.stream) return proxyStream(upstream, stub, requestId, env, ctx, snapshot, inserted);
+  let data: Record<string, unknown> & { usage?: Usage };
+  try {
+    data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
+  } catch {
+    await stub.markUncertain(requestId);
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
+    return errorResponse(errInternal(requestId));
+  }
   const usage = data.usage;
   if (typeof usage?.total_tokens === "number") {
     await stub.settle(requestId, usage.total_tokens);
-    ctx.waitUntil(completeRequestRow(env, requestId, {
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, {
       status: "completed",
       inputTokens: usage.prompt_tokens,
       outputTokens: usage.completion_tokens,
@@ -166,7 +191,7 @@ export async function handleProxy(
     }));
   } else {
     await stub.markUncertain(requestId);
-    ctx.waitUntil(completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" }));
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
   }
   return new Response(JSON.stringify(data), {
     status: 200,
@@ -184,6 +209,7 @@ export function proxyStream(
   env: Env,
   ctx: ExecutionContext,
   snapshot: QuotaSnapshot,
+  inserted: Promise<void>,
 ): Response {
   let finalized = false;
   let usage: Usage | undefined;
@@ -194,6 +220,7 @@ export function proxyStream(
     finalized = true;
     if (typeof usage?.total_tokens === "number") {
       await stub.settle(requestId, usage.total_tokens);
+      await inserted;
       await completeRequestRow(env, requestId, {
         status: "completed",
         inputTokens: usage.prompt_tokens,
@@ -203,6 +230,7 @@ export function proxyStream(
       });
     } else {
       await stub.markUncertain(requestId);
+      await inserted;
       await completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" });
     }
   };
@@ -223,7 +251,17 @@ export function proxyStream(
       }
     }
   };
-  const tapped = upstream.body!.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+  if (!upstream.body) {
+    ctx.waitUntil(finalize());
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
+        ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+      },
+    });
+  }
+  const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
       const cut = buffer.lastIndexOf("\n\n");
@@ -235,6 +273,9 @@ export function proxyStream(
     },
     flush() {
       if (buffer.trim()) parseEvents(`${buffer}\n\n`);
+      ctx.waitUntil(finalize());
+    },
+    cancel() {
       ctx.waitUntil(finalize());
     },
   }));

@@ -3,6 +3,8 @@ import type { Env } from "./index";
 
 export class UpstreamConfigError extends Error {}
 
+export type UpstreamTransport = typeof fetch;
+
 export interface UpstreamMeta {
   client_id: string;
   pool: PoolNameLower;
@@ -34,11 +36,9 @@ export async function callUpstream(
   body: unknown,
   meta: UpstreamMeta,
   cacheKey: string | null,
+  transport: UpstreamTransport = fetch,
 ): Promise<Response> {
   if (!env.OCTG_UPSTREAM_API_TOKEN) throw new UpstreamConfigError("OCTG_UPSTREAM_API_TOKEN is not configured");
-  if (env.OCTG_UPSTREAM_BASE_URL === "https://aigw.invalid" && env.TEST_UPSTREAM_STATUS === "network") {
-    throw new TypeError("fetch failed");
-  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
     authorization: `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
@@ -50,13 +50,7 @@ export async function callUpstream(
   };
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";
-  if (env.OCTG_UPSTREAM_BASE_URL === "https://aigw.invalid" && env.TEST_UPSTREAM_RESPONSE) {
-    return new Response(env.TEST_UPSTREAM_RESPONSE, {
-      status: Number(env.TEST_UPSTREAM_STATUS ?? "200"),
-      headers: { "content-type": "application/json" },
-    });
-  }
-  return fetch(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {
+  return transport(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
