@@ -130,6 +130,21 @@ describe("QuotaController.reserve", () => {
     expect(state.requestCount).toBe(1);
   });
 
+  it("rejects a retransmission with different reservation parameters", async () => {
+    const controller = stub("STANDARD", "2026-08-13");
+
+    await controller.reserve("req-mismatch", 10_000, 10_000);
+
+    await expect(
+      runInDurableObject(controller, async (instance) => {
+        if (!hasQuotaControllerMethods(instance)) {
+          throw new TypeError("Expected a QuotaController instance.");
+        }
+        return instance.reserve("req-mismatch", 9_000, 10_000);
+      }),
+    ).rejects.toThrow("parameters do not match the saved request");
+  });
+
   it("uses the configured MINI pool limit", async () => {
     // Given: an unused MINI pool.
     const controller = stub("MINI", "2026-08-09");

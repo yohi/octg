@@ -14,6 +14,8 @@ export interface PoolState {
 
 export interface RequestEntry {
   state: RequestState;
+  tokens: number;
+  upperBoundTokens: number;
   reservedTokens: number;
   actualTokens?: number;
   results: RequestRpcResults;

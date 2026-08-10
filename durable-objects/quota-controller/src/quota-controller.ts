@@ -58,6 +58,12 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     return this.ctx.storage.transaction(async (storage) => {
       const existing = await getEntry(storage, requestId);
       if (existing) {
+        if (
+          existing.tokens !== tokens ||
+          existing.upperBoundTokens !== upperBoundTokens
+        ) {
+          throw new TypeError(`Request ${requestId} parameters do not match the saved request.`);
+        }
         const result = existing.results.reserve;
         if (result) return result;
         throw new TypeError(`Request ${requestId} has no saved reserve result.`);
@@ -85,6 +91,8 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
       });
       await putEntry(storage, requestId, {
         state: "reserved",
+        tokens,
+        upperBoundTokens,
         reservedTokens: tokens,
         results: { reserve: result },
         createdAt: now,
