@@ -7,6 +7,7 @@ export const ENTRY_PREFIX = "req:";
 interface QuotaStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
+  list<T>(options?: { readonly prefix?: string }): Promise<Map<string, T>>;
 }
 
 export interface QuotaEnvLike {
@@ -64,4 +65,13 @@ export async function putEntry(
     ...entry,
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function countUncertain(storage: QuotaStorage): Promise<number> {
+  const entries = await storage.list<RequestEntry>({ prefix: ENTRY_PREFIX });
+  let count = 0;
+  for (const entry of entries.values()) {
+    if (entry.state === "uncertain") count += 1;
+  }
+  return count;
 }
