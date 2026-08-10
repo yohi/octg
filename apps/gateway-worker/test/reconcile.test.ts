@@ -28,9 +28,9 @@ describe("reconciliation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     const firstUrl = new URL(fetchMock.mock.calls[0]?.[0] as string);
     expect(firstUrl.searchParams.get("start_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000));
-    expect(firstUrl.searchParams.get("end_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000 + 24 * 3600));
+    expect(firstUrl.searchParams.get("end_time")).toBe(String(Date.parse("2026-08-09T00:00:00Z") / 1000 + 48 * 3600));
     expect(firstUrl.searchParams.get("bucket_width")).toBe("1h");
-    expect(firstUrl.searchParams.get("limit")).toBe("24");
+    expect(firstUrl.searchParams.get("limit")).toBe("48");
     expect(new URL(fetchMock.mock.calls[1]?.[0] as string).searchParams.get("page")).toBe("next");
     expect(new URL(fetchMock.mock.calls[3]?.[0] as string).searchParams.get("page")).toBe("next-mini");
     fetchMock.mockRestore();
@@ -70,6 +70,25 @@ describe("reconciliation", () => {
     expect((await controller.getState()).uncertainTokens).toBe(0);
     expect((await controller.getState()).confirmedTokens).toBe(150);
     expect((await env.DB.prepare("SELECT status FROM requests WHERE request_id = ?").bind("reconcile-uncertain-2026-08-19").first<{ status: string }>())?.status).toBe("completed");
+    expect((await env.DB.prepare("SELECT confirmed_tokens FROM daily_usage WHERE utc_day = ? AND pool = 'STANDARD'").bind(reconciliationDay).first<{ confirmed_tokens: number }>())?.confirmed_tokens).toBe(150);
+    fetchMock.mockRestore();
+  });
+
+  it("keeps unresolved usage open and records only confirmed local usage", async () => {
+    const reconciliationNow = new Date("2026-08-21T00:05:00Z");
+    const reconciliationDay = "2026-08-20";
+    Object.assign(env, { OPENAI_USAGE_API_KEY: "test" });
+    await seedClient();
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind("reconcile-completed", reconciliationDay, "client_test", "STANDARD", 0, 100, "completed", reconciliationNow.toISOString(), "reconcile-open", reconciliationDay, "client_test", "STANDARD", 40, 0, "uncertain", reconciliationNow.toISOString()).run();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({
+      data: [{ results: [{ model: "gpt-5", input_tokens: 70, output_tokens: 60 }] }],
+      has_more: false,
+    })));
+    const reports = await runReconciliation(env, reconciliationNow);
+    expect(reports.find((report) => report.pool === "STANDARD")?.status).toBe("open");
+    expect((await env.DB.prepare("SELECT confirmed_tokens FROM daily_usage WHERE utc_day = ? AND pool = 'STANDARD'").bind(reconciliationDay).first<{ confirmed_tokens: number }>())?.confirmed_tokens).toBe(100);
     fetchMock.mockRestore();
   });
 });

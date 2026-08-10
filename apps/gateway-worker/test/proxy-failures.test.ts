@@ -68,4 +68,15 @@ describe("proxy failure paths", () => {
     expect(response.status).toBe(200);
     expect((await stub().getState()).uncertainTokens).toBeGreaterThan(0);
   });
+
+  it("persists the reservation amount for reconciliation", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ id: "missing-usage" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await request();
+    const row = await env.DB.prepare("SELECT reserved_tokens, status FROM requests ORDER BY started_at DESC LIMIT 1").first<{ reserved_tokens: number; status: string }>();
+    expect(row?.reserved_tokens).toBeGreaterThan(0);
+    expect(row?.status).toBe("uncertain");
+  });
 });
