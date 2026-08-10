@@ -3,6 +3,8 @@ import { handleProxy } from "./proxy";
 import { handleModels } from "./models";
 import { handleQuota } from "./quota-api";
 import { ulid } from "ulid";
+import { handleAdmin } from "./admin";
+import { runScheduled } from "./scheduled";
 
 export { QuotaController };
 
@@ -20,6 +22,7 @@ export interface Env {
   readonly OPENAI_FREE_PROJECT_ID?: string;
   TEST_UPSTREAM_RESPONSE?: string;
   TEST_UPSTREAM_STATUS?: string;
+  readonly ACCESS_JWT_PUBLIC_JWK?: string;
 }
 
 export default {
@@ -37,7 +40,11 @@ export default {
     if (request.method === "GET" && url.pathname === "/quota") {
       return handleQuota(request, env, `req_${ulid()}`);
     }
+    const admin = await handleAdmin(request, env, `req_${ulid()}`);
+    if (admin) return admin;
     return new Response("Not Found", { status: 404 });
   },
-  async scheduled(): Promise<void> {}
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runScheduled(env, new Date(controller.scheduledTime)));
+  }
 } satisfies ExportedHandler<Env>;
