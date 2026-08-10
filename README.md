@@ -1,7 +1,38 @@
 # OCTG — OpenAI Complimentary Token Gateway
 
-OpenAI Data Sharing Program (Tier 3) の無料枠を複数クライアントで共有するための OpenAI 互換 API Gateway。
-設計: `docs/superpowers/specs/2026-08-09-octg-mvp-design.md` / 計画: `docs/superpowers/plans/2026-08-09-octg-mvp-implementation.md`。
+OpenAI Data Sharing Program (Tier 3) の無料枠を複数クライアントで共有するための OpenAI 互換 API Gateway。Cloudflare Workers + Durable Objects + D1 で構成される。
+
+詳細設計は [SPEC.md](./SPEC.md) を参照。
+
+## アーキテクチャ概要
+
+```text
+Client (OpenCode / AI Agent / MCP / Apps)
+        │  Authorization: Bearer octg_sk_*
+        ▼
+Cloudflare Worker (OpenAI 互換 API)
+        │  認証 → ポリシー解決 → モデル分類 → Tool-use 判定
+        │  → トークン推定 → reservation 要求
+        ▼
+Durable Object: QuotaController (pool × UTC 日)
+        │  reserve / settle / markUncertain（単一スレッドで直列化）
+        ▼ (permit 後のみ)
+Cloudflare AI Gateway (REST)
+        │  BYOK + Secrets Store / metadata / cache (opt-in) / Spend Limit (二次防御)
+        ▼
+OpenAI API (Project A: shared-free, Data Sharing ON)
+
+Worker ──非同期──► D1（監査・履歴・レジストリ・ポリシー・reconciliation）
+Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
+```
+
+### 設計原則
+
+1. AI Gateway Spend Limit を無料枠カウンターとして信用しない
+2. Durable Object で request 前 reservation を行う
+3. actual usage で reservation を精算する
+4. 不確実な request は消費済みとして扱う（fail-closed）
+5. Paid fallback は明示的 opt-in がない限り発生させない
 
 ## 開発
 
@@ -40,9 +71,27 @@ npx wrangler d1 execute octg --local --file /tmp/octg-seed.sql
 
 `OCTG_KEY_PEPPER` の変更は通常の Secret ローテーションと分離して扱う。旧 pepper との併用期間を設けて段階的に全キーを再発行するか、全クライアントの `key_hash` を新 pepper で移行してから旧 pepper を無効化する。単純な即時変更は既存キーを無効化するため避ける。
 
+## エンドポイント一覧（MVP）
+
+```text
+POST /v1/responses          # OpenAI 互換（予約・精算つき）
+POST /v1/chat/completions   # OpenAI 互換（同上）
+GET  /v1/models             # 互換 endpoint（registry から生成し client policy で絞る）
+GET  /quota                 # pool 状態の可視化（クライアントキー認証必須）
+GET  /admin/quota           # 以下 Admin API（Cloudflare Access 必須）
+GET  /admin/usage
+GET  /admin/clients
+GET  /admin/models
+PUT  /admin/clients/:id/policy
+PUT  /admin/models/:model
+POST /admin/reconcile
+```
+
+`/v1/embeddings`・`/v1/audio/*`・`/v1/images/*` は将来対応。
+
 ## 既知の限界
 
-課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御（設計書 §15）。監査ログは best-effort で配送欠損を許容する（authoritative な制御は DO が担う）。
+課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御（詳細は SPEC.md §15 参照）。監査ログは best-effort で配送欠損を許容する（authoritative な制御は DO が担う）。
 
 ## 今回のレビューで未対応とした項目
 

@@ -2,7 +2,7 @@
 
 **Version:** 1.1
 **作成日:** 2026-08-09
-**基盤要件:** [REQUIREMENTS.md](../../../REQUIREMENTS.md) v1.0
+**基盤要件:** [REQUIREMENTS.md](./REQUIREMENTS.md) v1.0
 **スコープ:** Phase 1 (MVP) のみ。Phase 2 / Phase 3 は本書では実装対象外とし、拡張を妨げない設計上の配慮のみ記述する。
 
 ---
@@ -167,6 +167,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
   - `remaining <= 20%`: `max(512, estimatedInput * 0.05)`
   - `remaining <= 5%` : strict モード（要件第 28 章）
 - 予約量 = `estimated_input + max_output_tokens + safety_margin`。
+- **max_output_tokens の既定値**: クライアントが max output を指定しない場合、`DEFAULT_MAX_OUTPUT_TOKENS = 4096` を既定値として適用する。**上流にもこの値を注入する**（未指定 = 実質無制限の出力は reservation 不可能なため、MVP では fail-closed 側に倒す）。
 - **非テキスト入力の扱い（MVP）**: `/v1/responses` および `/v1/chat/completions` の予約処理で `input_image`・`input_audio` など非テキストのモダリティを検出した場合、tokenizer 推定が成立しないため**予約前に明示的に拒否**する（エラー契約は 5.7 の `invalid_request` を使用）。将来対応としてモダリティ別の保守的上限を `estimated_input` へ加算する方式を採る場合は、モダリティごとの上限表を本書に追加し、過少計上を防ぐ。
 - tokenizer 未知のモデルは UTF-8 バイト数等から保守的上限を使用する。
 
@@ -190,32 +191,12 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 3. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
 4. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。
 5. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
+6. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
 
 ### 5.7 レスポンスとエラー
 
 - 要件第 29 章の `X-OCTG-*` ヘッダを付加（pool, limit, used, remaining, reset, route, request-id）。エラー応答にも同じヘッダを付すが、**pool が確定する前のエラー**（401 認証エラー、および 5.2 のモデル分類で STANDARD / MINI に分類されず pool が確定しなかった 403 モデル不許可・400 バリデーションエラー等）では pool 系ヘッダ（pool, limit, used, remaining, reset, route）は付与せず、`X-OCTG-Request-Id` のみを返す。一方、pool 確定後のエラー（429 無料枠不足・413 リクエスト過大など quota 判定に至ったもの）では pool 系ヘッダを全て付与し、`X-OCTG-Quota-Used` は pool 全体の confirmed+reserved+uncertain とする。
-- エラーコード（要件第 37 章。OpenAI SDK 互換の `{ error: { message, type, param, code } }` 形式に統一し、`request_id` は応答 body トップレベルに付与）:
-
-- **エラー body の共通契約**: `message`、`type`、`param`、`code` は必須キーとし、`param` が対象外の場合も `null` を返す。`message` は下表の固定値を使用する。テスト・クライアントロジックは原則として `message` ではなく `error.type` / `error.code` / HTTP status を参照するが、固定値はログ・互換性確認用の契約として扱う。
-- **pool 系ヘッダの値**: pool が確定したエラーでは、`X-OCTG-Pool` は小文字の `standard` / `mini`、`X-OCTG-Quota-Limit` は対象 DO の `limit`、`X-OCTG-Quota-Used` は `confirmedTokens + reservedTokens + uncertainTokens`、`X-OCTG-Quota-Remaining` は DO が返す `remaining`、`X-OCTG-Quota-Reset` は次の UTC 00:00 の RFC 3339 timestamp とする。`X-OCTG-Request-Id` は body の `request_id` と同一値にする。
-- **エラー別 route**: `429` は `reject:complimentary_quota`、`413` は `reject:request_too_large`、pool が確定した `403 model_not_allowed` は `reject:model_not_allowed` とする。pool が確定しないエラーでは `X-OCTG-Route` を含む pool 系ヘッダを付与しない。
-
-- 429 無料枠不足の完全な応答例（`pool` / `remaining_tokens` / `reset_at` は `error` オブジェクト**内**に置く。要件第 37 章の例と同一の構造）:
-
-```json
-{
-  "error": {
-    "message": "Complimentary quota exceeded for pool 'standard'.",
-    "type": "complimentary_quota_exceeded",
-    "param": null,
-    "code": "insufficient_quota",
-    "pool": "standard",
-    "remaining_tokens": 12500,
-    "reset_at": "2026-08-10T00:00:00Z"
-  },
-  "request_id": "req_01J4ZK8M2E5KQ0W0A2N1F9P3B2"
-}
-```
+- エラーコード（要件第 37 章。OpenAI SDK 互換の `{ error: { message, type, param, code } }` 形式に統一し、`request_id` は応答 body トップレベルに付与）：
 
 | 状況 | HTTP | `error.message` | `error.type` / `error.code` | `param` | pool 系ヘッダ | 補足 |
 |------|------|-------------------|------------------------------|---------|----------------|------|
@@ -226,7 +207,9 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 | 非テキスト入力（MVP 未対応） | `400` | `Non-text input is not supported in the MVP.` | `invalid_request_error` / `invalid_request` | `input` | 付与しない | 5.4 の予約前拒否。 |
 | `max_tokens` / `max_completion_tokens` 衝突 | `400` | `max_tokens and max_completion_tokens must match when both are provided.` | `invalid_request_error` / `invalid_request` | `max_tokens` | 付与しない | 5.4 の正規化規則。 |
 
-いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
+- **エラー body の共通契約**: `message`、`type`、`param`、`code` は必須キーとし、`param` が対象外の場合も `null` を返す。`message` は上表の固定値を使用する。テスト・クライアントロジックは原則として `message` ではなく `error.type` / `error.code` / HTTP status を参照するが、固定値はログ・互換性確認用の契約として扱う。
+- **pool 系ヘッダの値**: pool が確定したエラーでは、`X-OCTG-Pool` は小文字の `standard` / `mini`、`X-OCTG-Quota-Limit` は対象 DO の `limit`、`X-OCTG-Quota-Used` は `confirmedTokens + reservedTokens + uncertainTokens`、`X-OCTG-Quota-Remaining` は DO が返す `remaining`、`X-OCTG-Quota-Reset` は次の UTC 00:00 の RFC 3339 timestamp とする。`X-OCTG-Request-Id` は body の `request_id` と同一値にする。
+- **エラー別 route**: `429` は `reject:complimentary_quota`、`413` は `reject:request_too_large`、pool が確定した `403 model_not_allowed` は `reject:model_not_allowed` とする。pool が確定しないエラーでは `X-OCTG-Route` を含む pool 系ヘッダを付与しない。
 
 4 条件の canonical response は以下のとおりとする（`request_id`、pool の残量、reset 時刻、ヘッダ値はリクエストごとの実値に置換する）。
 
@@ -282,6 +265,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 ```
 
 > **要件第 37 章との差分メモ**: 要件の例は `error.type` に具体的コードを置く形式で示しているが、本設計では OpenAI SDK のコード分類体系（`type` = 理由コード、`code` = カテゴリ）に統一した。要件どおり「SDK 互換性を考慮した最終決定」の結論である。要件が候補として示した `413 / 422` は `413`、`402 / 403` は `403` を採用する。
+- いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
 - 監査ログの D1 への非同期書き込みは `ctx.waitUntil()` を用いた fire-and-forget とし、レスポンスレイテンシ目標 p50 < 50ms / p95 < 150ms（要件第 42 章）を阻害しない。**配送保証は best-effort とし、Worker 障害・同時実行制限超過時の監査ログ欠損を許容範囲として明示する**。authoritative な制御は DO が担い、監査は証跡用途に限定する（クォータ判定・課金制御を監査ログ到達に依存させない）。完全な配送保証が必要になった場合は、Cloudflare Queues 等の永続配送経路＋コンシューマでの重複排除（request_id 単位の idempotent upsert）への移行を、要件42章レイテンシ目標の再交渉とセットの設計判断として扱う。
 
 ## 6. データ永続化（D1）
