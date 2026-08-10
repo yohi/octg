@@ -34,10 +34,10 @@ export default {
         return await handleProxy(request, env, ctx, "responses");
       }
       if (request.method === "GET" && url.pathname === "/v1/models") {
-        return handleModels(request, env);
+        return await handleModels(request, env);
       }
       if (request.method === "GET" && url.pathname === "/quota") {
-        return handleQuota(request, env, `req_${ulid()}`);
+        return await handleQuota(request, env, `req_${ulid()}`);
       }
     } catch {
       return errorResponse(errInternal(`req_${crypto.randomUUID()}`));
