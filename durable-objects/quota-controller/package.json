@@ -1,0 +1,10 @@
+{
+  "name": "@octg/quota-controller",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/quota-controller.ts" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json" },
+  "dependencies": { "@octg/shared": "*" },
+  "devDependencies": { "@cloudflare/workers-types": "^4.20250617.0" }
+}

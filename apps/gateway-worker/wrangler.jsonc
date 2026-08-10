@@ -1,0 +1,23 @@
+{
+  "name": "octg-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "QUOTA_LIMIT_STANDARD": "1000000",
+    "QUOTA_LIMIT_MINI": "10000000"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["QuotaController"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "octg",
+      "database_id": "42ffaeac-6bc2-431b-a5c1-a8016fae8b4f",
+      "migrations_dir": "../../db/migrations"
+    }
+  ],
+  "triggers": { "crons": ["5 0 * * *"] }
+}
