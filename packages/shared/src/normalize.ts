@@ -139,7 +139,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
       maxOutputTokens:
         value.max_output_tokens === undefined ? DEFAULT_MAX_OUTPUT_TOKENS : positiveInteger(value.max_output_tokens) ?? 0,
       stream: value.stream === true,
-      isToolUse: Array.isArray(value.input) ? isToolUse : false,
+      isToolUse: hasToolUse(value) || isToolUse,
     },
   };
 }

@@ -176,6 +176,21 @@ describe("normalizeResponses", () => {
     });
   });
 
+  it("marks top-level response tool declarations as paid-only", () => {
+    expect(normalizeResponses({ model: "gpt-5", input: "hi", tools: [] })).toEqual({
+      ok: true,
+      value: {
+        endpoint: "responses",
+        model: "gpt-5",
+        inputText: "hi",
+        messageCount: 1,
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        stream: false,
+        isToolUse: true,
+      },
+    });
+  });
+
   it.each([0, -1, 1.5, "50"]) (
     "rejects explicitly invalid max_output_tokens: %s",
     (maxOutputTokens) => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { decideOutput, estimateInputTokens, safetyMargin, upperBoundOf } from "../src/index";
 
 describe("estimateInputTokens", () => {
@@ -14,6 +14,18 @@ describe("estimateInputTokens", () => {
     // When: each input is estimated.
     // Then: the multi-message request has a larger reservation.
     expect(estimateInputTokens("abcabcabc", 3)).toBeGreaterThan(estimateInputTokens("abc", 1));
+  });
+
+  it("uses the full UTF-8 byte length when encoding lookup fails", async () => {
+    vi.resetModules();
+    vi.doMock("js-tiktoken", () => ({
+      getEncoding: () => {
+        throw new Error("encoding unavailable");
+      },
+    }));
+
+    const { estimateInputTokens: estimateWithFallback } = await import("../src/estimate");
+    expect(estimateWithFallback("あ", 0)).toBe(new TextEncoder().encode("あ").length + 3);
   });
 });
 
