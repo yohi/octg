@@ -1,7 +1,25 @@
 import { DurableObject } from "cloudflare:workers";
 import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
-import type { QuotaView, ReserveResult } from "@octg/shared";
-import { getEntry, loadPool, putEntry, savePool } from "./store";
+import type {
+  FinalizeResult,
+  MarkUncertainResult,
+  QuotaView,
+  ReconcileDisposition,
+  ReconcileResult,
+  ReleaseResult,
+  ReserveResult,
+  SettleResult,
+} from "@octg/shared";
+import { QuotaLifecycle } from "./quota-lifecycle";
+import {
+  getEntry,
+  FINALIZE_KEY,
+  loadPool,
+  loadUnresolved,
+  putEntry,
+  savePool,
+  saveUnresolved,
+} from "./store";
 import type { QuotaIdentity } from "./store";
 
 export interface QuotaControllerEnv {
@@ -69,6 +87,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         throw new TypeError(`Request ${requestId} has no saved reserve result.`);
       }
 
+      if (await storage.get<boolean>(FINALIZE_KEY)) {
+        return { ok: false, reason: "insufficient_quota", remaining: 0, resetAt };
+      }
+
       const state = await loadPool(storage, this.env, { pool, utcDay });
       const remaining = remainingOf(state);
       const hasCapacity = tokens <= remaining;
@@ -84,6 +106,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         resetAt,
       };
       const now = new Date().toISOString();
+      const unresolved = await loadUnresolved(storage);
       await savePool(storage, {
         ...state,
         reservedTokens: state.reservedTokens + tokens,
@@ -98,7 +121,49 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         createdAt: now,
         updatedAt: now,
       });
+      await saveUnresolved(storage, {
+        ...unresolved,
+        reservedCount: unresolved.reservedCount + 1,
+      });
       return result;
+    });
+  }
+
+  async settle(requestId: string, actualTokens: number): Promise<SettleResult> {
+    if (!Number.isSafeInteger(actualTokens) || actualTokens < 0) {
+      throw new TypeError("Actual tokens must be a non-negative safe integer.");
+    }
+    return this.lifecycle.settle(requestId, actualTokens);
+  }
+
+  async markUncertain(requestId: string): Promise<MarkUncertainResult> {
+    return this.lifecycle.markUncertain(requestId);
+  }
+
+  async release(requestId: string): Promise<ReleaseResult> {
+    return this.lifecycle.release(requestId);
+  }
+
+  async reconcileRequest(
+    requestId: string,
+    disposition: ReconcileDisposition,
+  ): Promise<ReconcileResult> {
+    if (disposition !== "consumed" && disposition !== "unused") {
+      throw new TypeError("Reconcile disposition must be consumed or unused.");
+    }
+    return this.lifecycle.reconcileRequest(requestId, disposition);
+  }
+
+  async finalizeDay(): Promise<FinalizeResult> {
+    return this.lifecycle.finalizeDay();
+  }
+
+  private get lifecycle(): QuotaLifecycle {
+    return new QuotaLifecycle({
+      storage: this.ctx.storage,
+      env: this.env,
+      quotaId: this.ctx.id.name,
+      identityOf: () => this.identity,
     });
   }
 

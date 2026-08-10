@@ -3,10 +3,18 @@ import type { PoolName, PoolState, RequestEntry } from "@octg/shared";
 
 export const POOL_KEY = "pool";
 export const ENTRY_PREFIX = "req:";
+export const UNRESOLVED_KEY = "unresolved";
+export const FINALIZE_KEY = "finalized";
+
+export interface UnresolvedState {
+  readonly uncertainCount: number;
+  readonly reservedCount: number;
+}
 
 interface QuotaStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
+  list<T>(options?: { readonly prefix?: string }): Promise<Map<string, T>>;
 }
 
 export interface QuotaEnvLike {
@@ -64,4 +72,20 @@ export async function putEntry(
     ...entry,
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function loadUnresolved(storage: QuotaStorage): Promise<UnresolvedState> {
+  return (
+    (await storage.get<UnresolvedState>(UNRESOLVED_KEY)) ?? {
+      uncertainCount: 0,
+      reservedCount: 0,
+    }
+  );
+}
+
+export async function saveUnresolved(
+  storage: QuotaStorage,
+  state: UnresolvedState,
+): Promise<void> {
+  await storage.put(UNRESOLVED_KEY, state);
 }
