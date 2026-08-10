@@ -57,6 +57,12 @@ export async function completeRequestRow(env: Env, requestId: string, fields: Re
     .run();
 }
 
+export async function setReservedTokens(env: Env, requestId: string, reservedTokens: number): Promise<void> {
+  await env.DB.prepare("UPDATE requests SET reserved_tokens = ? WHERE request_id = ?")
+    .bind(reservedTokens, requestId)
+    .run();
+}
+
 export async function listRegistryRows(env: Env): Promise<RegistryEntry[]> {
   const result = await env.DB.prepare(
     "SELECT model, provider, complimentary_pool, enabled, fallback_model FROM model_registry",

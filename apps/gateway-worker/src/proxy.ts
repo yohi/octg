@@ -26,7 +26,7 @@ import {
 } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import { authenticate } from "./auth";
-import { completeRequestRow, insertRequestRow } from "./db";
+import { completeRequestRow, insertRequestRow, setReservedTokens } from "./db";
 import { loadPolicy, loadRegistry } from "./policy";
 import { buildUpstreamBody, callUpstream, UpstreamConfigError } from "./upstream";
 import type { Env } from "./index";
@@ -135,6 +135,7 @@ export async function handleProxy(
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
   }
+  ctx.waitUntil(setReservedTokens(env, requestId, reservation));
 
   let upstream: Response;
   try {
@@ -181,14 +182,18 @@ export async function handleProxy(
   }
   const usage = data.usage;
   if (typeof usage?.total_tokens === "number") {
-    await stub.settle(requestId, usage.total_tokens);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, {
-      status: "completed",
-      inputTokens: usage.prompt_tokens,
-      outputTokens: usage.completion_tokens,
-      totalTokens: usage.total_tokens,
-      billingClass: "free",
-    }));
+    const settled = await stub.settle(requestId, usage.total_tokens);
+    if (!settled.ok && settled.reason === "unknown_request") {
+      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "orphaned", billingClass: "none" }));
+    } else {
+      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, {
+        status: "completed",
+        inputTokens: usage.prompt_tokens,
+        outputTokens: usage.completion_tokens,
+        totalTokens: usage.total_tokens,
+        billingClass: "free",
+      }));
+    }
   } else {
     await stub.markUncertain(requestId);
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
@@ -219,7 +224,12 @@ export function proxyStream(
     if (finalized) return;
     finalized = true;
     if (typeof usage?.total_tokens === "number") {
-      await stub.settle(requestId, usage.total_tokens);
+      const settled = await stub.settle(requestId, usage.total_tokens);
+      if (!settled.ok && settled.reason === "unknown_request") {
+        await inserted;
+        await completeRequestRow(env, requestId, { status: "orphaned", billingClass: "none" });
+        return;
+      }
       await inserted;
       await completeRequestRow(env, requestId, {
         status: "completed",
