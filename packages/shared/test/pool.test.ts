@@ -71,6 +71,12 @@ describe("pool utils", () => {
     expect(tierOf(50_000, 1_000_000)).toBe("STRICT");
   });
 
+  it("tierOf returns STRICT for invalid limits or remaining values", () => {
+    expect(tierOf(0, 0)).toBe("STRICT");
+    expect(tierOf(Number.POSITIVE_INFINITY, 1_000_000)).toBe("STRICT");
+    expect(tierOf(1, Number.POSITIVE_INFINITY)).toBe("STRICT");
+  });
+
   it("utcDayOf / nextUtcMidnight / quotaIdOf / toPoolLower", () => {
     // Given: an instant immediately before UTC midnight.
     // When: shared date, identity, and header utilities are called.

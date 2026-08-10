@@ -16,8 +16,9 @@ npm run dev -w apps/gateway-worker
 
 ```bash
 cd apps/gateway-worker
-OCTG_KEY_PEPPER=dev-pepper node ../../scripts/seed-client.mjs client_demo Demo octg_sk_xxx | \
-  npx wrangler d1 execute octg --local --command -
+printf 'OCTG_KEY_PEPPER=dev-pepper\n' > .dev.vars
+node ../../scripts/seed-client.mjs client_demo Demo octg_sk_xxx > /tmp/octg-seed.sql
+npx wrangler d1 execute octg --local --file /tmp/octg-seed.sql
 ```
 
 ## デプロイ前の必須プロビジョニング（手動）
@@ -36,6 +37,8 @@ OCTG_KEY_PEPPER=dev-pepper node ../../scripts/seed-client.mjs client_demo Demo o
 ## Secret ローテーション
 
 各 Secret は (1) 新規トークン発行 → (2) `wrangler secret put` で設定 → (3) デプロイ / 動作確認 → (4) 旧トークン失効、の順で実施する。Worker コード・ログ・`octg_sk_*` の鍵素材に Secret の値を含めない。
+
+`OCTG_KEY_PEPPER` の変更は通常の Secret ローテーションと分離して扱う。旧 pepper との併用期間を設けて段階的に全キーを再発行するか、全クライアントの `key_hash` を新 pepper で移行してから旧 pepper を無効化する。単純な即時変更は既存キーを無効化するため避ける。
 
 ## 既知の限界
 
