@@ -161,6 +161,31 @@ describe("normalizeResponses", () => {
     });
   });
 
+  it("does not classify literal function_call text as tool use", () => {
+    expect(normalizeResponses({ model: "gpt-5", input: "function_call" })).toEqual({
+      ok: true,
+      value: {
+        endpoint: "responses",
+        model: "gpt-5",
+        inputText: "function_call",
+        messageCount: 1,
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        stream: false,
+        isToolUse: false,
+      },
+    });
+  });
+
+  it.each([0, -1, 1.5, "50"]) (
+    "rejects explicitly invalid max_output_tokens: %s",
+    (maxOutputTokens) => {
+      expect(normalizeResponses({ model: "gpt-5", input: "hello", max_output_tokens: maxOutputTokens })).toEqual({
+        ok: false,
+        error: "invalid_body",
+      });
+    },
+  );
+
   it("rejects image and audio response content before token estimation", () => {
     // Given: response requests containing image and audio parts.
     // When: each request is normalized.

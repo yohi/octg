@@ -102,6 +102,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
 
   let inputText: string;
   let messageCount: number;
+  let isToolUse = false;
   if (typeof value.input === "string") {
     inputText = value.input;
     messageCount = 1;
@@ -110,7 +111,10 @@ export function normalizeResponses(body: unknown): NormalizeResult {
     for (const item of value.input) {
       if (typeof item !== "object" || item === null) return { ok: false, error: "invalid_body" };
       const entry = item as Record<string, unknown>;
-      if (entry.type === "function_call" || entry.type === "function_call_output") continue;
+      if (entry.type === "function_call" || entry.type === "function_call_output") {
+        isToolUse = true;
+        continue;
+      }
       const content = walkContent(entry.content);
       if (!content.ok) return { ok: false, error: "non_text" };
       texts.push(content.text);
@@ -121,6 +125,10 @@ export function normalizeResponses(body: unknown): NormalizeResult {
     return { ok: false, error: "invalid_body" };
   }
 
+  if (value.max_output_tokens !== undefined && positiveInteger(value.max_output_tokens) === undefined) {
+    return { ok: false, error: "invalid_body" };
+  }
+
   return {
     ok: true,
     value: {
@@ -128,9 +136,10 @@ export function normalizeResponses(body: unknown): NormalizeResult {
       model: value.model,
       inputText,
       messageCount,
-      maxOutputTokens: positiveInteger(value.max_output_tokens) ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      maxOutputTokens:
+        value.max_output_tokens === undefined ? DEFAULT_MAX_OUTPUT_TOKENS : positiveInteger(value.max_output_tokens) ?? 0,
       stream: value.stream === true,
-      isToolUse: hasToolUse(value) || JSON.stringify(value).includes('"function_call"'),
+      isToolUse: Array.isArray(value.input) ? isToolUse : false,
     },
   };
 }

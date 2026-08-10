@@ -8,7 +8,7 @@ export function estimateInputTokens(text: string, messageCount: number): number 
     encoding ??= getEncoding("o200k_base");
     base = encoding.encode(text).length;
   } catch {
-    base = Math.ceil(unescape(encodeURIComponent(text)).length / 2);
+    base = new TextEncoder().encode(text).length;
   }
   return base + 4 * messageCount + 3;
 }
