@@ -1,4 +1,6 @@
 import { QuotaController } from "@octg/quota-controller";
+import { handleProxy } from "./proxy";
+import { errInternal, errorResponse } from "@octg/shared";
 
 export { QuotaController };
 
@@ -17,7 +19,18 @@ export interface Env {
 }
 
 export default {
-  async fetch(): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    try {
+      if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+        return await handleProxy(request, env, ctx, "chat");
+      }
+      if (request.method === "POST" && url.pathname === "/v1/responses") {
+        return await handleProxy(request, env, ctx, "responses");
+      }
+    } catch {
+      return errorResponse(errInternal(`req_${crypto.randomUUID()}`));
+    }
     return new Response("Not Found", { status: 404 });
   },
   async scheduled(): Promise<void> {}
