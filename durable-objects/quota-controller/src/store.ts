@@ -4,6 +4,7 @@ import type { PoolName, PoolState, RequestEntry } from "@octg/shared";
 export const POOL_KEY = "pool";
 export const ENTRY_PREFIX = "req:";
 export const UNRESOLVED_KEY = "unresolved";
+export const FINALIZE_KEY = "finalized";
 
 export interface UnresolvedState {
   readonly uncertainCount: number;

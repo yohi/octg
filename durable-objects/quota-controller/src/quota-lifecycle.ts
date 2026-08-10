@@ -10,6 +10,7 @@ import type {
 } from "@octg/shared";
 import {
   getEntry,
+  FINALIZE_KEY,
   loadUnresolved,
   loadPool,
   putEntry,
@@ -250,6 +251,7 @@ export class QuotaLifecycle {
           reservedCount,
         } as const;
       }
+      await storage.put(FINALIZE_KEY, true);
       return { ok: true, deleted: true } as const;
     });
     if (!unresolved.ok) return unresolved;

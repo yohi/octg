@@ -177,6 +177,20 @@ describe("QuotaController.reconcileRequest", () => {
 });
 
 describe("QuotaController.finalizeDay", () => {
+  it("serializes finalization with a concurrent reservation", async () => {
+    const controller = stub("2026-09-25");
+    await controller.reserve("req-f-race-seed", 1_000, 1_000);
+
+    const result = await Promise.all([
+      controller.finalizeDay(),
+      controller.reserve("req-f-race", 1_000, 1_000),
+    ]);
+
+    expect(result).toHaveLength(2);
+    expect(result.some((entry) => entry.ok === false)).toBe(true);
+    expect(result.some((entry) => entry.ok === true)).toBe(true);
+  });
+
   it("refuses deletion while uncertain entries remain", async () => {
     // Given: an unresolved uncertain request.
     const controller = stub("2026-09-18");

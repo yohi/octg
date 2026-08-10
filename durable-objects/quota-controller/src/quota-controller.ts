@@ -13,6 +13,7 @@ import type {
 import { QuotaLifecycle } from "./quota-lifecycle";
 import {
   getEntry,
+  FINALIZE_KEY,
   loadPool,
   loadUnresolved,
   putEntry,
@@ -84,6 +85,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         const result = existing.results.reserve;
         if (result) return result;
         throw new TypeError(`Request ${requestId} has no saved reserve result.`);
+      }
+
+      if (await storage.get<boolean>(FINALIZE_KEY)) {
+        return { ok: false, reason: "insufficient_quota", remaining: 0, resetAt };
       }
 
       const state = await loadPool(storage, this.env, { pool, utcDay });
