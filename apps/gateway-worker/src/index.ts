@@ -42,11 +42,11 @@ export default {
       if (request.method === "GET" && url.pathname === "/quota") {
         return await handleQuota(request, env, `req_${ulid()}`);
       }
+      const admin = await handleAdmin(request, env, `req_${ulid()}`);
+      if (admin) return admin;
     } catch {
       return errorResponse(errInternal(`req_${crypto.randomUUID()}`));
     }
-    const admin = await handleAdmin(request, env, `req_${ulid()}`);
-    if (admin) return admin;
     return new Response("Not Found", { status: 404 });
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

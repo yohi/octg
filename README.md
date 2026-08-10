@@ -43,3 +43,7 @@ npx wrangler d1 execute octg --local --file /tmp/octg-seed.sql
 ## 既知の限界
 
 課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御（設計書 §15）。監査ログは best-effort で配送欠損を許容する（authoritative な制御は DO が担う）。
+
+## 今回のレビューで未対応とした項目
+
+`handleAdmin` のルート別 handler への分割は、今回の修正では実施していない。これは機能不具合ではなく構造改善であり、JWT 検証、入力検証、エラー境界、reconciliation の挙動修正とは独立しているため、変更範囲と回帰リスクを抑える目的で保留した。

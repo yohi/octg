@@ -7,7 +7,7 @@ export async function verifyAccessJwt(request: Request, env: Env, requestId: str
   if (!token) return errInvalidApiKey(requestId);
   try {
     const jwks = env.ACCESS_JWT_PUBLIC_JWK ? createLocalJWKSet(JSON.parse(env.ACCESS_JWT_PUBLIC_JWK)) : createRemoteJWKSet(new URL(`${env.ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`));
-    await jwtVerify(token, jwks, { audience: env.ACCESS_AUD, ...(env.ACCESS_JWT_PUBLIC_JWK ? {} : { issuer: env.ACCESS_TEAM_DOMAIN }) });
+    await jwtVerify(token, jwks, { audience: env.ACCESS_AUD, issuer: env.ACCESS_TEAM_DOMAIN });
     return true;
   } catch {
     return errInvalidApiKey(requestId);
