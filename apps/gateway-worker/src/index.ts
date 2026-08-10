@@ -1,4 +1,5 @@
 import { QuotaController } from "@octg/quota-controller";
+import { handleProxy } from "./proxy";
 
 export { QuotaController };
 
@@ -14,10 +15,19 @@ export interface Env {
   readonly ACCESS_AUD: string;
   readonly OPENAI_USAGE_API_KEY?: string;
   readonly OPENAI_FREE_PROJECT_ID?: string;
+  TEST_UPSTREAM_RESPONSE?: string;
+  TEST_UPSTREAM_STATUS?: string;
 }
 
 export default {
-  async fetch(): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+      return handleProxy(request, env, ctx, "chat");
+    }
+    if (request.method === "POST" && url.pathname === "/v1/responses") {
+      return handleProxy(request, env, ctx, "responses");
+    }
     return new Response("Not Found", { status: 404 });
   },
   async scheduled(): Promise<void> {}
