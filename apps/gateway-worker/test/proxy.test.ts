@@ -1,12 +1,11 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { seedClient, seedPolicy, TEST_CLIENT_ID, TEST_CLIENT_KEY } from "./seed";
 import { invalidateConfigCaches } from "../src/policy";
 
 beforeEach(async () => {
-  env.TEST_UPSTREAM_STATUS = "200";
-  env.TEST_UPSTREAM_RESPONSE = undefined;
   await seedClient();
+  vi.restoreAllMocks();
 });
 
 const todayStub = () => {
@@ -23,10 +22,10 @@ const authed = (body: unknown, key = TEST_CLIENT_KEY) =>
 
 describe("proxy pipeline", () => {
   it("settles actual usage and returns quota headers", async () => {
-    env.TEST_UPSTREAM_RESPONSE = JSON.stringify({
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
       id: "chatcmpl-1",
       usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
-    });
+    }), { status: 200, headers: { "content-type": "application/json" } }));
     const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 });
     expect(response.status).toBe(200);
     expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
@@ -37,9 +36,23 @@ describe("proxy pipeline", () => {
   });
 
   it("normalizes upstream output and sends AI Gateway controls", async () => {
-    env.TEST_UPSTREAM_RESPONSE = JSON.stringify({ usage: { total_tokens: 10 } });
-    expect(await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_tokens: 200 })).toHaveProperty("status", 200);
-    expect(TEST_CLIENT_ID).toBe("client_test");
+    let upstreamBody: Record<string, unknown> | undefined;
+    let upstreamHeaders: Headers | undefined;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      upstreamHeaders = new Headers(init?.headers);
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_tokens: 200 });
+    expect(response.status).toBe(200);
+    expect(upstreamBody?.max_completion_tokens).toBeTypeOf("number");
+    expect(upstreamBody?.max_tokens).toBeUndefined();
+    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
+    expect(upstreamHeaders?.get("cf-aig-metadata")).toContain("client_test");
+    expect(upstreamHeaders?.get("cf-aig-cache-key")).toBeNull();
   });
 
   it("rejects unknown models and tool requests before reservation", async () => {
@@ -64,7 +77,14 @@ describe("proxy pipeline", () => {
     invalidateConfigCaches();
     const state = todayStub();
     await state.reserve("seed-clamp", 900_000, 900_000);
-    env.TEST_UPSTREAM_RESPONSE = JSON.stringify({ usage: { total_tokens: 10 } });
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { max_completion_tokens: number };
+      expect(body.max_completion_tokens).toBeLessThan(500_000);
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
     const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 500_000 });
     expect(response.status).toBe(200);
   });
