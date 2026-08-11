@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import { existsSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
 const node = process.execPath;
 const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
@@ -40,7 +42,8 @@ function run(command, commandArgs) {
   }
 }
 
-const sqlPath = `/tmp/octg-seed-${process.pid}.sql`;
+const tempDir = mkdtempSync(`${tmpdir()}/octg-seed-`);
+const sqlPath = `${tempDir}/seed.sql`;
 try {
   const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, id, name, clientKey], {
     cwd: root,
@@ -54,7 +57,7 @@ try {
   writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
   run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
 } finally {
-  if (existsSync(sqlPath)) unlinkSync(sqlPath);
+  rmSync(tempDir, { recursive: true, force: true });
 }
 
 console.log(`\n本番クライアントを登録しました: ${clientKey}`);

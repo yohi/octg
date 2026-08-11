@@ -138,10 +138,10 @@ npm run setup:deploy
 |---|---|---|---|
 | D1 `database_id` | `42ffaeac-...` | 2.3 の D1 ダッシュボード | ✓ |
 | `OCTG_UPSTREAM_BASE_URL` | AI Gateway URL | 2.4 の Gateway 詳細 | ✓ |
-| `ACCESS_TEAM_DOMAIN` | `your-team.cloudflareaccess.com` | 2.5 の Access アプリ Overview | Admin API 保護時 |
-| `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | Admin API 保護時 |
+| `ACCESS_TEAM_DOMAIN` | `your-team.cloudflareaccess.com` | 2.5 の Access アプリ Overview | ✓ |
+| `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | ✓ |
 
-初回デプロイ時は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を空にして実行できます。Admin API（`/admin/*`）の保護は Worker デプロイ後に 2.5 の手順で Access アプリを作成し、取得した値を設定してから `setup:deploy` を再実行するか、`wrangler.jsonc` を手動で更新して `npx wrangler deploy` し直してください。
+`setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定がすべて入力されている場合にのみ実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順で Access アプリを作成し、取得した値を入力してください。
 その後、`wrangler secret put` を使って **3 つの Secret を順番に入力**します。順序は以下の通りです。
 
 | 順 | Secret | 入力する値 | 取得場所 |
@@ -198,10 +198,10 @@ OCTG_KEY_PEPPER=<your-production-pepper> \
 npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
 ```
 
-または、より簡単に `npm run seed:client:remote` を使用します。`--key` を省略すると、`octg_sk_remote_` 形式のランダムなダミーキーを自動生成して本番 D1 に登録します。
+または、より簡単に `npm run seed:client:remote` を使用します。`--key` を省略すると、`octg_sk_remote_` 形式のランダムな本番クライアントキーを自動生成して本番 D1 に登録します。
 
 ```bash
-# ダミーキーを自動生成する場合
+# 本番クライアントキーを自動生成する場合
 OCTG_KEY_PEPPER=<your-production-pepper> \
   npm run seed:client:remote -- --id=client_demo --name=DemoClient
 
@@ -251,17 +251,9 @@ API Key:  <発行された octg_sk_xxx>
 
 > **注意**: 2.5 で作成した **Cloudflare Access 保護ドメイン（例: `octg-admin.yourdomain.com`）は Admin API（`/admin/*`）専用**です。クライアント API（`/v1/*`、`/quota`）の呼び出しには **Worker のメイン URL**（`*.workers.dev` またはクライアント API 用に別途設定したカスタムドメイン）を使用してください。Access 保護ドメインにクライアント API を向けると、ログイン画面へ 302 リダイレクトされて正常に応答しません。
 
-### 6.4 Admin API の保護（まだの場合）
+### 6.4 Admin API の保護
 
-`setup:deploy` 時に `ACCESS_TEAM_DOMAIN` と `ACCESS_AUD` を空にした場合、Admin API（`/admin/*`）はまだ Cloudflare Access で保護されていません。必要なら以下を実施してください。
-
-1. 2.5 の手順で Cloudflare Access アプリを作成する。
-2. `apps/gateway-worker/wrangler.jsonc` の `vars` に取得した値を設定する。
-3. 以下を実行して再デプロイする。
-
-    ```bash
-    npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
-    ```
+`setup:deploy` は `ACCESS_TEAM_DOMAIN` と `ACCESS_AUD` が未設定の場合に中断します。まだ Cloudflare Access アプリを作成していない場合は、2.5 の手順で作成し、取得した値を入力してから再実行してください。
 
 ### 6.5 監視・運用
 

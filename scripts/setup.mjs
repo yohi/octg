@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
 const node = process.execPath;
 const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
@@ -61,6 +63,12 @@ function updateConfig(values) {
   writeFileSync(`${root}/${config}`, source);
 }
 
+function validateDeployValue(name, value) {
+  if (!value.trim() || /<[^>]+>/.test(value)) {
+    throw new Error(`${name} は実際の設定値を入力してください（空値や <...> プレースホルダーは使用できません）`);
+  }
+}
+
 async function prompt(question, defaultValue) {
   const rl = createInterface({ input, output });
   const answer = await rl.question(`${question}${defaultValue ? ` [${defaultValue}]` : ""}: `);
@@ -90,7 +98,8 @@ async function setupLocal() {
   writeFileSync(varsPath, vars, { mode: 0o600 });
   run(node, [wrangler, "d1", "migrations", "apply", "octg", "--local", "--config", config]);
 
-  const sqlPath = `/tmp/octg-seed-${process.pid}.sql`;
+  const tempDir = mkdtempSync(`${tmpdir()}/octg-seed-`);
+  const sqlPath = `${tempDir}/seed.sql`;
   try {
     const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, clientId, clientName, clientKey], {
       cwd: root,
@@ -101,7 +110,7 @@ async function setupLocal() {
     writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
     run(node, [wrangler, "d1", "execute", "octg", "--local", "--file", sqlPath, "--config", config]);
   } finally {
-    if (existsSync(sqlPath)) unlinkSync(sqlPath);
+    rmSync(tempDir, { recursive: true, force: true });
   }
 
   console.log(`\nローカルセットアップが完了しました。開発用 API キー: ${clientKey}`);
@@ -112,11 +121,14 @@ async function setupDeploy() {
   console.log("本番環境の設定を開始します。Cloudflare にログイン済みであることを確認してください。\n");
   const databaseId = await prompt("D1 database_id", "");
   const upstream = await prompt("OCTG_UPSTREAM_BASE_URL", "");
-  const teamDomain = await prompt("ACCESS_TEAM_DOMAIN (空でも可、後から設定可)", "");
-  const audience = await prompt("ACCESS_AUD (空でも可、後から設定可)", "");
-  if (!databaseId || !upstream) {
-    throw new Error("D1 database_id と upstream URL は必須です");
+  const teamDomain = await prompt("ACCESS_TEAM_DOMAIN", "");
+  const audience = await prompt("ACCESS_AUD", "");
+  if (!databaseId) {
+    throw new Error("D1 database_id は必須です");
   }
+  validateDeployValue("OCTG_UPSTREAM_BASE_URL", upstream);
+  validateDeployValue("ACCESS_TEAM_DOMAIN", teamDomain);
+  validateDeployValue("ACCESS_AUD", audience);
 
   updateConfig({
     database_id: databaseId,
@@ -131,10 +143,6 @@ async function setupDeploy() {
   run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config]);
   run(node, [wrangler, "deploy", "--config", config]);
   console.log("\n本番セットアップが完了しました。");
-  if (!teamDomain || !audience) {
-    console.log("ACCESS_TEAM_DOMAIN / ACCESS_AUD が未設定のため、Admin API はまだ保護されていません。");
-    console.log("Worker デプロイ後に Cloudflare Access アプリを作成し、再度 setup:deploy するか手動で vars を更新してください。");
-  }
   console.log("クライアントキーは seed:client で発行してください。");
 }
 
