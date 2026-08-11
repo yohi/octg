@@ -4,6 +4,8 @@ OpenAI Data Sharing Program (Tier 3) の無料枠を複数クライアントで�
 
 詳細設計は [SPEC.md](./SPEC.md) を参照。
 
+[![Use this template](https://img.shields.io/badge/Use%20this%20template-yohi/octg-blue)](https://github.com/yohi/octg/generate)
+
 ## アーキテクチャ概要
 
 ```text
@@ -34,23 +36,104 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 4. 不確実な request は消費済みとして扱う（fail-closed）
 5. Paid fallback は明示的 opt-in がない限り発生させない
 
-## 開発
+## テンプレートから新規作成
+
+本リポジトリは [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。`git clone` せずに、以下の手順で独自の Gateway インスタンスを構築できます。
+
+1. 上部の **Use this template** バッジ（または [Generate from template](https://github.com/yohi/octg/generate)）をクリックします。
+2. 新しいリポジトリ名・所有者・可視性を入力し、**Create repository from template** をクリックします。
+3. 生成されたリポジトリをローカルに展開（`git clone <your-new-repo>` または GitHub Codespaces）します。
+4. 以下のセットアップ手順に沿って `npm install` 以降を実施してください。
+5. Cloudflare リソース（D1・AI Gateway・Access）の作成と Secret 設定は [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md) を参照してください。
+
+> Template repository の留意点: フォークと異なり upstream との同期は自動で行われません。本リポジトリ側で修正が入った場合は、必要に応じて手動で取り込みます。
+
+---
+
+## セットアップ（インストール）
+
+本リポジトリは npm workspaces で構成されています。Cloudflare Workers 向けのため、`wrangler` が各 workspace の devDependency として同梱されています（別途グローバルインストール不要）。
+
+### 前提条件
+
+- **Node.js** `>= 20`（`engines` 参照）
+- **npm** `>= 10`（Node.js 20 同梱版で動作確認）
+- **Cloudflare アカウント**（デプロイ・D1・Durable Objects・AI Gateway を利用する場合）
+- ローカル開発のみであれば Cloudflare アカウントは不要（`wrangler dev` のローカルモードで動作）
+
+### 1. リポジトリの取得
+
+```bash
+git clone <repo-url> octg
+cd octg
+```
+
+### 2. 依存関係のインストール
+
+ルートで一度実行すると、全 workspace（`apps/*`, `durable-objects/*`, `packages/*`）の依存関係が揃います。`wrangler`・`vitest`・`typescript` などもここでインストールされます。
 
 ```bash
 npm install
-npm test            # 全ワークスペース (Vitest + @cloudflare/vitest-pool-workers)
-npm run typecheck
-npm run dev -w apps/gateway-worker
 ```
 
-ローカル用クライアント発行:
+> **Tip:** `engines` で Node.js 20+ を要求しています。`.nvmrc` 等の管理を推奨します。`node -v` でバージョンを確認してください。
+
+### 3. ローカル環境変数の準備（任意・ローカル開発時）
+
+`apps/gateway-worker/.dev.vars` に Secrets のローカル値を置きます。本番の `wrangler secret` とは別物で、`wrangler dev` 時のみ参照されます。
 
 ```bash
 cd apps/gateway-worker
-printf 'OCTG_KEY_PEPPER=dev-pepper\n' > .dev.vars
-node ../../scripts/seed-client.mjs client_demo Demo octg_sk_xxx > /tmp/octg-seed.sql
-npx wrangler d1 execute octg --local --file /tmp/octg-seed.sql
+cat > .dev.vars <<'EOF'
+OCTG_KEY_PEPPER=dev-pepper
+OCTG_UPSTREAM_BASE_URL=https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>
+OCTG_UPSTREAM_API_TOKEN=dev-token
+OPENAI_USAGE_API_KEY=dev-usage-key
+EOF
 ```
+
+`.dev.vars` は `.gitignore` 対象です（ Secrets の値を commit しないこと）。
+
+### 4. ローカル D1 のマイグレーション
+
+`wrangler dev` は初回起動時にローカル D1 を自動作成しますが、スキーマを明示的に当てる場合は以下を実行します。
+
+```bash
+npx wrangler d1 migrations apply octg --local --config apps/gateway-worker/wrangler.jsonc
+```
+
+### 5. ローカル用クライアント鍵の発行
+
+クライアントキーは keyed hash で D1 に保存します。`scripts/seed-client.mjs` が `INSERT` 文を生成するので、ローカル D1 に流してください。
+
+```bash
+OCTG_KEY_PEPPER=dev-pepper node scripts/seed-client.mjs client_demo Demo octg_sk_xxx > /tmp/octg-seed.sql
+npx wrangler d1 execute octg --local --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+```
+
+### 6. 動作確認
+
+```bash
+npm run typecheck   # 全 workspace の型検査
+npm test            # 全 workspace のユニットテスト (Vitest + @cloudflare/vitest-pool-workers)
+npm run dev -w apps/gateway-worker   # ローカルで Worker 起動 (http://localhost:8787)
+```
+
+ここまででローカル開発環境の準備は完了です。本番デプロイ手順は [§ デプロイ前の必須プロビジョニング](#デプロイ前の必須プロビジョニング手動) を参照してください。
+
+---
+
+## 開発
+
+セットアップ済みの環境での日次開発コマンド:
+
+```bash
+npm test            # 全ワークスペース (Vitest + @cloudflare/vitest-pool-workers)
+npm run typecheck
+npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
+```
+
+初回の環境構築手順は [§ セットアップ（インストール）](#セットアップインストール) を参照してください。
 
 ## デプロイ前の必須プロビジョニング（手動）
 
