@@ -7,6 +7,8 @@ import { stdin as input, stdout as output } from "node:process";
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
+const node = process.execPath;
+const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
 const args = process.argv.slice(2);
 const mode = args[0];
 const force = args.includes("--force");
@@ -43,11 +45,12 @@ function run(command, commandArgs, options = {}) {
 }
 
 function replaceJsoncValue(source, key, value) {
-  const pattern = new RegExp(`(\\"${key}\\"\\s*:\\s*)\\"[^\\"]*\\"`);
+  const pattern = new RegExp(String.raw`("${key}"\s*:\s*)"[^"]*"`);
   if (!pattern.test(source)) {
     throw new Error(`${config} に ${key} がありません`);
   }
-  return source.replace(pattern, (_match, prefix) => `${prefix}${JSON.stringify(value)}`);
+  const replacement = JSON.stringify(value);
+  return source.replace(pattern, (_match, prefix) => prefix + replacement);
 }
 
 function updateConfig(values) {
@@ -85,18 +88,18 @@ async function setupLocal() {
   ].join("\n");
 
   writeFileSync(varsPath, vars, { mode: 0o600 });
-  run("npx", ["wrangler", "d1", "migrations", "apply", "octg", "--local", "--config", config]);
+  run(node, [wrangler, "d1", "migrations", "apply", "octg", "--local", "--config", config]);
 
   const sqlPath = `/tmp/octg-seed-${process.pid}.sql`;
   try {
-    const seed = spawnSync("node", ["scripts/seed-client.mjs", clientId, clientName, clientKey], {
+    const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, clientId, clientName, clientKey], {
       cwd: root,
       env: { ...process.env, OCTG_KEY_PEPPER: pepper },
       encoding: "utf8",
     });
     if (seed.status !== 0) throw new Error("開発用クライアント SQL の生成に失敗しました");
     writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
-    run("npx", ["wrangler", "d1", "execute", "octg", "--local", "--file", sqlPath, "--config", config]);
+    run(node, [wrangler, "d1", "execute", "octg", "--local", "--file", sqlPath, "--config", config]);
   } finally {
     if (existsSync(sqlPath)) unlinkSync(sqlPath);
   }
@@ -123,10 +126,10 @@ async function setupDeploy() {
   });
 
   for (const secret of ["OCTG_KEY_PEPPER", "OCTG_UPSTREAM_API_TOKEN", "OPENAI_USAGE_API_KEY"]) {
-    run("npx", ["wrangler", "secret", "put", secret, "--config", config]);
+    run(node, [wrangler, "secret", "put", secret, "--config", config]);
   }
-  run("npx", ["wrangler", "d1", "migrations", "apply", "octg", "--remote", "--config", config]);
-  run("npx", ["wrangler", "deploy", "--config", config]);
+  run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config]);
+  run(node, [wrangler, "deploy", "--config", config]);
   console.log("\n本番セットアップが完了しました。");
   if (!teamDomain || !audience) {
     console.log("ACCESS_TEAM_DOMAIN / ACCESS_AUD が未設定のため、Admin API はまだ保護されていません。");

@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
+const node = process.execPath;
+const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
 const args = process.argv.slice(2).reduce((acc, arg) => {
   const match = arg.match(/^--(\w+)=(.*)$/);
   if (match) acc[match[1]] = match[2];
@@ -40,7 +42,7 @@ function run(command, commandArgs) {
 
 const sqlPath = `/tmp/octg-seed-${process.pid}.sql`;
 try {
-  const seed = spawnSync("node", ["scripts/seed-client.mjs", id, name, clientKey], {
+  const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, id, name, clientKey], {
     cwd: root,
     env: { ...process.env, OCTG_KEY_PEPPER: process.env.OCTG_KEY_PEPPER },
     encoding: "utf8",
@@ -50,7 +52,7 @@ try {
     process.exit(1);
   }
   writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
-  run("npx", ["wrangler", "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
+  run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
 } finally {
   if (existsSync(sqlPath)) unlinkSync(sqlPath);
 }
