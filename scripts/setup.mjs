@@ -1,0 +1,143 @@
+#!/usr/bin/env node
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+
+const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const config = "apps/gateway-worker/wrangler.jsonc";
+const args = process.argv.slice(2);
+const mode = args[0];
+const force = args.includes("--force");
+
+const usage = `使い方:
+  npm run setup:local [-- --force]
+  npm run setup:deploy
+
+setup:local   .dev.vars、ローカル D1、開発用クライアントを準備します。
+setup:deploy  本番用 vars と Secrets を設定し、D1 migration と deploy を実行します。
+
+注意: 本番用の Secret 値はこのスクリプトに保存せず、wrangler の入力プロンプトへ直接入力します。`;
+
+if (!mode || args.includes("--help") || args.includes("-h")) {
+  console.log(usage);
+  process.exit(0);
+}
+
+if (!new Set(["local", "deploy"]).has(mode)) {
+  console.error(`不明なセットアップ種別です: ${mode}\n\n${usage}`);
+  process.exit(1);
+}
+
+function run(command, commandArgs, options = {}) {
+  const result = spawnSync(command, commandArgs, {
+    cwd: root,
+    stdio: options.input ? ["pipe", "inherit", "inherit"] : "inherit",
+    input: options.input,
+    shell: false,
+  });
+  if (result.status !== 0) {
+    throw new Error(`コマンドが失敗しました: ${command} ${commandArgs.join(" ")}`);
+  }
+}
+
+function replaceJsoncValue(source, key, value) {
+  const pattern = new RegExp(`(\\"${key}\\"\\s*:\\s*)\\"[^\\"]*\\"`);
+  if (!pattern.test(source)) {
+    throw new Error(`${config} に ${key} がありません`);
+  }
+  return source.replace(pattern, (_match, prefix) => `${prefix}${JSON.stringify(value)}`);
+}
+
+function updateConfig(values) {
+  let source = readFileSync(`${root}/${config}`, "utf8");
+  for (const [key, value] of Object.entries(values)) {
+    source = replaceJsoncValue(source, key, value);
+  }
+  writeFileSync(`${root}/${config}`, source);
+}
+
+async function prompt(question, defaultValue) {
+  const rl = createInterface({ input, output });
+  const answer = await rl.question(`${question}${defaultValue ? ` [${defaultValue}]` : ""}: `);
+  rl.close();
+  return answer.trim() || defaultValue;
+}
+
+async function setupLocal() {
+  const varsPath = `${root}/apps/gateway-worker/.dev.vars`;
+  if (existsSync(varsPath) && !force) {
+    throw new Error(`${varsPath} は既に存在します。既存値を保護するため中断しました。上書きする場合は --force を付けてください。`);
+  }
+
+  const pepper = process.env.OCTG_KEY_PEPPER || "dev-pepper";
+  const upstream = process.env.OCTG_UPSTREAM_BASE_URL || "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>";
+  const clientId = process.env.OCTG_CLIENT_ID || "client_demo";
+  const clientName = process.env.OCTG_CLIENT_NAME || "Demo";
+  const clientKey = process.env.OCTG_CLIENT_KEY || `octg_sk_local_${randomBytes(18).toString("hex")}`;
+  const vars = [
+    `OCTG_KEY_PEPPER=${pepper}`,
+    `OCTG_UPSTREAM_BASE_URL=${upstream}`,
+    "OCTG_UPSTREAM_API_TOKEN=dev-token",
+    "OPENAI_USAGE_API_KEY=dev-usage-key",
+    "",
+  ].join("\n");
+
+  writeFileSync(varsPath, vars, { mode: 0o600 });
+  run("npx", ["wrangler", "d1", "migrations", "apply", "octg", "--local", "--config", config]);
+
+  const sqlPath = `/tmp/octg-seed-${process.pid}.sql`;
+  try {
+    const seed = spawnSync("node", ["scripts/seed-client.mjs", clientId, clientName, clientKey], {
+      cwd: root,
+      env: { ...process.env, OCTG_KEY_PEPPER: pepper },
+      encoding: "utf8",
+    });
+    if (seed.status !== 0) throw new Error("開発用クライアント SQL の生成に失敗しました");
+    writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
+    run("npx", ["wrangler", "d1", "execute", "octg", "--local", "--file", sqlPath, "--config", config]);
+  } finally {
+    if (existsSync(sqlPath)) unlinkSync(sqlPath);
+  }
+
+  console.log(`\nローカルセットアップが完了しました。開発用 API キー: ${clientKey}`);
+  console.log("次に npm run dev -w apps/gateway-worker を実行してください。");
+}
+
+async function setupDeploy() {
+  console.log("本番環境の設定を開始します。Cloudflare にログイン済みであることを確認してください。\n");
+  const databaseId = await prompt("D1 database_id", "");
+  const upstream = await prompt("OCTG_UPSTREAM_BASE_URL", "");
+  const teamDomain = await prompt("ACCESS_TEAM_DOMAIN (空でも可、後から設定可)", "");
+  const audience = await prompt("ACCESS_AUD (空でも可、後から設定可)", "");
+  if (!databaseId || !upstream) {
+    throw new Error("D1 database_id と upstream URL は必須です");
+  }
+
+  updateConfig({
+    database_id: databaseId,
+    OCTG_UPSTREAM_BASE_URL: upstream,
+    ACCESS_TEAM_DOMAIN: teamDomain,
+    ACCESS_AUD: audience,
+  });
+
+  for (const secret of ["OCTG_KEY_PEPPER", "OCTG_UPSTREAM_API_TOKEN", "OPENAI_USAGE_API_KEY"]) {
+    run("npx", ["wrangler", "secret", "put", secret, "--config", config]);
+  }
+  run("npx", ["wrangler", "d1", "migrations", "apply", "octg", "--remote", "--config", config]);
+  run("npx", ["wrangler", "deploy", "--config", config]);
+  console.log("\n本番セットアップが完了しました。");
+  if (!teamDomain || !audience) {
+    console.log("ACCESS_TEAM_DOMAIN / ACCESS_AUD が未設定のため、Admin API はまだ保護されていません。");
+    console.log("Worker デプロイ後に Cloudflare Access アプリを作成し、再度 setup:deploy するか手動で vars を更新してください。");
+  }
+  console.log("クライアントキーは seed:client で発行してください。");
+}
+
+try {
+  await (mode === "local" ? setupLocal() : setupDeploy());
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+}
