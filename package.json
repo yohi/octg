@@ -6,7 +6,10 @@
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "seed:client": "node scripts/seed-client.mjs"
+    "seed:client": "node scripts/seed-client.mjs",
+    "seed:client:remote": "node scripts/seed-client-remote.mjs",
+    "setup:local": "node scripts/setup.mjs local",
+    "setup:deploy": "node scripts/setup.mjs deploy"
   },
   "devDependencies": { "typescript": "^5.6.0" }
 }

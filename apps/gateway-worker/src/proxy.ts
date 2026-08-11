@@ -162,7 +162,6 @@ export async function handleProxy(
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
     return errorResponse(errInternal(requestId));
   }
-
   if (!upstream.ok) {
     const uncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
     if (uncertain) await stub.markUncertain(requestId);

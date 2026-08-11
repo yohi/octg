@@ -36,21 +36,94 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 4. 不確実な request は消費済みとして扱う（fail-closed）
 5. Paid fallback は明示的 opt-in がない限り発生させない
 
-## テンプレートから新規作成
+## はじめに：あなたの立場に応じた手順
 
-本リポジトリは [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。`git clone` せずに、以下の手順で独自の Gateway インスタンスを構築できます。
+このリポジトリに関わる人は次の 3 つの立場があります。自分に該当する手順だけを読んでください。
 
-1. 上部の **Use this template** バッジ（または [Generate from template](https://github.com/yohi/octg/generate)）をクリックします。
-2. 新しいリポジトリ名・所有者・可視性を入力し、**Create repository from template** をクリックします。
-3. 生成されたリポジトリをローカルに展開（`git clone <your-new-repo>` または GitHub Codespaces）します。
-4. 以下のセットアップ手順に沿って `npm install` 以降を実施してください。
-5. Cloudflare リソース（D1・AI Gateway・Access）の作成と Secret 設定は [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md) を参照してください。
-
-> Template repository の留意点: フォークと異なり upstream との同期は自動で行われません。本リポジトリ側で修正が入った場合は、必要に応じて手動で取り込みます。
+| 立場 | やること | 参照先 |
+|------|---------|--------|
+| **利用するだけ** | デプロイ済みの Gateway を OpenAI 互換クライアントから呼ぶ | [クイックスタート（利用するだけ）](#クイックスタート利用するだけ) |
+| **開発する** | ローカルで Worker を起動し、コードを変更・テストする | [セットアップ（開発する場合）](#セットアップ開発する場合) |
+| **デプロイする** | 自分専用のインスタンスを Cloudflare に建てる | [テンプレートから新規作成（デプロイする場合）](#テンプレートから新規作成デプロイする場合) |
 
 ---
 
-## セットアップ（インストール）
+## クイックスタート（利用するだけ）
+
+開発・デプロイは行わず、既に動いている Gateway を利用するだけの場合の手順です。
+
+### 必要なもの
+
+管理者から以下を受け取ってください。
+
+- **Gateway の URL**（例: `https://octg-gateway.<subdomain>.workers.dev`）
+- **クライアント API キー**（`octg_sk_*` で始まる文字列）
+
+### 使い方
+
+OCTG は OpenAI 互換 API を提供するため、**接続先 URL（base URL）と API キーを差し替えるだけで利用できます**（SPEC.md AC-01）。利用可能な無料枠モデルは `gpt-5`、`gpt-5-mini`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` です。
+
+#### curl での動作確認
+
+```bash
+curl https://octg-gateway.<subdomain>.workers.dev/v1/chat/completions \
+  -H "Authorization: Bearer octg_sk_xxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+#### 利用可能なモデル
+
+| モデル | 無料枠プール | 用途の目安 |
+|---|---|---|
+| `gpt-5.6-sol` | STANDARD | 高度な推論・複雑な処理 |
+| `gpt-5.6-terra` | STANDARD | 性能とコストのバランス |
+| `gpt-5.6-luna` | MINI | 高ボリューム・低コスト |
+| `gpt-5` | STANDARD | 既存の推論・コーディング |
+| `gpt-5-mini` | MINI | 軽量な処理 |
+
+モデルの利用可否は Gateway の `/v1/models` でも確認できます。
+
+OpenAI 互換の base URL を指定できるクライアント（OpenCode、OpenAI SDK 互換ツールなど）では、以下のように設定します。
+
+```text
+base URL: https://octg-gateway.<subdomain>.workers.dev/v1
+API Key:  octg_sk_xxx
+```
+
+> 注意: 共有無料枠の範囲内で処理されるため、利用状況（/quota）は管理者に問い合わせてください。超過時は 429 または REJECT ポリシーに応じた応答が返ります。
+
+---
+
+## セットアップ（開発する場合）
+
+コードを変更・テストするためにローカル環境を構築する手順です。
+
+### 最短手順
+
+Node.js 20 以上を用意した後、次の 2 コマンドでローカル環境を準備できます。`.dev.vars` が既にある場合は、既存の Secret を保護するためスクリプトが停止します。
+
+```bash
+npm install
+npm run setup:local
+```
+
+セットアップ完了後、Worker を起動します。
+
+```bash
+npm run dev -w apps/gateway-worker
+```
+
+クライアントキーを自分で指定する場合は、環境変数を付けて実行します。
+
+```bash
+OCTG_CLIENT_ID=client_demo \
+OCTG_CLIENT_NAME=Demo \
+OCTG_CLIENT_KEY=octg_sk_local_demo \
+npm run setup:local
+```
+
+`setup:local` は `.dev.vars` の作成、ローカル D1 migration、開発用クライアントの登録を行います。既存の `.dev.vars` を意図的に作り直す場合だけ `npm run setup:local -- --force` を使用してください。
 
 本リポジトリは npm workspaces で構成されています。Cloudflare Workers 向けのため、`wrangler` が各 workspace の devDependency として同梱されています（別途グローバルインストール不要）。
 
@@ -119,7 +192,30 @@ npm test            # 全 workspace のユニットテスト (Vitest + @cloudfla
 npm run dev -w apps/gateway-worker   # ローカルで Worker 起動 (http://localhost:8787)
 ```
 
-ここまででローカル開発環境の準備は完了です。本番デプロイ手順は [§ デプロイ前の必須プロビジョニング](#デプロイ前の必須プロビジョニング手動) を参照してください。
+ここまででローカル開発環境の準備は完了です。実運用する場合は [テンプレートから新規作成（デプロイする場合）](#テンプレートから新規作成デプロイする場合) を参照してください。
+
+---
+
+## テンプレートから新規作成（デプロイする場合）
+
+`git clone` せずに、自分専用の Gateway インスタンスを Cloudflare にデプロイする手順です。
+
+本リポジトリは [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。
+
+1. 上部の **Use this template** バッジ（または [Generate from template](https://github.com/yohi/octg/generate)）をクリックします。
+2. 新しいリポジトリ名・所有者・可視性を入力し、**Create repository from template** をクリックします。
+3. 生成されたリポジトリをローカルに展開（`git clone <your-new-repo>` または GitHub Codespaces）します。
+4. `npm install` を実行します。
+5. D1 の作成後、次のコマンドで本番設定を対話的に行います。D1 の作成方法や AI Gateway / Access の準備は [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md) を参照してください。
+
+   ```bash
+   npm install
+   npm run setup:deploy
+   ```
+
+   スクリプトは `database_id`、AI Gateway URL、Access の `Team domain` と `Audience tag` を入力として受け取り、`wrangler.jsonc` の更新、3 つの Secret の登録、remote D1 migration、Worker deploy を順番に実行します。
+
+> Template repository の留意点: フォークと異なり upstream との同期は自動で行われません。本リポジトリ側で修正が入った場合は、必要に応じて手動で取り込みます。
 
 ---
 
@@ -133,7 +229,7 @@ npm run typecheck
 npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
 ```
 
-初回の環境構築手順は [§ セットアップ（インストール）](#セットアップインストール) を参照してください。
+初回の環境構築手順は [セットアップ（開発する場合）](#セットアップ開発する場合) を参照してください。
 
 ## デプロイ前の必須プロビジョニング（手動）
 
