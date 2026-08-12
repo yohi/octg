@@ -6,18 +6,23 @@ Cloudflare Access 認証済みの運用者が、ブラウザから admin-api の
 
 ## 背景
 
-`apps/gateway-worker/src/admin.ts` に実装された admin-api は JSON API として動作しており、運用者は curl 等で直接呼び出す必要がある。運用頻度の高い quota / usage / clients / models の確認と、クライアントポリシー・モデル設定の変更を、同じ Cloudflare Access セッションで保護されたブラウザ UI から行えるようにする。
+`apps/gateway-worker/src/admin.ts` に実装された admin-api は JSON API として動作しており、
+運用者は curl 等で直接呼び出す必要がある。
+運用頻度の高い quota / usage / clients / models の確認と、
+クライアントポリシー・モデル設定の変更を、
+同じ Cloudflare Access セッションで保護されたブラウザ UI から行えるようにする。
 
 ## 設計選択の経緯
 
 | 項目 | 選択 | 理由 |
-|---|---|---|
+| --- | --- | --- |
 | 配信方式 | 同じ Worker 内 Static Assets | 認証・ドメイン・デプロイを API と一元管理できる |
 | UI パス | `/admin/ui/*` | API `/admin/*` と分離し、既存 API の互換性を維持 |
 | 認証 | Cloudflare Access（既存） | UI と API が同じセッションで保護される。追加認証ロジック不要 |
 | 画面構成 | 単一ページダッシュボード | 第一弾として最小構成で十分 |
 | 編集 UX | インライン編集 | クリック数が少なく、API との対応が明確 |
-| 技術スタック | バニラ HTML/CSS/JS + Pico.css (CDN) | 依存追加なし、ビルド不要、軽量 |
+| 技術スタック | バニラ HTML/CSS/JS + Pico.css | 依存追加なし、ビルド不要、軽量。 |
+| | | Pico.css は `public/admin/ui/pico.min.css` へ同梱 |
 | テスト | 手動確認（第一弾） | 軽量 UI のため、今回は自動 E2E テストは実施しない |
 
 ## アーキテクチャ
@@ -27,13 +32,13 @@ Browser (Cloudflare Access 認証済み)
         │ GET /admin/ui/
         ▼
 Cloudflare Worker
-        │ Static Assets: public/index.html, styles.css, app.js
+        │ Static Assets: public/admin/ui/index.html, styles.css, app.js
         ▼
 Browser (同じ Access セッション)
         │ fetch /admin/quota, /admin/usage, ...
         ▼
 Cloudflare Worker
-        │ verifyAccessJwtOrServiceToken
+        │ verifyAccessJwt
         ▼
 admin-api (handleAdmin)
         │
@@ -43,13 +48,18 @@ admin-api (handleAdmin)
 
 ## 配信パスとルーティング
 
-| パス | 処理 |
-|---|---|
-| `/admin/ui/*` | Workers Static Assets により `public/*` を配信 |
-| `/admin/ui` | `public/index.html` を返す（Trailing slash は wrangler または fetch handler で誘導） |
-| `/admin/*` | 既存 `handleAdmin` による JSON API |
+採用方式: `public/admin/ui/...` に配置する方式。
 
-`apps/gateway-worker/src/index.ts` の fetch handler では、`/admin/ui` 配下のリクエストを Static Assets に届けるため、`handleAdmin` より先に UI ルートをスキップする必要がある。ただし、Workers Static Assets がオリジンリクエストを優先して処理する場合、fetch handler に到達しない可能性がある。実装時に `wrangler.jsonc` の `assets.not_found_handling` 等を確認し、競合を回避する。
+| パス | 実ファイル | 処理 |
+| --- | --- | --- |
+| `/admin/ui` | `public/admin/ui/index.html` | `html_handling` で |
+| | | `/admin/ui/` へ誘導 |
+| `/admin/ui/` | `public/admin/ui/index.html` | `index.html` を返す |
+| `/admin/ui/app.js` | `public/admin/ui/app.js` | Static Assets によりそのまま配信 |
+| `/admin/ui/styles.css` | `public/admin/ui/styles.css` | Static Assets 配信 |
+| `/admin/*` | — | 既存 `handleAdmin` による JSON API |
+
+絶対パス `/admin/ui/app.js` および `/admin/ui/styles.css` を使用する。
 
 ## UI 構成
 
@@ -72,7 +82,7 @@ admin-api (handleAdmin)
 ### Clients 編集フィールド
 
 | フィールド | 型 | 入力方法 |
-|---|---|---|
+| --- | --- | --- |
 | `overflow_mode` | enum | select: REJECT, PAID_SHARED |
 | `output_limit_mode` | enum | select: REJECT, CLAMP |
 | `max_paid_usd_day` | number | number input (min=0) |
@@ -81,7 +91,7 @@ admin-api (handleAdmin)
 ### Models 編集フィールド
 
 | フィールド | 型 | 入力方法 |
-|---|---|---|
+| --- | --- | --- |
 | `complimentary_pool` | enum | select: STANDARD, MINI, NONE |
 | `enabled` | boolean | checkbox |
 | `fallback_model` | string \| null | text input（空欄で null） |
@@ -91,13 +101,13 @@ admin-api (handleAdmin)
 - 運用者は Cloudflare Access で `/admin/ui/` にアクセス
 - Access は `cf-access-jwt-assertion` Cookie/ヘッダーを付与
 - UI からの `fetch()` は Same-Origin のため、ブラウザが自動的に Cookie を送信
-- API 側の `verifyAccessJwtOrServiceToken` が JWT を検証し、通過する
+- API 側の `verifyAccessJwt` が JWT を検証し、通過する
 - Service Token は UI から利用しない
 
 ## エラー処理
 
 | 場面 | 動作 |
-|---|---|
+| --- | --- |
 | API 取得失敗 | セクションにエラーメッセージ表示、再試行ボタンを表示 |
 | 編集 PUT 失敗 | 行内にエラーメッセージ、入力値は維持 |
 | ネットワークエラー | トースト風メッセージで通知 |
@@ -107,19 +117,23 @@ admin-api (handleAdmin)
 
 - UI も API も同一ドメイン・同一 Access 保護下
 - Service Token や秘密鍵をブラウザに露出しない
-- 入力値は admin-api 側で既存の検証が入るため、UI 側でもクライアント側バリデーションを行う（二重防御ではなく UX 向上のため）
+- 入力値は admin-api 側で既存の検証が入るため、
+  UI 側でもクライアント側バリデーションを行う（二重防御ではなく UX 向上のため）
+- Pico.css は `public/admin/ui/pico.min.css` として同梱し、同一ドメインから配信する。
 
 ## ファイル構成
 
 ```text
 apps/gateway-worker/
 ├── public/
-│   ├── index.html      # UI エントリポイント
-│   ├── styles.css      # 追加スタイル（Pico.css 上書き用・最小限）
-│   └── app.js          # UI ロジック（fetch, レンダリング, インライン編集）
+│   └── admin/ui/
+│       ├── index.html      # UI エントリポイント
+│       ├── styles.css      # 追加スタイル（Pico.css 上書き用・最小限）
+│       ├── pico.min.css    # 同梱 Pico.css
+│       └── app.js          # UI ロジック（fetch, レンダリング, インライン編集）
 ├── src/
-│   ├── admin.ts        # 既存 admin-api（変更なしの想定）
-│   └── index.ts        # UI ルート判定を handleAdmin より先に追加
+│   ├── admin.ts        # admin-api。Clients 一覧に effective policy 値を追加
+│   └── index.ts        # Worker エントリ
 ├── wrangler.jsonc        # static_assets 設定追加
 ```
 
@@ -141,20 +155,16 @@ Workers Static Assets を有効化するため、`assets` 設定を追加する�
 }
 ```
 
-`not_found_handling` は `none` とし、`/admin/ui` 配下以外は API handler に委ねる。ただし Static Assets の挙動は wrangler バージョンにより変わる可能性があるため、実装時にローカルで動作確認する。
+`not_found_handling` は `none` とし、`/admin/ui` 配下以外は API handler に委ねる。
+Static Assets はオリジンリクエストを優先して処理するため、
+上記設定で `/admin/ui/*` は自動的に `public/admin/ui/*` へマップされ、
+fetch handler への到達はない。
 
 ### `apps/gateway-worker/src/index.ts`
 
-Static Assets がリクエストを先に処理する場合は変更が不要だが、もし fetch handler に到達する場合は `/admin/ui/*` を先に判定し、API ルーティングに入らないようにする。
-
-```typescript
-// 追加例（必要に応じて）
-if (url.pathname === "/admin/ui" || url.pathname.startsWith("/admin/ui/")) {
-  return env.ASSETS.fetch(request);
-}
-```
-
-`Env` インターフェースに `ASSETS: Fetcher` を追加する。
+Static Assets による配信で十分なため、fetch handler における
+`/admin/ui/*` 判定は不要。
+`Env` インターフェースに `ASSETS: Fetcher` を追加する必要もない。
 
 ## テスト・動作確認
 
@@ -165,12 +175,29 @@ if (url.pathname === "/admin/ui" || url.pathname.startsWith("/admin/ui/")) {
 3. ブラウザで `http://localhost:8787/admin/ui/` にアクセス
 4. 各セクションが表示されることを確認
 5. Clients / Models のインライン編集で保存後、再読み込みで値が保持されることを確認
+6. **認証境界テスト**:
+   - 未認証状態で `/admin/ui`、 `/admin/ui/`、 `/admin/ui/app.js`、
+     `/admin/ui/styles.css` が 200 以外の応答または
+     Cloudflare Access ログイン画面へのリダイレクトとなることを確認
+   - 認証済みセッションで HTML、CSS、JavaScript が取得できることを確認
+   - セッション失効後の `fetch /admin/quota` などで UI が再読み込みし、
+     ログイン画面へ案内されることを確認
+   - `wrangler.jsonc` の `routes` / Access アプリ設定で `/admin/ui/*` が
+     保護対象に含まれていることを確認
 
 ### 本番確認手順
 
 1. Cloudflare Access 経由で `/admin/ui/` にアクセス
 2. quota / usage / clients / models データが表示されることを確認
 3. 編集・保存が成功し、API レスポンスと整合することを確認
+4. **認証境界テスト**:
+   - Cloudflare Access アプリで `/admin/ui/*` が保護対象に含まれていることを確認
+   - 未認証のブラウザセッションから `/admin/ui`、 `/admin/ui/`、
+     `/admin/ui/app.js`、 `/admin/ui/styles.css` へアクセスし、
+     200 以外の応答または Cloudflare Access ログイン画面へのリダイレクトとなることを確認
+   - 認証済みセッションで HTML、CSS、JavaScript が取得できることを確認
+   - セッション失効後の API 呼び出しで UI が再読み込みされ、
+     ログイン画面へ案内されることを確認
 
 ## 将来の拡張候補（今回のスコープ外）
 
