@@ -75,6 +75,7 @@ export async function handleProxy(
   endpoint: "chat" | "responses",
 ): Promise<Response> {
   const requestId = `req_${ulid()}`;
+  const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
   const auth = await authenticate(request, env, requestId);
   if (!("id" in auth)) return errorResponse(auth);
 
@@ -130,7 +131,7 @@ export async function handleProxy(
   }
 
   const reservation = estimatedInput + output.maxOutputTokens + margin;
-  const reserved = await stub.reserve(requestId, reservation, upperBound);
+  const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey);
   if (!reserved.ok) {
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));

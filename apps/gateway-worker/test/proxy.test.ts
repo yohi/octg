@@ -57,6 +57,30 @@ describe("proxy pipeline", () => {
     expect(upstreamHeaders?.get("authorization")).toBeNull();
   });
 
+  it("accepts Idempotency-Key while sending AI Gateway controls", async () => {
+    let upstreamHeaders: Headers | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamHeaders = new Headers(init?.headers);
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_CLIENT_KEY}`,
+        "Idempotency-Key": "idem-test-1",
+      },
+      body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
+    expect(upstreamHeaders?.get("cf-aig-authorization")).toBe("Bearer test-upstream-token");
+  });
+
   it("rejects unknown models and tool requests before reservation", async () => {
     const unknown = await authed({ model: "gpt-99", messages: [{ role: "user", content: "hi" }] });
     expect(unknown.status).toBe(403);
