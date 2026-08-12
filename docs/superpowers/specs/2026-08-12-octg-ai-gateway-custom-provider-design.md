@@ -66,7 +66,7 @@ Content-Type: application/json
 
 ### 5.2 Gateway A → OCTG Worker
 
-- Custom Provider の Base URL: `https://octg-gateway.<subdomain>.workers.dev/v1`
+- Custom Provider の Base URL: `https://octg-gateway.<subdomain>.workers.dev`（末尾に `/v1` を含めない）
 - AI Gateway はリクエストパスの `custom-octg/` 以降（`/v1/chat/completions`）を Base URL に連結する。
 - その結果、OCTG Worker への実際のリクエストは `/v1/chat/completions` となる。
 - `Authorization` ヘッダーと body はそのまま転送される。
@@ -93,7 +93,7 @@ Content-Type: application/json
 4. 以下を入力:
    - **Provider Name**: `OCTG`
    - **Provider Slug**: `octg`
-   - **Base URL**: `https://octg-gateway.<subdomain>.workers.dev/v1`
+   - **Base URL**: `https://octg-gateway.<subdomain>.workers.dev`
    - **Enable**: 有効化
 5. **Save**。
 6. **Provider Keys** → **Add API Key**:
@@ -150,7 +150,7 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 - slug が `octg` ではなく、リクエスト URL の `custom-octg` と一致していない。
 
 **対処**:
-- Base URL は `https://octg-gateway.<subdomain>.workers.dev/v1` のみにする。
+- Base URL は `https://octg-gateway.<subdomain>.workers.dev` のみにする。
 - Provider Slug は `octg` にし、リクエストパスは `/custom-octg/v1/chat/completions` とする。
 
 ### 8.2 `Invalid provider`（OCTG → Gateway B 側）
