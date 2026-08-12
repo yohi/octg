@@ -2,30 +2,82 @@
 
 ## 目的
 
-Cloudflare Access 認証済みの運用者が、ブラウザから admin-api の内容を参照・編集できる Web UI を提供する。
+Cloudflare Access 認証済みの運用者が、ブラウザから Admin API の内容を
+参照・編集できる Web UI を将来提供する。
+
+現時点では JSON の Admin API のみ実装済みであり、ブラウザ UI は未実装である。
+本書は、実装済み API の契約と、将来実装する UI の設計を区別して記載する。
+
+## 現在の実装状況
+
+| 対象 | 状態 | 実装箇所 |
+| --- | --- | --- |
+| JSON Admin API | 実装済み | `apps/gateway-worker/src/admin.ts` |
+| Cloudflare Access JWT 検証 | 実装済み | `apps/gateway-worker/src/access.ts` |
+| Reconciliation API | 実装済み | `POST /admin/reconcile` |
+| ブラウザ UI | 未実装 | `apps/gateway-worker/public/admin/ui/` は未作成 |
+| Workers Static Assets | 未設定 | `wrangler.jsonc` に `assets` 設定なし |
+| `ASSETS` binding | 未設定 | `Env` に binding なし |
+| UI E2E テスト | 未実装 | Admin API の自動テストのみ存在 |
+
+現在実装されている Admin API は次のとおりである。
+
+```text
+GET  /admin/quota
+GET  /admin/usage
+GET  /admin/clients
+GET  /admin/models
+PUT  /admin/clients/:id/policy
+PUT  /admin/models/:model
+POST /admin/reconcile
+```
+
+`/admin/ui` および `/admin/ui/*` に対する静的配信ルートは存在しない。
+これらのパスも現在は未知の Admin API ルートとして扱われ、JWT 検証を通過した後に
+JSON の 404 応答となる。
 
 ## 背景
 
-`apps/gateway-worker/src/admin.ts` に実装された admin-api は JSON API として動作しており、
-運用者は curl 等で直接呼び出す必要がある。
+`apps/gateway-worker/src/admin.ts` に実装された Admin API は JSON API として
+動作しており、運用者は `curl` などで直接呼び出す必要がある。
 運用頻度の高い quota / usage / clients / models の確認と、
-クライアントポリシー・モデル設定の変更を、
-同じ Cloudflare Access セッションで保護されたブラウザ UI から行えるようにする。
+クライアントポリシー・モデル設定の変更を、同じ Cloudflare Access セッションで
+保護されたブラウザ UI から行えるようにする。
 
-## 設計選択の経緯
+## 将来 UI の設計選択
 
-| 項目 | 選択 | 理由 |
+以下はブラウザ UI 実装時の提案であり、現在のリポジトリには未実装である。
+
+| 項目 | 提案 | 理由 |
 | --- | --- | --- |
-| 配信方式 | 同じ Worker 内 Static Assets | 認証・ドメイン・デプロイを API と一元管理できる |
-| UI パス | `/admin/ui/*` | API `/admin/*` と分離し、既存 API の互換性を維持 |
-| 認証 | Cloudflare Access（既存） | UI と API が同じセッションで保護される。追加認証ロジック不要 |
-| 画面構成 | 単一ページダッシュボード | 第一弾として最小構成で十分 |
-| 編集 UX | インライン編集 | クリック数が少なく、API との対応が明確 |
-| 技術スタック | バニラ HTML/CSS/JS + Pico.css | 依存追加なし、ビルド不要、軽量。 |
-| | | Pico.css は `public/admin/ui/pico.min.css` へ同梱 |
-| テスト | 手動確認（第一弾） | 軽量 UI のため、今回は自動 E2E テストは実施しない |
+| 配信方式 | 同じ Worker 内の Static Assets | 認証・ドメイン・デプロイを API と一元管理できる |
+| UI パス | `/admin/ui/*` | API `/admin/*` と分離し、既存 API の互換性を維持する |
+| 認証 | Cloudflare Access | UI と API で同じ Access セッションを利用する |
+| 画面構成 | 単一ページダッシュボード | 第一弾として最小構成にする |
+| 編集 UX | インライン編集 | クリック数が少なく、API との対応が明確になる |
+| 技術スタック | バニラ HTML/CSS/JS + Pico.css | 依存追加とビルドを避け、軽量に保つ |
+| CSS 配信 | Pico.css を同梱 | 外部 CDN に依存せず同一ドメインから配信する |
+| UI テスト | 初期実装では手動確認 | E2E 自動化は将来拡張とする |
 
 ## アーキテクチャ
+
+### 現在の Admin API フロー
+
+```text
+HTTP Client
+        │ /admin/* + cf-access-jwt-assertion
+        ▼
+Cloudflare Worker
+        │ handleAdmin
+        │ verifyAccessJwt
+        ▼
+JSON Admin API
+        │
+        ├── Durable Object: QuotaController
+        └── D1: clients, client_policies, model_registry, requests
+```
+
+### 将来のブラウザ UI フロー
 
 ```text
 Browser (Cloudflare Access 認証済み)
@@ -37,47 +89,46 @@ Cloudflare Worker
 Browser (同じ Access セッション)
         │ fetch /admin/quota, /admin/usage, ...
         ▼
-Cloudflare Worker
-        │ verifyAccessJwt
-        ▼
-admin-api (handleAdmin)
-        │
-        ├── Durable Object: QuotaController
-        └── D1: clients, client_policies, model_registry, requests
+現在の JSON Admin API
 ```
 
-## 配信パスとルーティング
+Static Assets と Admin API の双方が意図した Access ポリシーで保護されることは、
+UI 実装時に Cloudflare 側のルート設定を含めて検証する。
 
-採用方式: `public/admin/ui/...` に配置する方式。
+## 将来の配信パスとルーティング
 
-| パス | 実ファイル | 処理 |
+提案方式は `public/admin/ui/...` に静的ファイルを配置する方式とする。
+
+| パス | 実ファイル | 提案する処理 |
 | --- | --- | --- |
-| `/admin/ui` | `public/admin/ui/index.html` | `html_handling` で |
-| | | `/admin/ui/` へ誘導 |
+| `/admin/ui` | `public/admin/ui/index.html` | `/admin/ui/` へ誘導する |
 | `/admin/ui/` | `public/admin/ui/index.html` | `index.html` を返す |
-| `/admin/ui/app.js` | `public/admin/ui/app.js` | Static Assets によりそのまま配信 |
-| `/admin/ui/styles.css` | `public/admin/ui/styles.css` | Static Assets 配信 |
-| `/admin/*` | — | 既存 `handleAdmin` による JSON API |
+| `/admin/ui/app.js` | `public/admin/ui/app.js` | Static Assets で配信する |
+| `/admin/ui/styles.css` | `public/admin/ui/styles.css` | Static Assets で配信する |
+| `/admin/ui/pico.min.css` | `public/admin/ui/pico.min.css` | 静的配信する |
+| `/admin/*` | なし | 既存 `handleAdmin` が JSON API を処理する |
 
-絶対パス `/admin/ui/app.js` および `/admin/ui/styles.css` を使用する。
+HTML からは絶対パス `/admin/ui/app.js`、`/admin/ui/styles.css`、
+`/admin/ui/pico.min.css` を参照する。
 
-## UI 構成
+## 将来の UI 構成
 
 ### ページレイアウト
 
-単一ページ。Pico.css でスタイリング。構成要素：
+単一ページを Pico.css でスタイリングし、次の要素を配置する。
 
 1. **ヘッダー**: タイトル「OCTG Admin」と最終更新時刻
-2. **Quota セクション**: STANDARD / MINI の `GET /admin/quota` 結果をカード表示
-3. **Usage セクション**: `GET /admin/usage` 結果をテーブル表示
-4. **Clients セクション**: `GET /admin/clients` 結果をテーブル表示＋インライン編集
-5. **Models セクション**: `GET /admin/models` 結果をテーブル表示＋インライン編集
+2. **Quota セクション**: `GET /admin/quota` の STANDARD / MINI をカード表示
+3. **Usage セクション**: `GET /admin/usage` の結果をテーブル表示
+4. **Clients セクション**: `GET /admin/clients` の結果を表示し、インライン編集を提供
+5. **Models セクション**: `GET /admin/models` の結果を表示し、インライン編集を提供
 
 ### インライン編集
 
-- 編集対象行の「Edit」ボタンを押すと、対象フィールドが入力要素に切り替わる
-- 変更後「Save」ボタンで `PUT` 送信、「Cancel」で元に戻る
-- 成功時は該当セクションを再取得して表示更新、失敗時は行内にエラーメッセージ
+- 編集対象行の「Edit」ボタンで対象フィールドを入力要素に切り替える
+- 「Save」で `PUT` を送信し、「Cancel」で元の表示へ戻す
+- 成功時は該当セクションを再取得する
+- 失敗時は入力値を維持し、行内にエラーメッセージを表示する
 
 ### Clients 編集フィールド
 
@@ -85,8 +136,11 @@ admin-api (handleAdmin)
 | --- | --- | --- |
 | `overflow_mode` | enum | select: REJECT, PAID_SHARED |
 | `output_limit_mode` | enum | select: REJECT, CLAMP |
-| `max_paid_usd_day` | number | number input (min=0) |
+| `max_paid_usd_day` | number | number input (`min=0`) |
 | `cache_enabled` | boolean | checkbox |
+
+Admin API は全フィールドを必須とし、`max_paid_usd_day` には有限の 0 以上の数値を
+要求する。不正な入力には 400 を返す。
 
 ### Models 編集フィールド
 
@@ -96,25 +150,41 @@ admin-api (handleAdmin)
 | `enabled` | boolean | checkbox |
 | `fallback_model` | string \| null | text input（空欄で null） |
 
-## 認証の動作
+Admin API は全フィールドを必須とする。不正な入力には 400 を返し、対象モデルが
+存在しない場合は 404 を返す。
 
-- API リクエストには `cf-access-jwt-assertion` ヘッダーが必要
-- API 側の `verifyAccessJwt` が JWT を検証し、通過する
-- Service Token は UI から利用しない
+## 認証
 
-## 静的アセット配信（将来実装）
+### 現在の Admin API 認証
 
-この設計書は管理 UI の API 契約と動作を定めるものとして作成された。
-ブラウザ UI（HTML/CSS/JS）自体は、本 PR では**実装しない**。
+- `cf-access-jwt-assertion` ヘッダーを必須とする
+- 署名アルゴリズムは RS256 のみを許可する
+- `iss` は `ACCESS_TEAM_DOMAIN`、`aud` は `ACCESS_AUD` と一致させる
+- `exp` を必須とし、期限切れ JWT を拒否する
+- `ACCESS_JWT_PUBLIC_JWK` があればローカル JWK set を使用する
+- ローカル JWK set がなければ Access の `/cdn-cgi/access/certs` から JWKS を取得する
+- 検証失敗は理由を公開せず、共通の 401 `invalid_api_key` 応答とする
+- `Authorization: Bearer` と Service Token は Admin API の認証に使用しない
 
-実装時には以下を行う予定である：
+### 将来のブラウザ UI 認証
 
-- `apps/gateway-worker/public/admin/ui/` 配下に静的ファイルを配置する。
-  - `index.html` — UI エントリポイント
-  - `styles.css` — 追加スタイル（Pico.css 上書き用・最小限）
-  - `pico.min.css` — 同梱 Pico.css
-  - `app.js` — UI ロジック（fetch, レンダリング, インライン編集）
-- `apps/gateway-worker/wrangler.jsonc` に `assets` 設定を追加して Workers Static Assets を有効化する。
+UI からの API リクエストは、ブラウザの Cloudflare Access セッションを利用する。
+追加の認証情報や秘密鍵をブラウザへ配布しない。
+セッション失効時のリダイレクト動作はリポジトリ内のコードだけでは保証せず、
+Cloudflare Access アプリケーションの設定と合わせて本番環境で確認する。
+
+## Static Assets の実装案
+
+ブラウザ UI の実装時には、次の静的ファイルを
+`apps/gateway-worker/public/admin/ui/` に追加する。
+
+- `index.html`: UI エントリポイント
+- `styles.css`: Pico.css 上書き用の追加スタイル
+- `pico.min.css`: 同梱する Pico.css
+- `app.js`: fetch、レンダリング、インライン編集のロジック
+
+`apps/gateway-worker/wrangler.jsonc` には Workers Static Assets の設定を追加する。
+次の設定は実装案であり、現在の設定には含まれていない。
 
 ```jsonc
 {
@@ -128,78 +198,107 @@ admin-api (handleAdmin)
 }
 ```
 
-`not_found_handling` は `none` とし、`/admin/ui/*` 配下以外は API handler に委ねる。
-Static Assets はオリジンリクエストを優先して処理するため、
-上記設定で `/admin/ui/*` は自動的に `public/admin/ui/*` へマップされ、
-fetch handler への到達はない。
+UI 実装時には、次の点を実際の Workers Static Assets の挙動で検証する。
 
-### `apps/gateway-worker/src/index.ts`
-
-Static Assets による配信で十分なため、fetch handler における
-`/admin/ui/*` 判定は不要。
-`Env` インターフェースに `ASSETS: Fetcher` を追加する必要もない。
+- `/admin/ui` と `/admin/ui/` の正規化
+- `/admin/ui/*` と既存 `/admin/*` JSON API の競合がないこと
+- 未知の静的パスが意図どおり API handler または 404 に到達すること
+- `ASSETS` binding をコードから使用する必要があるかどうか
 
 ## エラー処理
 
+### 現在の Admin API エラー
+
 | 場面 | 動作 |
 | --- | --- |
-| API 取得失敗 | セクションにエラーメッセージ表示、再試行ボタンを表示 |
-| 編集 PUT 失敗 | 行内にエラーメッセージ、入力値は維持 |
-| ネットワークエラー | トースト風メッセージで通知 |
-| 認証切れ | Cloudflare Access がログイン画面にリダイレクトするため UI 側では特別対処不要 |
+| JWT がない、または無効 | 401 `invalid_api_key` |
+| PUT の入力が不正 | 400 `invalid_request` |
+| 対象 client / model が存在しない | 404 `not_found` |
+| Reconciliation 実行失敗 | 502 `reconciliation_failed` |
+| 未知の Admin API ルート | JWT 検証後に 404 `not_found` |
+
+### 将来のブラウザ UI エラー
+
+| 場面 | 提案する動作 |
+| --- | --- |
+| API 取得失敗 | セクションにエラーメッセージと再試行ボタンを表示する |
+| 編集 PUT 失敗 | 行内にエラーメッセージを表示し、入力値を維持する |
+| ネットワークエラー | ページ内の通知領域で表示する |
+| 認証切れ | Access の応答に従い、必要なら再認証を案内する |
 
 ## セキュリティ
 
-- UI も API も同一ドメイン・同一 Access 保護下
-- Service Token や秘密鍵をブラウザに露出しない
-- 入力値は admin-api 側で既存の検証が入るため、
-  UI 側でもクライアント側バリデーションを行う（二重防御ではなく UX 向上のため）
-- Pico.css は `public/admin/ui/pico.min.css` として同梱し、同一ドメインから配信する。
+### 現在の実装
+
+- Admin API は Cloudflare Access JWT を検証する
+- Service Token や秘密鍵をブラウザへ露出する実装は存在しない
+- Clients / Models の入力値は Admin API 側で検証する
+- 認証失敗の詳細を応答 body に含めない
+
+### 将来 UI の要件
+
+- UI と API を同一の Access 保護対象にする
+- クライアント側バリデーションは UX 向上のために行い、API 側の検証を維持する
+- Pico.css を同梱し、外部 CDN への依存を追加しない
+- UI 内へ Service Token、秘密鍵、クライアントキーを埋め込まない
 
 ## テスト・動作確認
 
-### ローカル確認手順
+### 現在の自動テスト
+
+`apps/gateway-worker/test/admin-api.test.ts` は主に次を検証している。
+
+- JWT がない Admin API リクエストの 401
+- JWT 検証後の未知ルートの 404
+- Clients / Models の PUT が認証境界の内側にあること
+- Client policy の正常な更新
+- Clients / Models の不正 payload の拒否
+- Client policy の effective value とデフォルト値
+- `output_limit_mode` の保存と読み戻し
+
+`apps/gateway-worker/test/access.test.ts` は Access JWT の issuer、audience、
+署名、`exp` などの検証を扱う。Reconciliation の処理自体は
+`apps/gateway-worker/test/reconcile.test.ts` で検証する。
+
+ブラウザ UI、Static Assets 配信、インライン編集の E2E テストは存在しない。
+また、Admin API の全 GET endpoint と `POST /admin/reconcile` の HTTP 成功経路を
+`admin-api.test.ts` が網羅しているわけではない。
+
+### 現在のローカル確認手順
 
 1. `npm install`
 2. `npm run dev -w apps/gateway-worker`
-3. 静的 UI は本 PR で未実装のため、API のみ動作確認する。
-4. `curl` またはブラウザで以下の admin API にアクセスし、
-   認証済みセッションでは JSON が取得でき、未認証セッションでは
-   401 または Cloudflare Access ログイン画面に遷移することを確認する。
-   - `/admin/quota`
-   - `/admin/usage`
-   - `/admin/clients`
-   - `/admin/models`
-5. Clients / Models の `PUT` API を呼び出した後、対応する `GET` API で
-   値が保持されることを確認する。
-6. **認証境界テスト**:
-   - 未認証状態で `/admin/quota` などが 200 以外になることを確認
-   - 認証済みセッションで JSON が取得できることを確認
-   - セッション失効後の API 呼び出しで 401 または Cloudflare Access ログイン画面に遷移することを確認
+3. 有効な Access JWT を使い、各 Admin API が JSON を返すことを確認する
+4. JWT なし、無効 JWT、期限切れ JWT が 401 になることを確認する
+5. Clients / Models の `PUT` 後に対応する `GET` で値を確認する
+6. `POST /admin/reconcile` の成功時と失敗時の JSON 応答を確認する
+7. `/admin/ui/` は現時点で UI を返さず、認証後に JSON の 404 となることを確認する
 
-### 本番確認手順
+### 将来 UI の本番確認手順
 
-1. Cloudflare Access 経由で admin API (`/admin/*`) にアクセス
-2. quota / usage / clients / models データが表示されることを確認
-3. 編集・保存が成功し、API レスポンスと整合することを確認
-4. **認証境界テスト**:
-   - Cloudflare Access アプリで `/admin/*` が保護対象に含まれていることを確認
-   - 未認証のブラウザセッションから `/admin/quota` などへアクセスし、
-     200 以外の応答または Cloudflare Access ログイン画面へのリダイレクトとなることを確認
-   - 認証済みセッションで JSON が取得できることを確認
-   - セッション失効後の API 呼び出しで 401 または Cloudflare Access ログイン画面に遷移することを確認
+1. Cloudflare Access アプリケーションが `/admin/ui/*` と `/admin/*` を保護することを確認する
+2. `/admin/ui/` から静的 HTML、CSS、JavaScript が配信されることを確認する
+3. quota / usage / clients / models の JSON が UI に表示されることを確認する
+4. Clients / Models の編集・保存結果が API 応答と一致することを確認する
+5. 未認証、認証済み、セッション失効後の各ブラウザ動作を確認する
+6. Static Assets の未知パスと既存 Admin API のルーティングが競合しないことを確認する
 
-## 将来の拡張候補（今回のスコープ外）
+## 将来の拡張候補
 
-- `/admin/reconcile` の手動実行ボタン
+- 実装済み `POST /admin/reconcile` を呼び出す手動実行ボタン
 - 履歴データのグラフ表示
-- ダーク/ライトテーマ切り替え
+- ダーク / ライトテーマ切り替え
 - E2E 自動テスト（Playwright）
 - TypeScript 化やフロントエンドフレームワークの導入
 
 ## 関連ファイル
 
 - `apps/gateway-worker/src/admin.ts`
+- `apps/gateway-worker/src/access.ts`
 - `apps/gateway-worker/src/index.ts`
+- `apps/gateway-worker/src/reconcile.ts`
 - `apps/gateway-worker/wrangler.jsonc`
 - `apps/gateway-worker/test/admin-api.test.ts`
+- `apps/gateway-worker/test/access.test.ts`
+- `apps/gateway-worker/test/reconcile.test.ts`
+- `SPEC.md`
