@@ -123,6 +123,95 @@ HTML からは絶対パス `/admin/ui/app.js`、`/admin/ui/styles.css`、
 4. **Clients セクション**: `GET /admin/clients` の結果を表示し、インライン編集を提供
 5. **Models セクション**: `GET /admin/models` の結果を表示し、インライン編集を提供
 
+### Quota / Usage のレスポンススキーマ
+
+UI は公開 `/quota` のレスポンスではなく、Admin API 固有のレスポンスを使用する。
+レスポンスの JSON キー、表示、空結果、順序、更新時刻の扱いを次のとおり固定する。
+
+#### `GET /admin/quota`
+
+レスポンスは次の形とする。
+
+```json
+{
+  "request_id": "req_01H...",
+  "utc_day": "2026-08-12",
+  "pools": {
+    "standard": {
+      "utcDay": "2026-08-12",
+      "limit": 1000000,
+      "confirmedTokens": 1200,
+      "reservedTokens": 300,
+      "uncertainTokens": 0,
+      "requestCount": 12,
+      "updatedAt": "2026-08-12T12:00:00.000Z",
+      "pool": "STANDARD",
+      "remaining": 998500
+    },
+    "mini": {
+      "utcDay": "2026-08-12",
+      "limit": 10000000,
+      "confirmedTokens": 0,
+      "reservedTokens": 0,
+      "uncertainTokens": 0,
+      "requestCount": 0,
+      "updatedAt": "2026-08-12T12:00:00.000Z",
+      "pool": "MINI",
+      "remaining": 10000000
+    }
+  }
+}
+```
+
+| JSON フィールド | 表示ラベル | 単位 | 空結果・表示規則 |
+| --- | --- | --- | --- |
+| `request_id` | Request ID | 識別子 | 常に保持する。画面では詳細またはエラー調査用に表示する |
+| `utc_day` | UTC 日 | `YYYY-MM-DD` | 常に表示し、ローカル日へ変換しない |
+| `pools.standard` | STANDARD | オブジェクト | 常にカードを表示する。値が 0 の場合も「0」と表示する |
+| `pools.mini` | MINI | オブジェクト | 常にカードを表示する。値が 0 の場合も「0」と表示する |
+| `utcDay` | 対象 UTC 日 | `YYYY-MM-DD` | 各カード内で表示し、`utc_day` と一致することを前提とする |
+| `limit` | 上限 | tokens | トークン数として整数表示する |
+| `confirmedTokens` | 確定済み | tokens | 0 を空欄にせず表示する |
+| `reservedTokens` | 予約中 | tokens | 0 を空欄にせず表示する |
+| `uncertainTokens` | 不確実 | tokens | 0 を空欄にせず表示する |
+| `requestCount` | リクエスト数 | requests | 0 を空欄にせず表示する |
+| `remaining` | 残り | tokens | 0 を空欄にせず表示する |
+| `updatedAt` | 最終更新 | ISO 8601 timestamp | 各プールの更新時刻として表示する |
+| `pool` | Pool | enum | `STANDARD` または `MINI` を表示する |
+
+カードの順序は STANDARD、MINI の固定順とし、カード内の統計は上限、確定済み、
+予約中、不確実、リクエスト数、残り、最終更新の順で表示する。Quota は空の
+プールを返さず、値がない場合は API 契約違反としてエラー表示にする。
+
+#### `GET /admin/usage`
+
+レスポンスは次の形とする。
+
+```json
+{
+  "request_id": "req_01H...",
+  "utc_day": "2026-08-12",
+  "clients": [
+    { "client_id": "client_demo", "requests": 12, "tokens": 1500 }
+  ]
+}
+```
+
+| JSON フィールド | 表示ラベル | 単位 | 空結果・表示規則 |
+| --- | --- | --- | --- |
+| `request_id` | Request ID | 識別子 | 常に保持する。画面では詳細またはエラー調査用に表示する |
+| `utc_day` | UTC 日 | `YYYY-MM-DD` | 集計対象日として常に表示し、ローカル日へ変換しない |
+| `clients` | Clients | 配列 | 空配列の場合は「利用実績なし」と表示し、空行は追加しない |
+| `clients[].client_id` | Client ID | 識別子 | そのまま表示する |
+| `clients[].requests` | Requests | requests | 0 を空欄にせず表示する |
+| `clients[].tokens` | Tokens | tokens | 0 を空欄にせず表示する |
+
+Usage の行は `client_id` の昇順で UI 側が並べる。現行 API の SQL は配列順を保証
+しないため、API の返却順を表示順の契約として扱わない。Usage レスポンスには
+更新 timestamp がないため、ヘッダーの最終更新時刻にはレスポンス取得完了時刻を
+使用し、`utc_day` を更新時刻として扱わない。Quota の最終更新時刻は各プールの
+`updatedAt` を使用する。
+
 ### インライン編集
 
 - 編集対象行の「Edit」ボタンで対象フィールドを入力要素に切り替える
@@ -170,6 +259,11 @@ Admin API は全フィールドを必須とする。不正な入力には 400 �
 
 UI からの API リクエストは、ブラウザの Cloudflare Access セッションを利用する。
 追加の認証情報や秘密鍵をブラウザへ配布しない。
+`/admin/ui/*` と `/admin/*` は同一の Cloudflare Access application で保護し、
+その application の同一 AUD tag を `ACCESS_AUD` に設定する。別の application を
+使用する構成を採用する場合は、Linked App Token 等の構成を明記し、UI と API の
+両方で実際の `cf-access-jwt-assertion` の `aud` が `ACCESS_AUD` と一致することを
+本番確認手順で検証する。
 セッション失効時のリダイレクト動作はリポジトリ内のコードだけでは保証せず、
 Cloudflare Access アプリケーションの設定と合わせて本番環境で確認する。
 
@@ -204,6 +298,24 @@ UI 実装時には、次の点を実際の Workers Static Assets の挙動で検
 - `/admin/ui/*` と既存 `/admin/*` JSON API の競合がないこと
 - 未知の静的パスが意図どおり API handler または 404 に到達すること
 - `ASSETS` binding をコードから使用する必要があるかどうか
+
+### Static Assets の認証境界
+
+Static Assets が `handleAdmin` より先に処理される構成で `run_worker_first` を
+使用しない場合、Cloudflare Access は未認証の次のリクエストを拒否しなければ
+ならない。
+
+- `/admin/ui/`
+- `/admin/ui/app.js`
+- `/admin/ui/styles.css`
+
+`pico.min.css` および将来追加する `/admin/ui/*` の静的ファイルも同じ境界で保護
+する。Static Assets の設定だけで認証を実現できると仮定せず、Cloudflare Access
+application の path 設定と、未認証時の拒否結果を本番確認する。
+
+`run_worker_first` を選択する場合は、Worker が Access の認証境界を維持した上で
+`env.ASSETS.fetch(request)` を呼び出して静的ファイルを返す実装とする。認証前に
+直接 `env.ASSETS.fetch(request)` へ到達するフォールバックを作らない。
 
 ## エラー処理
 
@@ -241,6 +353,13 @@ UI 実装時には、次の点を実際の Workers Static Assets の挙動で検
 - クライアント側バリデーションは UX 向上のために行い、API 側の検証を維持する
 - Pico.css を同梱し、外部 CDN への依存を追加しない
 - UI 内へ Service Token、秘密鍵、クライアントキーを埋め込まない
+- 状態変更要求の要求元は、許可した Origin との一致検証または CSRF token により
+  検証する。SameSite cookie 設定だけを認証境界または CSRF 対策として扱わない。
+- 次の3つの状態変更 endpoint について、有効な Access JWT があっても異なる
+  Origin の要求を拒否し、状態を変更しないテストを用意する。
+  - `PUT /admin/clients/:id/policy`
+  - `PUT /admin/models/:model`
+  - `POST /admin/reconcile`
 
 ## テスト・動作確認
 
@@ -276,12 +395,18 @@ UI 実装時には、次の点を実際の Workers Static Assets の挙動で検
 
 ### 将来 UI の本番確認手順
 
-1. Cloudflare Access アプリケーションが `/admin/ui/*` と `/admin/*` を保護することを確認する
-2. `/admin/ui/` から静的 HTML、CSS、JavaScript が配信されることを確認する
-3. quota / usage / clients / models の JSON が UI に表示されることを確認する
-4. Clients / Models の編集・保存結果が API 応答と一致することを確認する
-5. 未認証、認証済み、セッション失効後の各ブラウザ動作を確認する
-6. Static Assets の未知パスと既存 Admin API のルーティングが競合しないことを確認する
+1. Cloudflare Access が `/admin/ui/*` と `/admin/*` を保護することを確認する
+2. 両パスが同一 application と同一 AUD tag を使用し、実際の
+   `cf-access-jwt-assertion` の `aud` が `ACCESS_AUD` と一致することを本番環境で
+   確認する。別 application の場合は Linked App Token 等の構成も確認する
+3. 未認証の `/admin/ui/`、`app.js`、`styles.css` が拒否されることを確認する。
+   `run_worker_first` の場合は、認証後に Worker が `env.ASSETS.fetch(request)` を
+   呼び出すことも確認する
+4. `/admin/ui/` から静的 HTML、CSS、JavaScript が配信されることを確認する
+5. quota / usage / clients / models の JSON が UI に表示されることを確認する
+6. Clients / Models の編集・保存結果が API 応答と一致することを確認する
+7. 未認証、認証済み、セッション失効後の各ブラウザ動作を確認する
+8. Static Assets の未知パスと既存 Admin API のルーティングが競合しないことを確認する
 
 ## 将来の拡張候補
 
