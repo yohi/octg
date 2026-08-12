@@ -12,7 +12,7 @@ function hasReserve(instance: object): instance is Pick<QuotaController, "reserv
 }
 
 describe("QuotaController.reserve idempotency key", () => {
-  it("returns the same result for the same idempotency key", async () => {
+  it("rejects a duplicate idempotency key after the first reservation", async () => {
     // Given: an unused quota pool and one idempotency key.
     const controller = stub("2026-08-12");
 
@@ -21,8 +21,14 @@ describe("QuotaController.reserve idempotency key", () => {
     const second = await controller.reserve("req-2", 100, 100, "idem-1");
     const state = await controller.getState();
 
-    // Then: the original result is reused and quota is counted once.
-    expect(second).toEqual(first);
+    // Then: the duplicate is rejected and quota is counted once.
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({
+      ok: false,
+      reason: "duplicate_idempotency_key",
+      requestId: "req-1",
+      resetAt: "2026-08-13T00:00:00Z",
+    });
     expect(state.reservedTokens).toBe(100);
     expect(state.requestCount).toBe(1);
   });
@@ -44,7 +50,7 @@ describe("QuotaController.reserve idempotency key", () => {
     expect(state.requestCount).toBe(2);
   });
 
-  it("rejects mismatched tokens for the same idempotency key", async () => {
+  it("rejects a reused idempotency key without re-evaluating its parameters", async () => {
     // Given: a saved reservation for an idempotency key.
     const controller = stub("2026-08-14");
     await controller.reserve("req-1", 100, 100, "idem-1");
@@ -57,7 +63,11 @@ describe("QuotaController.reserve idempotency key", () => {
       return instance.reserve("req-2", 99, 100, "idem-1");
     });
 
-    // Then: the conflicting reservation is rejected.
-    await expect(mismatchedReservation).rejects.toBeInstanceOf(TypeError);
+    // Then: the existing key is rejected without changing quota.
+    await expect(mismatchedReservation).resolves.toMatchObject({
+      ok: false,
+      reason: "duplicate_idempotency_key",
+      requestId: "req-1",
+    });
   });
 });

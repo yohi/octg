@@ -135,9 +135,7 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - `/quota` で残りクォータを確認してください。
 - Gateway A の timeout 設定を確認してください。
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
-- reservation の重複を避けるため、Gateway A の retry を無効化するか、1 回に制限してください。OCTG は delivery ごとに新しい `req_${ulid()}` を生成します。retry を有効化する場合は、Client が安定した idempotency key を Gateway A から Worker まで転送する契約を追加し、その key を reservation、Gateway B への upstream call、settlement の重複排除に使用する必要があります。現行の `req_${ulid()}` だけではこの end-to-end 冪等性を満たしません。
-- **推奨設定**: Gateway A の Settings → Advanced または同一機能において、retry 試行回数を `1`（= `cf-aig-max-attempts: 1`）に設定してください。これにより Gateway A から Worker への同じ delivery に対する duplicate reservation/settlement を防ぎます。OCTG Worker から Gateway B への outbound には既に `cf-aig-max-attempts: 2` を付与していますが、これは inbound 側の retry とは独立です。
-- **retry を有効化する場合の冪等契約**: Gateway A が retry する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを持つ必要があります。OCTG Worker は Gateway A から転送された `Idempotency-Key` を reservation、Gateway B への upstream call、settlement に使用し、同一 key に対しては 1 回の `reserve` と `settle` のみ実行します。key が欠落した場合は新規リクエストとして処理されます。key の重複排除スコープはアカウント全体（または Gateway A レベル）で行われ、保持 TTL と retry 応答は Cloudflare AI Gateway の仕様に従います。本手順を有効化する前に、同じ key を Worker が受け取り、Worker から Gateway B へ転送され、Durable Object 内で重複排除されることを integration test で確認してください。
+- **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。retry を有効化する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを付ける必要があります。OCTG Worker はその key を `QuotaController` と Gateway B への upstream call に変更せず転送し、Durable Object 内（pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。Worker から Gateway B への outbound に設定する `cf-aig-max-attempts: 2` は inbound 側の retry とは独立です。
 
 ### ストリーミングが動作しない
 
