@@ -72,8 +72,20 @@ npx wrangler d1 create octg
      - OpenAI 側で **Project A** を作成（または既存を使用）し、Billing → Data Sharing Program で **Data Sharing ON** を確認
      - Project A の **Project API keys** から新規キーを発行
      - このキーを AI Gateway の **BYOK（Bring Your Own Key）** 欄に貼り付けて保存
-6. **Settings** タブで **Spend Limit** を無料枠と同額に設定（例: STANDARD 1M tokens / MINI 10M tokens に対応する金額）。
-   - これは二次防御であり、authoritative な制御ではありません。Durable Object の reservation が主な制御です。
+6. **Settings** タブで **Spend Limit** を、許容できる有料利用額の上限として設定する。
+   - Tier 3 の無料枠は、`STANDARD 1,000,000 tokens/day` と
+     `MINI 10,000,000 tokens/day` という**トークン数の上限**です。
+     固定の USD クレジットではありません。モデルごとに input/output の
+     単価が異なるため、2 つのプールを 1 つの金額へ正確に換算できません。
+     したがって、「無料枠と同額」の設定値はありません。
+   - 有料利用を許可しない場合は、ダッシュボードで設定可能な最小額に
+     設定してください。最小額で無料リクエストまで拒否される場合は、
+     AI Gateway の仕様に従い、無料リクエストを通せる最小額を設定します。
+     そのうえで、OCTG の Durable Object reservation と paid fallback の
+     拒否ポリシーを authoritative な制御として使用します。
+   - Spend Limit は二次防御（eventually consistent）であり、無料枠
+     カウンターでも authoritative な制御でもありません。実際のトークン
+     上限は Durable Object の reservation が管理します。
 
 ### 2.5 Cloudflare Access アプリケーションの作成
 
@@ -105,7 +117,7 @@ Admin API（`/admin/*`）を保護するため、Cloudflare Zero Trust Access �
 
 ```jsonc
 "vars": {
-  "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_name>",
+  "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_name>/openai",
   "ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com",
   "ACCESS_AUD": "<audience-tag>"
 }
@@ -186,6 +198,13 @@ npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
 | `OPENAI_USAGE_API_KEY` | OpenAI Organization Usage API 読み取り用 admin key | 2.6 で作成 |
 
 > Secrets の値をコード・ログ・コミットに含めないこと。[Secret ローテーション手順](../README.md#secret-ローテーション) も参照。
+
+## Custom Provider として AI Gateway 経由で公開する
+
+初回デプロイ後、OCTG を Cloudflare AI Gateway の Custom Provider として登録して利用者に配布できます。
+この場合は **Gateway A（受信側）と Gateway B（OpenAI 送信側）を別の AI Gateway インスタンスにすること** が必須です。同一 Gateway ID に Gateway A の `custom-octg` エンドポイントと Gateway B の `/openai` エンドポイントを混在させると、OCTG Worker が Gateway A へ outbound した際にルーティングループするリスクがあります。
+
+詳細は [docs/cloudflare-ai-gateway-custom-provider.md](./cloudflare-ai-gateway-custom-provider.md) を参照してください。
 
 ## 5. クライアント鍵の発行
 
