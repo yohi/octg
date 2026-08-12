@@ -260,7 +260,7 @@ git commit -m "docs: OCTG as Cloudflare AI Gateway Custom Provider runbook"
 
 Locate the end of the `## クイックスタート（利用するだけ）` section. Insert before `## セットアップ（開発する場合）`:
 
-```markdown
+````markdown
 ### Cloudflare AI Gateway 経由で利用する
 
 管理者が OCTG を Cloudflare AI Gateway の **Custom Provider** として登録している場合、クライアントは Gateway A のエンドポイントを向けます。
@@ -272,7 +272,7 @@ API Key:  <発行された octg_sk_xxx>
 ```
 
 詳細なセットアップ手順とトラブルシューティングは [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照してください。
-```
+````
 
 - [ ] **Step 2: Validate README links**
 
