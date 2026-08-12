@@ -12,7 +12,7 @@ const badRequest = (requestId: string, message: string): OctgHttpError => ({ sta
 type ClientPolicyInput = { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean };
 type ModelInput = { complimentary_pool: "STANDARD" | "MINI" | "NONE"; enabled: boolean; fallback_model: string | null };
 type ClientListRow = { id: string; name: string; enabled: number; created_at: string; overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null };
-const DEFAULT_CLIENT_POLICY = { overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: true } as const;
+const DEFAULT_CLIENT_POLICY = { overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false } as const;
 
 function effectiveClientPolicy(row: { overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null }): { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean } {
   const overflow_mode = row.overflow_mode === "PAID_SHARED" ? "PAID_SHARED" : "REJECT";

@@ -66,6 +66,6 @@ describe("admin API", () => {
     expect(response.status).toBe(200);
     const body = await response.json<{ clients: Array<{ id: string; overflow_mode: string; output_limit_mode: string; max_paid_usd_day: number; cache_enabled: boolean }> }>();
     const client = body.clients.find((c) => c.id === TEST_CLIENT_ID);
-    expect(client).toMatchObject({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: true });
+    expect(client).toMatchObject({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false });
   });
 });
