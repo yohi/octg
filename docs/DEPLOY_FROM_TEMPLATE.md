@@ -72,8 +72,20 @@ npx wrangler d1 create octg
      - OpenAI 側で **Project A** を作成（または既存を使用）し、Billing → Data Sharing Program で **Data Sharing ON** を確認
      - Project A の **Project API keys** から新規キーを発行
      - このキーを AI Gateway の **BYOK（Bring Your Own Key）** 欄に貼り付けて保存
-6. **Settings** タブで **Spend Limit** を無料枠と同額に設定（例: STANDARD 1M tokens / MINI 10M tokens に対応する金額）。
-   - これは二次防御であり、authoritative な制御ではありません。Durable Object の reservation が主な制御です。
+6. **Settings** タブで **Spend Limit** を、許容できる有料利用額の上限として設定する。
+   - Tier 3 の無料枠は、`STANDARD 1,000,000 tokens/day` と
+     `MINI 10,000,000 tokens/day` という**トークン数の上限**です。
+     固定の USD クレジットではありません。モデルごとに input/output の
+     単価が異なるため、2 つのプールを 1 つの金額へ正確に換算できません。
+     したがって、「無料枠と同額」の設定値はありません。
+   - 有料利用を許可しない場合は、ダッシュボードで設定可能な最小額に
+     設定してください。最小額で無料リクエストまで拒否される場合は、
+     AI Gateway の仕様に従い、無料リクエストを通せる最小額を設定します。
+     そのうえで、OCTG の Durable Object reservation と paid fallback の
+     拒否ポリシーを authoritative な制御として使用します。
+   - Spend Limit は二次防御（eventually consistent）であり、無料枠
+     カウンターでも authoritative な制御でもありません。実際のトークン
+     上限は Durable Object の reservation が管理します。
 
 ### 2.5 Cloudflare Access アプリケーションの作成
 
