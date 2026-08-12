@@ -3,6 +3,7 @@ import type { PoolName, PoolState, RequestEntry } from "@octg/shared";
 
 export const POOL_KEY = "pool";
 export const ENTRY_PREFIX = "req:";
+export const IDEMPOTENCY_PREFIX = "idem:";
 export const UNRESOLVED_KEY = "unresolved";
 export const FINALIZE_KEY = "finalized";
 
@@ -72,6 +73,21 @@ export async function putEntry(
     ...entry,
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function getIdempotencyRequestId(
+  storage: QuotaStorage,
+  idempotencyKey: string,
+): Promise<string | undefined> {
+  return storage.get<string>(`${IDEMPOTENCY_PREFIX}${idempotencyKey}`);
+}
+
+export async function putIdempotencyRequestId(
+  storage: QuotaStorage,
+  idempotencyKey: string,
+  requestId: string,
+): Promise<void> {
+  await storage.put(`${IDEMPOTENCY_PREFIX}${idempotencyKey}`, requestId);
 }
 
 export async function loadUnresolved(storage: QuotaStorage): Promise<UnresolvedState> {

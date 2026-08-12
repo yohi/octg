@@ -18,6 +18,10 @@ export default defineConfig(async () => {
       })
     ],
     test: {
+      include: [
+        "./test/**/*.test.ts",
+        "../../durable-objects/quota-controller/test/**/*.test.ts",
+      ],
       setupFiles: ["./test/setup.ts"]
     }
   };
