@@ -62,7 +62,7 @@ Gateway A と Gateway B は別の Gateway インスタンスにする必要が�
 - Gateway B の OpenAI provider key が BYOK であり、Worker が OpenAI キーを**送信しない**こと。
 - クライアントキーが D1 に `key_hash` として存在すること。
 
-> **実装上の注意:** 現在の Worker は Gateway B のトークンを `Authorization` ヘッダーで送信します。設計仕様では `cf-aig-authorization` が指定されています。Cloudflare AI Gateway が outbound リクエストを拒否する場合は、`apps/gateway-worker/src/upstream.ts` を更新して `cf-aig-authorization` を使用してください。現在のスコープはドキュメント整備を優先しているため、この変更は将来のコード変更として残しています。
+> **注意:** Gateway B への outbound リクエストには `cf-aig-authorization` ヘッダーで Run token を送信します。`Authorization` ヘッダーは OCTG クライアント認証（Gateway A 経由の受信リクエスト）にのみ使用されます。
 
 ## 動作確認
 
