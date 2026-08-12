@@ -51,7 +51,9 @@ OCTG Worker が Gateway A の Custom Provider エンドポイント（`custom-oc
 
 Gateway A と Gateway B を別の Gateway として作成しても、それ自体は認可境界ではない。AI Gateway の Run token はアカウント単位の権限であり、同一 Cloudflare アカウント内の他 Gateway や登録済み BYOK credential にアクセスできる範囲を持ち得る。そのため、強い認可境界が必要な場合は Gateway A と Gateway B を別 Cloudflare アカウントに配置するか、Worker 側の AI Gateway binding を使用して outbound 経路を Worker に束縛する。Run token が漏洩した場合の影響範囲（同一アカウント内の Gateway 実行、ログ・BYOK credential の利用可能範囲）は発行時に確認し、Gateway A/B ごとに別トークンとして管理する。
 
-Run token の漏洩時は、影響を受けるアカウント内の Gateway、BYOK credential、ログを確認し、該当 token を直ちに失効させる。新しい最小権限の Run token を発行して Secret を更新し、デプロイ後に Gateway B の疎通を確認してから旧 token を失効させる。別アカウント構成では、各アカウントの token と BYOK credential を混在させない。
+Run token の漏洩時は、影響を受けるアカウント内の Gateway、BYOK credential、ログを確認し、該当 token を直ちに失効させる。その後、新しい最小権限の Run token を発行して Secret を更新し、デプロイ後に Gateway B の疎通を確認する。漏洩時は可用性より不正利用の阻止を優先し、旧 token の疎通確認後失効は行わない。
+
+計画ローテーション時は、新しい最小権限の Run token を発行して Secret を更新し、デプロイ後に Gateway B の疎通を確認してから旧 token を失効させる。別アカウント構成では、各アカウントの token と BYOK credential を混在させない。
 
 ## 5. 通信契約
 
@@ -134,6 +136,7 @@ Content-Type: application/json
 curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions \
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
+  -H "cf-aig-collect-log-payload: false" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -147,6 +150,7 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions \
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
+  -H "cf-aig-collect-log-payload: false" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -157,9 +161,9 @@ curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-
 
 ### 7.3 確認ポイント
 
-- Client → Gateway A の request では、必要に応じて `cf-aig-collect-log-payload: false` を設定し、payload を保存せず metadata のみ記録する。Gateway B への OCTG Worker outbound request でも同じ方針を適用する。
-- payload 保存は Gateway A/B とも opt-in とし、Gateway A では Client → Gateway A の request/response payload、Gateway B では OCTG → Gateway B および OpenAI outbound の payload を保存対象とする。保存する場合のアクセス権は、Gateway A/B の運用管理者と監査担当者に限定する。削除は各 Gateway の Logs 画面または対応する管理 API から対象ログを特定して実行し、削除結果を監査記録に残す。外部保存する場合は承認済みの暗号化ストレージへ転送し、保存先の IAM と暗号化鍵へのアクセスも同じ担当者に限定する。
-- Gateway A/B ごとに payload 容量上限を設定し、上限到達時は新規 payload の保存を停止して metadata-only に切り替える。payload 保存のためにリクエストを拒否したり、`cf-aig-cache-ttl: 0` で代替したりしない。保持は固定日数ではなく容量上限で管理し、上限と切替状態を定期確認する。prompt・response の独自保存は D1 では行わない。
+- Cloudflare AI Gateway のログ収集は Gateway A/B とも metadata を既定の保存対象とし、raw request/response payload は保存しない方針とする。Client → Gateway A の request と OCTG Worker → Gateway B の outbound request の両方に `cf-aig-collect-log-payload: false` を設定し、payload を保存せず metadata のみ記録する。payload を保存する例外は、対象 Gateway、request/response の別、保存期間ではなくログ件数上限、アクセス権、削除方法を事前承認した場合に限る。
+- payload を保存する場合の対象は、Gateway A では Client → Gateway A の request/response payload、Gateway B では OCTG → Gateway B および OpenAI outbound の payload とする。アクセス権は Gateway A/B の運用管理者と監査担当者に限定する。削除は各 Gateway の Logs 画面または対応する管理 API から対象ログを特定して実行し、削除結果を監査記録に残す。外部保存する場合は承認済みの暗号化ストレージへ Logpush 等で転送し、保存先の IAM と暗号化鍵へのアクセスも同じ担当者に限定する。ログ 1 件あたりの保存サイズ上限も確認し、上限を超える payload は保存対象にしない。
+- Gateway A/B ごとにログ件数の保存上限と上限到達時の動作を設定する。動作は `STOP_INSERTING`（新規ログ保存を停止）または `DELETE_OLDEST`（最も古いログを削除して保存を継続）のいずれかとし、上限到達時に payload を metadata-only へ自動切替する前提にはしない。保持は固定日数ではなくログ件数・プラン上のストレージ制限で管理し、上限、選択した動作、現在の到達状況を定期確認する。prompt・response の独自保存は D1 では行わない。
 - AI Gateway A のログにリクエストが記録される。
 - OCTG の `/quota` でクォータが消費されている。
 - AI Gateway B のログに OpenAI への outbound が記録される。
