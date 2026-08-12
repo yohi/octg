@@ -41,12 +41,13 @@ export async function callUpstream(
   if (!env.OCTG_UPSTREAM_API_TOKEN) throw new UpstreamConfigError("OCTG_UPSTREAM_API_TOKEN is not configured");
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    authorization: `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
+    "cf-aig-authorization": `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
     "cf-aig-request-timeout": "25000",
     "cf-aig-max-attempts": "2",
     "cf-aig-retry-delay": "1000",
     "cf-aig-backoff": "exponential",
     "cf-aig-metadata": JSON.stringify(meta),
+    "cf-aig-collect-log-payload": "false",
   };
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";

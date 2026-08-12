@@ -7,7 +7,7 @@
     "QUOTA_LIMIT_STANDARD": "1000000",
     "QUOTA_LIMIT_MINI": "10000000",
     "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/4bc6b4d26ae21d2b0d5bbb7ce91f1cda/octg-gateway/openai",
-    "ACCESS_TEAM_DOMAIN": "yohi.cloudflareaccess.com",
+    "ACCESS_TEAM_DOMAIN": "https://yohi.cloudflareaccess.com",
     "ACCESS_AUD": "d261bb3efaea8adc0fb32db48b86c855212c9ddde60ab90de13aa7062ed77abf",
     "ACCESS_ALLOWED_SERVICE_TOKEN_IDS": ""
   },
