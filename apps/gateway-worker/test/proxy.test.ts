@@ -91,6 +91,27 @@ describe("proxy pipeline", () => {
     expect(response.status).toBe(200);
   });
 
+  it("applies CLAMP policy stored via admin API end-to-end", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { outputLimitMode: "CLAMP" });
+    invalidateConfigCaches();
+    const state = todayStub();
+    await state.reserve("seed-admin-clamp", 900_000, 900_000);
+    let seenMaxCompletionTokens: number | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { max_completion_tokens: number };
+      seenMaxCompletionTokens = body.max_completion_tokens;
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 500_000 });
+    expect(response.status).toBe(200);
+    expect(seenMaxCompletionTokens).toBeDefined();
+    expect(seenMaxCompletionTokens).toBeLessThan(500_000);
+    expect(seenMaxCompletionTokens).toBeGreaterThan(0);
+  });
+
   it("supports the responses endpoint with usage settlement", async () => {
     let upstreamBody: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
