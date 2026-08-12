@@ -1,6 +1,6 @@
 import { errorResponse, quotaIdOf, utcDayOf, type OctgHttpError } from "@octg/shared";
 import { snapshotOf } from "./proxy";
-import { verifyAccessJwt } from "./access";
+import { verifyAccessJwtOrServiceToken } from "./access";
 import { invalidateConfigCaches, loadRegistry } from "./policy";
 import { runReconciliation, targetUtcDay } from "./reconcile";
 import type { Env } from "./index";
@@ -33,7 +33,7 @@ function parseModel(value: Record<string, unknown> | undefined): ModelInput | un
 
 export async function handleAdmin(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
   const url = new URL(request.url); if (!url.pathname.startsWith("/admin/")) return undefined;
-  const verified = await verifyAccessJwt(request, env, requestId); if (verified !== true) return errorResponse(verified);
+  const verified = await verifyAccessJwtOrServiceToken(request, env, requestId); if (verified !== true) return errorResponse(verified);
   const day = utcDayOf(new Date());
   if (request.method === "GET" && url.pathname === "/admin/quota") {
     const view = async (pool: "STANDARD" | "MINI") => snapshotOf(await env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day))).getState());
