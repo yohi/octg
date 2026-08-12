@@ -36,6 +36,7 @@ export async function callUpstream(
   body: unknown,
   meta: UpstreamMeta,
   cacheKey: string | null,
+  idempotencyKey: string | undefined,
   transport: UpstreamTransport = fetch,
 ): Promise<Response> {
   if (!env.OCTG_UPSTREAM_API_TOKEN) throw new UpstreamConfigError("OCTG_UPSTREAM_API_TOKEN is not configured");
@@ -49,6 +50,7 @@ export async function callUpstream(
     "cf-aig-metadata": JSON.stringify(meta),
     "cf-aig-collect-log-payload": "false",
   };
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";
   return transport(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {

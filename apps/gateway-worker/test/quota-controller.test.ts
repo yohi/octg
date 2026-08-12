@@ -201,3 +201,17 @@ describe("QuotaController identity", () => {
     });
   }
 });
+
+describe("QuotaController client-scoped idempotency", () => {
+  it("allows the same key for different clients", async () => {
+    const controller = stub("STANDARD", "2026-08-26");
+
+    const first = await controller.reserve("req-client-a", 100, 100, "shared-key", "client-a");
+    const second = await controller.reserve("req-client-b", 100, 100, "shared-key", "client-b");
+    const state = await controller.getState();
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(state.requestCount).toBe(2);
+  });
+});
