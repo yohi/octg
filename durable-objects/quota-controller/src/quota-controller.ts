@@ -63,6 +63,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     tokens: number,
     upperBoundTokens: number,
     idempotencyKey?: string,
+    clientId?: string,
   ): Promise<ReserveResult> {
     if (
       !Number.isSafeInteger(tokens) ||
@@ -79,12 +80,17 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
 
     return this.ctx.storage.transaction(async (storage) => {
       const idempotencyRequestId = idempotencyKey !== undefined
-        ? await getIdempotencyRequestId(storage, idempotencyKey)
+        ? await getIdempotencyRequestId(storage, idempotencyKey, clientId)
         : undefined;
-      const entryRequestId = idempotencyRequestId ?? requestId;
+      const mappedEntry = idempotencyRequestId === undefined
+        ? undefined
+        : await getEntry(storage, idempotencyRequestId);
+      const entryRequestId = mappedEntry?.state === "released"
+        ? requestId
+        : (idempotencyRequestId ?? requestId);
       const existing = await getEntry(storage, entryRequestId);
       if (existing) {
-        if (idempotencyRequestId !== undefined) {
+        if (idempotencyRequestId !== undefined && existing.state !== "released") {
           return {
             ok: false,
             reason: "duplicate_idempotency_key",
@@ -145,7 +151,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         reservedCount: unresolved.reservedCount + 1,
       });
       if (idempotencyKey !== undefined) {
-        await putIdempotencyRequestId(storage, idempotencyKey, requestId);
+        await putIdempotencyRequestId(storage, idempotencyKey, requestId, clientId);
       }
       return result;
     });

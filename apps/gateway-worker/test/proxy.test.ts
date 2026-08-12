@@ -60,8 +60,10 @@ describe("proxy pipeline", () => {
 
   it("accepts Idempotency-Key while sending AI Gateway controls", async () => {
     let upstreamHeaders: Headers | undefined;
+    let upstreamMetadata: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
       upstreamHeaders = new Headers(init?.headers);
+      upstreamMetadata = JSON.parse(upstreamHeaders.get("cf-aig-metadata") ?? "{}") as Record<string, unknown>;
       return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -80,6 +82,8 @@ describe("proxy pipeline", () => {
     expect(response.status).toBe(200);
     expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
     expect(upstreamHeaders?.get("cf-aig-authorization")).toBe("Bearer test-upstream-token");
+    expect(upstreamHeaders?.get("Idempotency-Key")).toBe("idem-test-1");
+    expect(upstreamMetadata?.idempotency_key).toBeUndefined();
   });
 
   it("forwards Idempotency-Key to Gateway B upstream", async () => {
@@ -104,6 +108,37 @@ describe("proxy pipeline", () => {
 
     expect(response.status).toBe(200);
     expect(upstreamHeaders?.get("Idempotency-Key")).toBe("idem-upstream-1");
+  });
+
+  it("retries a released Idempotency-Key through upstream", async () => {
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ error: { code: "invalid_request" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const request = {
+      model: "gpt-5",
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const send = () => SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_CLIENT_KEY}`,
+        "Idempotency-Key": "idem-released-retry-1",
+      },
+      body: JSON.stringify(request),
+    });
+
+    const first = await send();
+    const second = await send();
+
+    expect(first.status).toBe(400);
+    expect(second.status).toBe(400);
+    expect(upstreamCallCount).toBe(2);
   });
 
   it("rejects a completed duplicate Idempotency-Key without calling upstream again", async () => {

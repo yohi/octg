@@ -17,20 +17,20 @@
 ### 基本方針
 
 - Worker は Gateway A から送信された `Idempotency-Key` ヘッダーを受信する
-- 同一 key に対して Durable Object 内で reserve / settle を各 1 回に制限する
+- client × pool × UTC day の同一 key に対して Durable Object 内で reserve / settle を各 1 回に制限する
 - Worker は同じ key を Gateway B への upstream call でも転送する
 - key がない場合は従来通り `req_${ulid()}` で新規処理する
 
 ### Dedupe スコープ
 
-- `Idempotency-Key` の重複排除は Durable Object 内（pool × UTC day）で行う
+- `Idempotency-Key` の重複排除は Durable Object 内（client × pool × UTC day）で行う
 - 同一 key が別 pool / 別日に到達した場合は別リクエストとして扱う
-- 同一 key が同じ DO 内で再送された場合のみ既存結果を返す
+- 同一 key が同じ scope 内で再送された場合のみ duplicate として扱う
 
 ### 再送時のレスポンス
 
-- **非ストリーミング:** DO 内に最後の上流応答 body を保存し、再送時に返す
-- **ストリーミング:** レスポンス body を保存しない。再送時は `409 Conflict` で「既に処理中 / 処理済み」を返し、Gateway A の retry を停止させる
+- **全リクエスト:** レスポンス body は保存・再生しない。既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `409 Conflict` を返し、Gateway A の retry を停止させる
+- `released` entry の key は新しい予約として再利用する
 - いずれの場合も quota の二重消費は発生しない
 
 ### 保持 TTL

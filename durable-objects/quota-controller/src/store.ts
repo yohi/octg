@@ -78,16 +78,18 @@ export async function putEntry(
 export async function getIdempotencyRequestId(
   storage: QuotaStorage,
   idempotencyKey: string,
+  clientId?: string,
 ): Promise<string | undefined> {
-  return storage.get<string>(`${IDEMPOTENCY_PREFIX}${idempotencyKey}`);
+  return storage.get<string>(`${IDEMPOTENCY_PREFIX}${clientId ?? "legacy"}:${idempotencyKey}`);
 }
 
 export async function putIdempotencyRequestId(
   storage: QuotaStorage,
   idempotencyKey: string,
   requestId: string,
+  clientId?: string,
 ): Promise<void> {
-  await storage.put(`${IDEMPOTENCY_PREFIX}${idempotencyKey}`, requestId);
+  await storage.put(`${IDEMPOTENCY_PREFIX}${clientId ?? "legacy"}:${idempotencyKey}`, requestId);
 }
 
 export async function loadUnresolved(storage: QuotaStorage): Promise<UnresolvedState> {

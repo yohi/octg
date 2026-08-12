@@ -387,13 +387,12 @@ export type ReserveResult =
 
 When reserve returns `duplicate_idempotency_key`:
 
-- For non-streaming requests with stored response body: return stored body
-- For streaming or missing stored body: return `409 Conflict`
+- For every request with an existing non-released entry: return `409 Conflict`
+- Do not store or replay response bodies; a released entry may be reused for a new reservation
 
-- [ ] **Step 5: Store response body for non-streaming**
+- [ ] **Step 5: Keep response bodies out of idempotency storage**
 
-In DO RequestEntry, add `responseBody?: string` and `responseStatus?: number`.
-After upstream returns, store the body if non-streaming.
+Do not add `responseBody` or `responseStatus` to `RequestEntry`. Duplicate requests consistently return `409 Conflict`.
 
 - [ ] **Step 6: Run tests**
 

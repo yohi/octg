@@ -116,7 +116,7 @@ reserved --release--> released                             # upstream 到達前�
 1. `reserve(requestId, tokens, upperBoundTokens) -> { ok, remaining, resetAt }`
    - 予約量が remaining 内に収まる場合のみ `reservedTokens += tokens`。
    - pool 利用ポリシー（要件第 28 章）に基づく NORMAL / CAUTION / STRICT 判定もここで行う。STRICT 帯では conservative upper bound（`upperBoundTokens`）が remaining 以下の場合のみ許可。
-   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は同じ key を同一 DO（pool × UTC day）内で重複排除し、完了済み key の再送は `duplicate_idempotency_key` 理由で拒否する。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。`reserved` 状態の再送は保存済み結果を返して no-op とする。
+   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
 2. `settle(requestId, actualTokens) -> { ok }`
    - `reserved` から: `reservedTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。
    - `uncertain` から（Usage API 確定より先に上流 usage が届いた遅延 settle）: `uncertainTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。**予約量の二重減算はしない**（減算対象は遷移元バケットのみ）。

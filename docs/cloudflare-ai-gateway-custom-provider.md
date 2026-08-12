@@ -135,7 +135,7 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - `/quota` で残りクォータを確認してください。
 - Gateway A の timeout 設定を確認してください。
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
-- **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。retry を有効化する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを付ける必要があります。OCTG Worker はその key を `QuotaController` と Gateway B への upstream call に変更せず転送し、Durable Object 内（pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。Worker から Gateway B への outbound に設定する `cf-aig-max-attempts: 2` は inbound 側の retry とは独立です。
+- **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。retry を有効化する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを付ける必要があります。OCTG Worker はその key を QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。Worker から Gateway B への outbound に設定する `cf-aig-max-attempts: 2` は inbound 側の retry とは独立です。
 
 ### ストリーミングが動作しない
 

@@ -131,7 +131,7 @@ export async function handleProxy(
   }
 
   const reservation = estimatedInput + output.maxOutputTokens + margin;
-  const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey);
+  const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey, auth.id);
   if (!reserved.ok) {
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
     if (reserved.reason === "duplicate_idempotency_key") {
@@ -167,9 +167,9 @@ export async function handleProxy(
         eligibility: "COMPLIMENTARY",
         route: "free_shared",
         request_id: requestId,
-        idempotency_key: idempotencyKey,
       },
       policy.cacheEnabled ? `octg:${auth.id}` : null,
+      idempotencyKey,
     );
   } catch (error) {
     if (error instanceof UpstreamConfigError) {
