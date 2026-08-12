@@ -12,14 +12,9 @@ beforeAll(async () => {
 beforeEach(async () => seedClient());
 const token = () => new SignJWT({ sub: "admin@example.com" }).setProtectedHeader({ alg: "RS256" }).setIssuer("https://team.cloudflareaccess.com").setAudience("test-aud").setExpirationTime("10m").sign(privateKey);
 const admin = async (path: string, init?: RequestInit, authenticated: "jwt" | false = false) => {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  const initHeaders = init?.headers;
-  if (initHeaders) {
-    for (const [key, value] of Object.entries(initHeaders)) {
-      if (typeof value === "string") headers[key] = value;
-    }
-  }
-  if (authenticated === "jwt") headers["cf-access-jwt-assertion"] = await token();
+  const headers = new Headers(init?.headers);
+  headers.set("content-type", "application/json");
+  if (authenticated === "jwt") headers.set("cf-access-jwt-assertion", await token());
   return SELF.fetch(`https://octg.test${path}`, { ...init, headers });
 };
 

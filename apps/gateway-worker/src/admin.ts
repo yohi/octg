@@ -18,7 +18,9 @@ function effectiveClientPolicy(row: { overflow_mode: string | null; output_limit
   const overflow_mode = row.overflow_mode === "PAID_SHARED" ? "PAID_SHARED" : "REJECT";
   const output_limit_mode = row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT";
   const max_paid_usd_day = typeof row.max_paid_usd_day === "number" && Number.isFinite(row.max_paid_usd_day) && row.max_paid_usd_day >= 0 ? row.max_paid_usd_day : 0;
-  const cache_enabled = row.cache_enabled === 1 ? true : row.cache_enabled === 0 ? false : DEFAULT_CLIENT_POLICY.cache_enabled;
+  let cache_enabled: boolean = DEFAULT_CLIENT_POLICY.cache_enabled;
+  if (row.cache_enabled === 1) cache_enabled = true;
+  else if (row.cache_enabled === 0) cache_enabled = false;
   return { overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled };
 }
 

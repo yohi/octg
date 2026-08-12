@@ -98,50 +98,23 @@ admin-api (handleAdmin)
 
 ## 認証の動作
 
-- 運用者は Cloudflare Access で `/admin/ui/` にアクセス
-- Access は `cf-access-jwt-assertion` Cookie/ヘッダーを付与
-- UI からの `fetch()` は Same-Origin のため、ブラウザが自動的に Cookie を送信
+- API リクエストには `cf-access-jwt-assertion` ヘッダーが必要
 - API 側の `verifyAccessJwt` が JWT を検証し、通過する
 - Service Token は UI から利用しない
 
-## エラー処理
+## 静的アセット配信（将来実装）
 
-| 場面 | 動作 |
-| --- | --- |
-| API 取得失敗 | セクションにエラーメッセージ表示、再試行ボタンを表示 |
-| 編集 PUT 失敗 | 行内にエラーメッセージ、入力値は維持 |
-| ネットワークエラー | トースト風メッセージで通知 |
-| 認証切れ | Cloudflare Access がログイン画面にリダイレクトするため UI 側では特別対処不要 |
+この設計書は管理 UI の API 契約と動作を定めるものとして作成された。
+ブラウザ UI（HTML/CSS/JS）自体は、本 PR では**実装しない**。
 
-## セキュリティ
+実装時には以下を行う予定である：
 
-- UI も API も同一ドメイン・同一 Access 保護下
-- Service Token や秘密鍵をブラウザに露出しない
-- 入力値は admin-api 側で既存の検証が入るため、
-  UI 側でもクライアント側バリデーションを行う（二重防御ではなく UX 向上のため）
-- Pico.css は `public/admin/ui/pico.min.css` として同梱し、同一ドメインから配信する。
-
-## ファイル構成
-
-```text
-apps/gateway-worker/
-├── public/
-│   └── admin/ui/
-│       ├── index.html      # UI エントリポイント
-│       ├── styles.css      # 追加スタイル（Pico.css 上書き用・最小限）
-│       ├── pico.min.css    # 同梱 Pico.css
-│       └── app.js          # UI ロジック（fetch, レンダリング, インライン編集）
-├── src/
-│   ├── admin.ts        # admin-api。Clients 一覧に effective policy 値を追加
-│   └── index.ts        # Worker エントリ
-├── wrangler.jsonc        # static_assets 設定追加
-```
-
-## 変更ファイル詳細
-
-### `apps/gateway-worker/wrangler.jsonc`
-
-Workers Static Assets を有効化するため、`assets` 設定を追加する。
+- `apps/gateway-worker/public/admin/ui/` 配下に静的ファイルを配置する。
+  - `index.html` — UI エントリポイント
+  - `styles.css` — 追加スタイル（Pico.css 上書き用・最小限）
+  - `pico.min.css` — 同梱 Pico.css
+  - `app.js` — UI ロジック（fetch, レンダリング, インライン編集）
+- `apps/gateway-worker/wrangler.jsonc` に `assets` 設定を追加して Workers Static Assets を有効化する。
 
 ```jsonc
 {
@@ -166,38 +139,55 @@ Static Assets による配信で十分なため、fetch handler における
 `/admin/ui/*` 判定は不要。
 `Env` インターフェースに `ASSETS: Fetcher` を追加する必要もない。
 
+## エラー処理
+
+| 場面 | 動作 |
+| --- | --- |
+| API 取得失敗 | セクションにエラーメッセージ表示、再試行ボタンを表示 |
+| 編集 PUT 失敗 | 行内にエラーメッセージ、入力値は維持 |
+| ネットワークエラー | トースト風メッセージで通知 |
+| 認証切れ | Cloudflare Access がログイン画面にリダイレクトするため UI 側では特別対処不要 |
+
+## セキュリティ
+
+- UI も API も同一ドメイン・同一 Access 保護下
+- Service Token や秘密鍵をブラウザに露出しない
+- 入力値は admin-api 側で既存の検証が入るため、
+  UI 側でもクライアント側バリデーションを行う（二重防御ではなく UX 向上のため）
+- Pico.css は `public/admin/ui/pico.min.css` として同梱し、同一ドメインから配信する。
+
 ## テスト・動作確認
 
 ### ローカル確認手順
 
 1. `npm install`
 2. `npm run dev -w apps/gateway-worker`
-3. ブラウザで `http://localhost:8787/admin/ui/` にアクセス
-4. 各セクションが表示されることを確認
-5. Clients / Models のインライン編集で保存後、再読み込みで値が保持されることを確認
+3. 静的 UI は本 PR で未実装のため、API のみ動作確認する。
+4. `curl` またはブラウザで以下の admin API にアクセスし、
+   認証済みセッションでは JSON が取得でき、未認証セッションでは
+   401 または Cloudflare Access ログイン画面に遷移することを確認する。
+   - `/admin/quota`
+   - `/admin/usage`
+   - `/admin/clients`
+   - `/admin/models`
+5. Clients / Models の `PUT` API を呼び出した後、対応する `GET` API で
+   値が保持されることを確認する。
 6. **認証境界テスト**:
-   - 未認証状態で `/admin/ui`、 `/admin/ui/`、 `/admin/ui/app.js`、
-     `/admin/ui/styles.css` が 200 以外の応答または
-     Cloudflare Access ログイン画面へのリダイレクトとなることを確認
-   - 認証済みセッションで HTML、CSS、JavaScript が取得できることを確認
-   - セッション失効後の `fetch /admin/quota` などで UI が再読み込みし、
-     ログイン画面へ案内されることを確認
-   - `wrangler.jsonc` の `routes` / Access アプリ設定で `/admin/ui/*` が
-     保護対象に含まれていることを確認
+   - 未認証状態で `/admin/quota` などが 200 以外になることを確認
+   - 認証済みセッションで JSON が取得できることを確認
+   - セッション失効後の API 呼び出しで 401 または Cloudflare Access ログイン画面に遷移することを確認
 
 ### 本番確認手順
 
-1. Cloudflare Access 経由で `/admin/ui/` にアクセス
+1. Cloudflare Access 経由で admin API (`/admin/*`) にアクセス
 2. quota / usage / clients / models データが表示されることを確認
 3. 編集・保存が成功し、API レスポンスと整合することを確認
 4. **認証境界テスト**:
-   - Cloudflare Access アプリで `/admin/ui/*` が保護対象に含まれていることを確認
-   - 未認証のブラウザセッションから `/admin/ui`、 `/admin/ui/`、
-     `/admin/ui/app.js`、 `/admin/ui/styles.css` へアクセスし、
+   - Cloudflare Access アプリで `/admin/*` が保護対象に含まれていることを確認
+   - 未認証のブラウザセッションから `/admin/quota` などへアクセスし、
      200 以外の応答または Cloudflare Access ログイン画面へのリダイレクトとなることを確認
-   - 認証済みセッションで HTML、CSS、JavaScript が取得できることを確認
-   - セッション失効後の API 呼び出しで UI が再読み込みされ、
-     ログイン画面へ案内されることを確認
+   - 認証済みセッションで JSON が取得できることを確認
+   - セッション失効後の API 呼び出しで 401 または Cloudflare Access ログイン画面に遷移することを確認
 
 ## 将来の拡張候補（今回のスコープ外）
 
