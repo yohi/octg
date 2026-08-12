@@ -45,7 +45,9 @@ OpenAI API
 
 ### 4.1 Gateway A と Gateway B を分離する理由
 
-OCTG を同じ AI Gateway 内の Custom Provider として登録しつつ、OCTG の upstream もその同じ Gateway の `/openai` エンドポイントを指すと、リクエストが `Gateway A → OCTG → Gateway A → ...` と循環するリスクがある。これを避けるため、inbound と outbound で異なる AI Gateway インスタンスを使用する。
+OCTG Worker が Gateway A の Custom Provider エンドポイント（`custom-octg` または OCTG 自身の Worker URL に戻る経路）を upstream として指すと、リクエストが `Gateway A → OCTG → Gateway A → OCTG → ...` と循環するリスクがある。これを避けるため、inbound と outbound で異なる AI Gateway インスタンスを使用する。
+
+なお、同一 Gateway ID の `/openai` provider-native endpoint は OpenAI への単純な転送経路であり、Gateway A → OCTG → Gateway A `/openai` → OpenAI という経路では循環しない。Gateway 分離の主な目的は、inbound 側と outbound 側のログ・キー・ポリシーを分離し、運用境界を明確にすることにある。
 
 ## 5. 通信契約
 
@@ -179,10 +181,11 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 ### 8.4 循環ルーティング
 
 **原因**:
-- Gateway A と Gateway B が同じインスタンス。
+- `OCTG_UPSTREAM_BASE_URL` が Gateway A の `custom-octg` エンドポイント、または OCTG Worker 自身へ戻る経路を指している。
 
 **対処**:
-- 必ず別の AI Gateway インスタンスを作成する。
+- `OCTG_UPSTREAM_BASE_URL` は Gateway B の `/openai` URL（例: `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_b_id}/openai`）を指すようにする。
+- 必ず Gateway A と Gateway B は別の AI Gateway インスタンスを使用する。
 
 ### 8.5 レスポンスが返らない / タイムアウト
 
