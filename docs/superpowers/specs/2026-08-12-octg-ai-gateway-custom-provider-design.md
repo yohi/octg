@@ -18,8 +18,9 @@ OCTG は OpenAI Data Sharing Program（Tier 3）の無料枠を複数クライ�
 
 - OCTG Worker は既にデプロイ済みであること。
 - Gateway B（OCTG → OpenAI 用の AI Gateway）が存在し、`OCTG_UPSTREAM_BASE_URL` が `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_b_id}/openai` で終わっていること。
-- Gateway B には OpenAI Project A（Data Sharing ON）の API キーが BYOK で登録されていること。
+- Gateway B には OpenAI Project A（Data Sharing ON）の API キーが BYOK 方式で登録されていること。
 - 発行済みの OCTG クライアントキー（`octg_sk_*`）が存在すること。
+- Gateway B から OpenAI への outbound 認証には、Gateway B の **AI Gateway Run token** を `cf-aig-authorization: Bearer <token>` として使用する。BYOK で登録された OpenAI プロバイダーキーは AI Gateway が `Authorization` ヘッダーとして OpenAI に送信するため、Worker 側から `Authorization` ヘッダーで送信しないこと。
 
 ## 4. アーキテクチャ
 
@@ -63,13 +64,15 @@ Content-Type: application/json
 
 - モデル名は素の `gpt-5.6-luna` 形式で指定する。`custom-octg/` prefix は不要。
 - `Authorization` ヘッダーには OCTG クライアントキーを指定する。
+- Gateway A の Provider Keys に登録した `octg_sk_*` は、AI Gateway から OCTG Worker へ転送される際に `Authorization: Bearer octg_sk_*` として到達する。
 
 ### 5.2 Gateway A → OCTG Worker
 
 - Custom Provider の Base URL: `https://octg-gateway.<subdomain>.workers.dev`（末尾に `/v1` を含めない）
 - AI Gateway はリクエストパスの `custom-octg/` 以降（`/v1/chat/completions`）を Base URL に連結する。
 - その結果、OCTG Worker への実際のリクエストは `/v1/chat/completions` となる。
-- `Authorization` ヘッダーと body はそのまま転送される。
+- `Authorization` ヘッダーには Provider Keys に登録した `octg_sk_*` が `Authorization: Bearer octg_sk_*` として到達する。OCTG Worker はこの値を D1 に登録された `key_hash` と照合する。
+- body はそのまま転送される。
 
 ### 5.3 OCTG Worker → Gateway B
 
@@ -104,7 +107,9 @@ Content-Type: application/json
 ### 6.3 OCTG 側の確認事項
 
 - `OCTG_UPSTREAM_BASE_URL` が Gateway B の `/openai` URL であること。
-- `OCTG_UPSTREAM_API_TOKEN` が Gateway B の AI Gateway Run トークンであること。
+- `OCTG_UPSTREAM_API_TOKEN` が Gateway B の **AI Gateway Run token** であること。
+- `OCTG_UPSTREAM_API_TOKEN` は Gateway B への provider-native endpoint 呼び出しで、`cf-aig-authorization: Bearer <token>` として送信される。
+- Gateway B 上の OpenAI provider キーは BYOK 登録済みであり、Worker 側からは送信しないこと。
 - クライアントキーが D1 に `key_hash` として登録されていること。
 
 ## 7. 動作確認
