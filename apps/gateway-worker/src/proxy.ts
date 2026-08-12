@@ -134,6 +134,23 @@ export async function handleProxy(
   const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey);
   if (!reserved.ok) {
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
+    if (reserved.reason === "duplicate_idempotency_key") {
+      return errorResponse({
+        status: 409,
+        requestId,
+        quota: snapshot,
+        route: "reject:duplicate_idempotency_key",
+        body: {
+          error: {
+            message: "Duplicate Idempotency-Key.",
+            type: "invalid_request_error",
+            param: null,
+            code: "duplicate_idempotency_key",
+          },
+          request_id: requestId,
+        },
+      });
+    }
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
   }
   ctx.waitUntil(inserted.then(() => setReservedTokens(env, requestId, reservation)).catch(() => undefined));

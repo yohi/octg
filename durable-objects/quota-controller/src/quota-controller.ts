@@ -84,6 +84,14 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
       const entryRequestId = idempotencyRequestId ?? requestId;
       const existing = await getEntry(storage, entryRequestId);
       if (existing) {
+        if (idempotencyRequestId !== undefined && existing.state !== "reserved") {
+          return {
+            ok: false,
+            reason: "duplicate_idempotency_key",
+            requestId: entryRequestId,
+            resetAt,
+          };
+        }
         if (
           existing.tokens !== tokens ||
           existing.upperBoundTokens !== upperBoundTokens

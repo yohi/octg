@@ -39,7 +39,7 @@ describe("QuotaController.reserve idempotency key", () => {
     // Then: both reservations consume quota independently.
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    expect(second.remaining).toBe(999_800);
+    if (second.ok) expect(second.remaining).toBe(999_800);
     expect(state.reservedTokens).toBe(200);
     expect(state.requestCount).toBe(2);
   });

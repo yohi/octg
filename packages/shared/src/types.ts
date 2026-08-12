@@ -32,6 +32,12 @@ export type ReserveResult =
       readonly reason: "insufficient_quota";
       readonly remaining: number;
       readonly resetAt: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "duplicate_idempotency_key";
+      readonly requestId: string;
+      readonly resetAt: string;
     };
 
 export type SettleResult =
