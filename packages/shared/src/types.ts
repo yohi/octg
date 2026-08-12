@@ -13,6 +13,7 @@ export interface PoolState {
 }
 
 export interface RequestEntry {
+  idempotencyKey?: string;
   state: RequestState;
   tokens: number;
   upperBoundTokens: number;
