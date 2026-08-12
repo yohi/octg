@@ -47,6 +47,7 @@ export async function callUpstream(
     "cf-aig-retry-delay": "1000",
     "cf-aig-backoff": "exponential",
     "cf-aig-metadata": JSON.stringify(meta),
+    "cf-aig-collect-log-payload": "false",
   };
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";

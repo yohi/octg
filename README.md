@@ -100,7 +100,10 @@ API Key:  octg_sk_xxx
 ```text
 base URL: https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1
 API Key:  <発行された octg_sk_xxx>
-追加ヘッダー: cf-aig-authorization: Bearer <Gateway A Run token>
+追加ヘッダー:
+  cf-aig-authorization: Bearer <Gateway A Run token>
+  cf-aig-collect-log-payload: false
+  cf-aig-skip-cache: true
 ```
 
 詳細なセットアップ手順とトラブルシューティングは [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照してください。

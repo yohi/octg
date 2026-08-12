@@ -15,7 +15,7 @@
 - **Gateway A (custom-octg) and Gateway B (openai) must be separate gateway instances** to avoid routing loops and to keep inbound/outbound operational boundaries clear.
 - **Run tokens are account-wide.** Never share Gateway A and Gateway B Run tokens; rotate them separately.
 - **OCTG client keys (`octg_sk_*`) remain client-facing credentials.** They are placed in Gateway A Provider Keys, not in `Authorization` sent to Gateway B.
-- **Gateway B outbound uses `cf-aig-authorization: Bearer <Gateway B Run token>`** per SPEC.md §7.1. Verify whether the current `upstream.ts` `authorization` header still satisfies this in practice.
+- **Gateway B outbound uses `cf-aig-authorization: Bearer <Gateway B Run token>`** per SPEC.md §7.1. Confirmed by `apps/gateway-worker/src/upstream.ts` and `apps/gateway-worker/test/proxy.test.ts`.
 - **Log payloads are off by default.** Use `cf-aig-collect-log-payload: false` unless explicitly approved.
 - **Response cache on Gateway A is disabled or bypassed** (`cf-aig-skip-cache: true`) for verification.
 - **All files paths are relative to the repository root.** Never commit absolute paths.
@@ -43,9 +43,9 @@
 
 - [ ] **Step 1: Write the runbook header and architecture diagram**
 
-In `docs/cloudflare-ai-gateway-custom-provider.md`, add:
+Use four-backtick fenced code blocks for the outer examples so the inner Markdown fences remain properly scoped and MD040 is resolved.
 
-```markdown
+````markdown
 # OCTG as a Cloudflare AI Gateway Custom Provider
 
 This runbook registers an already-deployed OCTG Worker as a Cloudflare AI Gateway **Custom Provider**, so clients can call OCTG through Gateway A while OCTG still reaches OpenAI through Gateway B.
@@ -69,14 +69,13 @@ Cloudflare AI Gateway B  (OpenAI provider-native endpoint)
   │
   ▼
 OpenAI API
-```
-```
+````
 
 - [ ] **Step 2: Document prerequisites**
 
 Add the following list verbatim:
 
-```markdown
+````markdown
 ## Prerequisites
 
 - OCTG Worker is already deployed.
@@ -84,13 +83,13 @@ Add the following list verbatim:
 - Gateway B has OpenAI Project A (Data Sharing ON) API key registered as BYOK.
 - At least one OCTG client key (`octg_sk_*`) exists and its `key_hash` is in D1.
 - You understand that Gateway A and Gateway B Run tokens are account-wide; keep them separate and rotate them separately.
-```
+````
 
 - [ ] **Step 3: Document Gateway A setup**
 
 Add the setup steps:
 
-```markdown
+````markdown
 ## Setting up Gateway A
 
 1. Cloudflare Dashboard → AI Gateway → **Create Gateway**.
@@ -107,13 +106,13 @@ Add the setup steps:
    - Provider: `octg`
    - Alias: `default`
    - API Key: an existing `octg_sk_*` client key
-```
+````
 
 - [ ] **Step 4: Document OCTG-side checks**
 
 Add:
 
-```markdown
+````markdown
 ## OCTG-side checks
 
 - `OCTG_UPSTREAM_BASE_URL` points to Gateway B and ends with `/openai`.
@@ -121,13 +120,13 @@ Add:
 - `OCTG_UPSTREAM_API_TOKEN` is sent as `cf-aig-authorization: Bearer <token>` to Gateway B.
 - OpenAI provider key on Gateway B is BYOK; the Worker does **not** send an OpenAI key.
 - Client keys exist in D1 as `key_hash`.
-```
+````
 
 - [ ] **Step 5: Add non-streaming and streaming curl examples**
 
 Add:
 
-```markdown
+````markdown
 ## Verification
 
 ### Non-streaming
@@ -137,6 +136,7 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "cf-aig-collect-log-payload: false" \
+  -H "cf-aig-skip-cache: true" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -151,6 +151,7 @@ curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "cf-aig-collect-log-payload: false" \
+  -H "cf-aig-skip-cache: true" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -166,13 +167,13 @@ curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-
 - Gateway B logs show the outbound OpenAI call.
 - OpenAI-compatible response reaches the client.
 - Gateway A response cache is disabled or bypassed (`cf-aig-skip-cache: true`); verify `cf-aig-cache-status` is not `HIT`.
-```
+````
 
 - [ ] **Step 6: Add troubleshooting section**
 
 Add:
 
-```markdown
+````markdown
 ## Troubleshooting
 
 ### `Invalid provider` from Gateway A
@@ -207,13 +208,13 @@ Add:
 - Include `"stream": true` in the body.
 - For `/chat/completions` OCTG adds `stream_options: { include_usage: true }` automatically when streaming.
 - For `/responses`, rely on `response.completed` `response.usage` for settlement.
-```
+````
 
 - [ ] **Step 7: Add token rotation and log policy notes**
 
 Add:
 
-```markdown
+````markdown
 ## Token rotation
 
 For **leaked tokens**: revoke immediately, issue a new least-privilege Run token, update the relevant Secret, deploy, then verify Gateway B connectivity. Do not wait for the old token to stop working before revoking.
@@ -224,8 +225,8 @@ Keep Gateway A and Gateway B Run tokens separate. In multi-account setups, do no
 
 ## Logging policy
 
-Default to metadata-only logging (`cf-aig-collect-log-payload: false`) on both gateways. If payload logging is required, obtain prior approval covering: target gateway, request/response side, log count cap, access controls, deletion procedure, and any external encrypted storage destination.
-```
+Default to metadata-only logging (`cf-aig-collect-log-payload: false`) on both gateways. The Worker enforces this on outbound Gateway B requests. Verify in the Cloudflare AI Gateway dashboard that the "Log payload" column is empty/`false` for both gateways. If payload logging is required, obtain prior approval covering: target gateway, request/response side, log count cap, access controls, deletion procedure, and any external encrypted storage destination.
+````
 
 - [ ] **Step 8: Validate the new Markdown file**
 
@@ -345,19 +346,15 @@ git commit -m "docs: add AI Gateway Custom Provider note to deploy guide"
 
 - [ ] **Step 1: Re-read the outbound header logic**
 
-Confirm `apps/gateway-worker/src/upstream.ts` still uses:
+Confirm `apps/gateway-worker/src/upstream.ts` uses:
 
 ```typescript
-authorization: `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
+"cf-aig-authorization": `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
 ```
 
-- [ ] **Step 2: Document the header caveat in the runbook**
+- [ ] **Step 2: Remove the obsolete header caveat in the runbook**
 
-In `docs/cloudflare-ai-gateway-custom-provider.md`, add a short note under the "OCTG-side checks" section after the bullet list:
-
-```markdown
-> **Implementation note:** The current Worker sends the Gateway B token in the `Authorization` header. The design spec calls for `cf-aig-authorization`. If Cloudflare AI Gateway rejects the outbound request, switch `apps/gateway-worker/src/upstream.ts` to use `cf-aig-authorization` instead. This is intentionally left as a future code change because the spec scope is documentation-first.
-```
+The `cf-aig-authorization` header is already implemented. Delete any note in `docs/cloudflare-ai-gateway-custom-provider.md` that says the Worker still uses `Authorization` or needs a future switch.
 
 - [ ] **Step 3: Run typecheck**
 
@@ -412,4 +409,4 @@ git commit -m "docs: note outbound header caveat for Gateway B"
 - No new TypeScript types or functions are introduced. Documentation only.
 - File paths are consistent across tasks.
 
-**Gaps:** The design spec §5.3 says Worker → Gateway B should use `cf-aig-authorization`. Task 4 documents this as a known caveat rather than changing code, matching the spec's "原則としてコード変更は行わない" scope. If verification later proves `Authorization` fails, that becomes a new code-level plan.
+**Confirmed:** The design spec §5.3 requirement is satisfied. `apps/gateway-worker/src/upstream.ts` sends `cf-aig-authorization: Bearer <Gateway B Run token>`, and `apps/gateway-worker/test/proxy.test.ts` asserts it. No code change is needed.

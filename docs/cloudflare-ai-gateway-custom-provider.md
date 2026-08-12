@@ -62,7 +62,7 @@ Gateway A と Gateway B は別の Gateway インスタンスにする必要が�
 - Gateway B の OpenAI provider key が BYOK であり、Worker が OpenAI キーを**送信しない**こと。
 - クライアントキーが D1 に `key_hash` として存在すること。
 
-> **注意:** Gateway B への outbound リクエストには `cf-aig-authorization` ヘッダーで Run token を送信します。`Authorization` ヘッダーは OCTG クライアント認証（Gateway A 経由の受信リクエスト）にのみ使用されます。
+> **注意:** Gateway B への outbound リクエストには `cf-aig-authorization` ヘッダーで Run token を送信します。`Authorization` ヘッダーは OCTG クライアント認証（Gateway A 経由の受信リクエスト）にのみ使用されます。Worker 側では `cf-aig-collect-log-payload: false` を既定で付与し、prompt や response を Gateway B に記録させません。
 
 ## 動作確認
 
@@ -73,6 +73,7 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "cf-aig-collect-log-payload: false" \
+  -H "cf-aig-skip-cache: true" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -87,6 +88,7 @@ curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-
   -H "Authorization: Bearer <OCTG client key>" \
   -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "cf-aig-collect-log-payload: false" \
+  -H "cf-aig-skip-cache: true" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -101,9 +103,9 @@ curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-
 - OCTG の `/quota` で該当 pool のクォータが消費されていること。
 - Gateway B のログに OpenAI への outbound 呼び出しが記録されること。
 - OpenAI 互換レスポンスがクライアントへ返ること。
-- Gateway A のレスポンスキャッシュが無効化またはバイパスされていること（`cf-aig-skip-cache: true`）。`cf-aig-cache-status` が `HIT` でないことを確認します。
+- Gateway A のレスポンスキャッシュが無効化またはバイパスされていること（`cf-aig-skip-cache: true`）。応答ヘッダーの `cf-aig-cache-status` が `HIT` でないことを確認します。
 
-Gateway A へのクライアントリクエストと、Gateway B への Worker リクエストの両方で `cf-aig-collect-log-payload: false` を使用してください。prompt や response を D1 に保存しないでください。
+Gateway A へのクライアントリクエストと、Gateway B への Worker リクエストの両方で `cf-aig-collect-log-payload: false` を使用してください。prompt や response を Gateway ログに保存させないでください。`cf-aig-collect-log-payload: true` になっていないことを、Cloudflare Dashboard の AI Gateway ログ画面で「Log payload」列が空欄（または `false`）であることで確認できます。
 
 ## トラブルシューティング
 

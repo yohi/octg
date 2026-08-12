@@ -117,7 +117,7 @@ Admin API（`/admin/*`）を保護するため、Cloudflare Zero Trust Access �
 
 ```jsonc
 "vars": {
-  "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_name>",
+  "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_name>/openai",
   "ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com",
   "ACCESS_AUD": "<audience-tag>"
 }
