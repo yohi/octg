@@ -422,7 +422,7 @@ git commit -m "feat: deduplicate reserve/settle for duplicate Idempotency-Key"
 In the retry section, replace the existing bullet with:
 
 ```markdown
-- **retry を有効化する場合の冪等契約**: Gateway A が retry する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを持つ必要があります。OCTG Worker は Gateway A から転送された `Idempotency-Key` を受信し、Durable Object 内で key 単位の重複排除を行います。同一 key に対しては 1 回の `reserve` と 1 回の `settle` のみ実行します。Worker は同じ key を Gateway B への upstream call でも転送します。key が欠落した場合は新規リクエストとして処理されます。key の重複排除スコープは Durable Object 単位（pool × UTC day）です。保持 TTL は Durable Object の既存ライフサイクルに従います。再送時のレスポンスは、非ストリーミングでは保存済みの上流応答を返し、ストリーミングでは `409 Conflict` を返します。
+- **retry を有効化する場合の冪等契約**: Gateway A が retry する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを持つ必要があります。OCTG Worker は Gateway A から転送された `Idempotency-Key` を受信し、Durable Object 内で key 単位の重複排除を行います。同一 key に対しては 1 回の `reserve` と 1 回の `settle` のみ実行します。Worker は同じ key を Gateway B への upstream call でも転送します。key が欠落した場合は新規リクエストとして処理されます。key の重複排除スコープは Durable Object 単位（pool × UTC day）です。保持 TTL は Durable Object の既存ライフサイクルに従います。重複 key のレスポンス body は保存・再生せず、非ストリーミング・ストリーミングを問わず `409 Conflict` を返します。
 ```
 
 - [ ] **Step 2: Update SPEC.md if needed**
