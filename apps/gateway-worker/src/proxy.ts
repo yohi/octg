@@ -150,6 +150,7 @@ export async function handleProxy(
         eligibility: "COMPLIMENTARY",
         route: "free_shared",
         request_id: requestId,
+        idempotency_key: idempotencyKey,
       },
       policy.cacheEnabled ? `octg:${auth.id}` : null,
     );

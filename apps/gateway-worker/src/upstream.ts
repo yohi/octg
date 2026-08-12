@@ -11,6 +11,7 @@ export interface UpstreamMeta {
   eligibility: "COMPLIMENTARY" | "PAID_ONLY";
   route: "free_shared" | "paid_shared";
   request_id: string;
+  idempotency_key?: string;
 }
 
 export function buildUpstreamBody(
@@ -49,6 +50,7 @@ export async function callUpstream(
     "cf-aig-metadata": JSON.stringify(meta),
     "cf-aig-collect-log-payload": "false",
   };
+  if (meta.idempotency_key) headers["Idempotency-Key"] = meta.idempotency_key;
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";
   return transport(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {
