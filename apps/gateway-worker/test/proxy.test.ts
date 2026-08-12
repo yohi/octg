@@ -53,6 +53,8 @@ describe("proxy pipeline", () => {
     expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
     expect(upstreamHeaders?.get("cf-aig-metadata")).toContain("client_test");
     expect(upstreamHeaders?.get("cf-aig-cache-key")).toBeNull();
+    expect(upstreamHeaders?.get("cf-aig-authorization")).toBe(`Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`);
+    expect(upstreamHeaders?.get("authorization")).toBeNull();
   });
 
   it("rejects unknown models and tool requests before reservation", async () => {
