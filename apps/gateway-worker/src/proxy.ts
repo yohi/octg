@@ -75,6 +75,7 @@ export async function handleProxy(
   endpoint: "chat" | "responses",
 ): Promise<Response> {
   const requestId = `req_${ulid()}`;
+  const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
   const auth = await authenticate(request, env, requestId);
   if (!("id" in auth)) return errorResponse(auth);
 
@@ -130,9 +131,26 @@ export async function handleProxy(
   }
 
   const reservation = estimatedInput + output.maxOutputTokens + margin;
-  const reserved = await stub.reserve(requestId, reservation, upperBound);
+  const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey, auth.id);
   if (!reserved.ok) {
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
+    if (reserved.reason === "duplicate_idempotency_key") {
+      return errorResponse({
+        status: 409,
+        requestId,
+        quota: snapshot,
+        route: "reject:duplicate_idempotency_key",
+        body: {
+          error: {
+            message: "Duplicate Idempotency-Key.",
+            type: "invalid_request_error",
+            param: null,
+            code: "duplicate_idempotency_key",
+          },
+          request_id: requestId,
+        },
+      });
+    }
     return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
   }
   ctx.waitUntil(inserted.then(() => setReservedTokens(env, requestId, reservation)).catch(() => undefined));
@@ -151,6 +169,7 @@ export async function handleProxy(
         request_id: requestId,
       },
       policy.cacheEnabled ? `octg:${auth.id}` : null,
+      idempotencyKey,
     );
   } catch (error) {
     if (error instanceof UpstreamConfigError) {

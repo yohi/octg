@@ -27,6 +27,8 @@ OpenAI API
 
 Gateway A と Gateway B は別の Gateway インスタンスにする必要があります。これにより、outbound リクエストが Gateway A の `custom-octg` ルートへ戻ることを防ぎ、inbound と outbound のログ、認証情報、ポリシーを分離できます。
 
+AI Gateway の Run token はアカウント単位の権限であり、同一 Cloudflare アカウント内の他 Gateway や登録済み BYOK credential にアクセスできる範囲を持ち得ます。強い認可境界が必要な場合は、Gateway A と Gateway B を別 Cloudflare アカウントに配置するか、Worker 側の AI Gateway binding を使用して outbound 経路を Worker に束縛することを推奨します。
+
 ## 前提条件
 
 - OCTG Worker がデプロイ済みであること。
@@ -133,7 +135,7 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - `/quota` で残りクォータを確認してください。
 - Gateway A の timeout 設定を確認してください。
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
-- reservation の重複を避けるため、Gateway A の retry を無効化するか、1 回に制限してください。OCTG は delivery ごとに新しい `req_${ulid()}` を生成します。
+- **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。retry を有効化する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを付ける必要があります。OCTG Worker はその key を QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。Worker から Gateway B への outbound に設定する `cf-aig-max-attempts: 2` は inbound 側の retry とは独立です。
 
 ### ストリーミングが動作しない
 
@@ -153,3 +155,14 @@ Gateway A と Gateway B の Run token は分離して管理してください。
 ## ログポリシー
 
 両 Gateway では metadata のみを記録するログ（`cf-aig-collect-log-payload: false`）を既定にしてください。payload の記録が必要な場合は、対象 Gateway、request/response の別、ログ件数上限、アクセス制御、削除手順、外部保存先を含む事前承認を取得してください。
+
+Gateway A/B ごとにログ件数の保存上限と上限到達時の動作を設定してください。動作は `STOP_INSERTING`（新規ログ保存を停止）または `DELETE_OLDEST`（最も古いログを削除して保存を継続）のいずれかとし、上限到達時に payload を metadata-only へ自動切替する前提にはしないでください。prompt・response の独自保存は D1 では行いません。
+
+## 非スコープ（将来拡張候補）
+
+本手順では以下を扱いません。運用で課題が確認された段階で別途検討します。
+
+- Worker 側での AI Gateway 検出ロジック
+- 循環ルーティング防止ロジック（コード実装）
+- 自動設定スクリプトへの組み込み
+- Unified API (`/compat/chat/completions`) 経由の `custom-octg/` prefix 除去処理

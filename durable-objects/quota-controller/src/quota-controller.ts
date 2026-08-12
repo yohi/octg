@@ -14,10 +14,12 @@ import type {
 import { QuotaLifecycle } from "./quota-lifecycle";
 import {
   getEntry,
+  getIdempotencyRequestId,
   FINALIZE_KEY,
   loadPool,
   loadUnresolved,
   putEntry,
+  putIdempotencyRequestId,
   savePool,
   saveUnresolved,
 } from "./store";
@@ -60,6 +62,8 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     requestId: string,
     tokens: number,
     upperBoundTokens: number,
+    idempotencyKey?: string,
+    clientId?: string,
   ): Promise<ReserveResult> {
     if (
       !Number.isSafeInteger(tokens) ||
@@ -75,17 +79,36 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     const resetAt = nextUtcMidnight(new Date(`${utcDay}T00:00:00Z`));
 
     return this.ctx.storage.transaction(async (storage) => {
-      const existing = await getEntry(storage, requestId);
+      const idempotencyRequestId = idempotencyKey !== undefined
+        ? await getIdempotencyRequestId(storage, idempotencyKey, clientId)
+        : undefined;
+      const mappedEntry = idempotencyRequestId === undefined
+        ? undefined
+        : await getEntry(storage, idempotencyRequestId);
+      const entryRequestId = mappedEntry?.state === "released"
+        ? requestId
+        : (idempotencyRequestId ?? requestId);
+      const existing = await getEntry(storage, entryRequestId);
       if (existing) {
+        if (idempotencyRequestId !== undefined && existing.state !== "released") {
+          return {
+            ok: false,
+            reason: "duplicate_idempotency_key",
+            requestId: entryRequestId,
+            resetAt,
+          };
+        }
         if (
           existing.tokens !== tokens ||
           existing.upperBoundTokens !== upperBoundTokens
         ) {
-          throw new TypeError(`Request ${requestId} parameters do not match the saved request.`);
+          throw new TypeError(
+            `Request ${entryRequestId} parameters do not match the saved request.`,
+          );
         }
         const result = existing.results.reserve;
         if (result) return result;
-        throw new TypeError(`Request ${requestId} has no saved reserve result.`);
+        throw new TypeError(`Request ${entryRequestId} has no saved reserve result.`);
       }
 
       if (await storage.get<boolean>(FINALIZE_KEY)) {
@@ -118,6 +141,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         tokens,
         upperBoundTokens,
         reservedTokens: tokens,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         results: { reserve: result },
         createdAt: now,
         updatedAt: now,
@@ -126,6 +150,9 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         ...unresolved,
         reservedCount: unresolved.reservedCount + 1,
       });
+      if (idempotencyKey !== undefined) {
+        await putIdempotencyRequestId(storage, idempotencyKey, requestId, clientId);
+      }
       return result;
     });
   }

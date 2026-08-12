@@ -13,6 +13,7 @@ export interface PoolState {
 }
 
 export interface RequestEntry {
+  idempotencyKey?: string;
   state: RequestState;
   tokens: number;
   upperBoundTokens: number;
@@ -30,6 +31,12 @@ export type ReserveResult =
       readonly ok: false;
       readonly reason: "insufficient_quota";
       readonly remaining: number;
+      readonly resetAt: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "duplicate_idempotency_key";
+      readonly requestId: string;
       readonly resetAt: string;
     };
 

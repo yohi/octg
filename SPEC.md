@@ -116,7 +116,7 @@ reserved --release--> released                             # upstream 到達前�
 1. `reserve(requestId, tokens, upperBoundTokens) -> { ok, remaining, resetAt }`
    - 予約量が remaining 内に収まる場合のみ `reservedTokens += tokens`。
    - pool 利用ポリシー（要件第 28 章）に基づく NORMAL / CAUTION / STRICT 判定もここで行う。STRICT 帯では conservative upper bound（`upperBoundTokens`）が remaining 以下の場合のみ許可。
-   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。`reserved` 以外の状態での再送は既存結果を返して no-op。
+   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
 2. `settle(requestId, actualTokens) -> { ok }`
    - `reserved` から: `reservedTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。
    - `uncertain` から（Usage API 確定より先に上流 usage が届いた遅延 settle）: `uncertainTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。**予約量の二重減算はしない**（減算対象は遷移元バケットのみ）。
@@ -174,6 +174,9 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 ### 5.5 Output 制御（要件第 12 章）
 
 `推定 input + 要求 output + margin` が remaining を超える場合、ClientPolicy の `outputLimitMode` に従う：
+  - Wire field `client_policies.output_limit_mode` は読み出し時に内部型 `ClientPolicy.outputLimitMode`（`"REJECT"` | `"CLAMP"`）へ変換される。
+  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。未設定または無効な値は `"REJECT"` にフォールバックする。
+  - enforcement 時には `ClientPolicy.outputLimitMode` を `decideOutput` に渡し、以下の分岐で適用する。
 
 - `REJECT`（デフォルト）: `429`（`complimentary_quota_exceeded`）で拒否。
 - `CLAMP`（opt-in）: `candidate = remaining - estimated_input - safety_margin` を計算し、
@@ -183,6 +186,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 ### 5.6 Reservation → 上流転送 → Settlement
 
 1. `QuotaController.reserve(request_id, reservation, upperBound)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。
+   - Worker は受信リクエストの `Idempotency-Key` ヘッダー（存在する場合）を `QuotaController.reserve()` および Gateway B への upstream 呼び出しに変更せず転送する。同一 key に対する再送は Durable Object 内で重複排除され、完了済み key に対する再送は `409 Conflict` で拒否する。key がない場合は新規リクエストとして扱う。
 2. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
    - `cf-aig-max-attempts: 2`
@@ -265,6 +269,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 ```
 
 > **要件第 37 章との差分メモ**: 要件の例は `error.type` に具体的コードを置く形式で示しているが、本設計では OpenAI SDK のコード分類体系（`type` = 理由コード、`code` = カテゴリ）に統一した。要件どおり「SDK 互換性を考慮した最終決定」の結論である。要件が候補として示した `413 / 422` は `413`、`402 / 403` は `403` を採用する。
+
 - いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
 - 監査ログの D1 への非同期書き込みは `ctx.waitUntil()` を用いた fire-and-forget とし、レスポンスレイテンシ目標 p50 < 50ms / p95 < 150ms（要件第 42 章）を阻害しない。**配送保証は best-effort とし、Worker 障害・同時実行制限超過時の監査ログ欠損を許容範囲として明示する**。authoritative な制御は DO が担い、監査は証跡用途に限定する（クォータ判定・課金制御を監査ログ到達に依存させない）。完全な配送保証が必要になった場合は、Cloudflare Queues 等の永続配送経路＋コンシューマでの重複排除（request_id 単位の idempotent upsert）への移行を、要件42章レイテンシ目標の再交渉とセットの設計判断として扱う。
 
@@ -305,6 +310,15 @@ BYOK で Secrets Store に保管した OpenAI キーは、AI Gateway による�
 - Spend Limit は二次防御（eventually consistent なため authoritative ではない。要件第 20 章）。
 - Cache は opt-in。tool 使用・user-specific・session-specific・privacy 敏感リクエストは原則無効。cache key の誤共有を防止する（要件第 41 章）。**キャッシュ分離の根拠として、観測用途のカスタムメタデータ（`cf-aig-metadata`）に依存しない**。有効化する場合は、worker が client / 明示的な session / ユーザーなどの分離単位から `cf-aig-cache-key` を生成して付与する。AI Gateway 既定のキャッシュキー（provider・endpoint・model・プロバイダー認証情報・request body）は、全クライアントが同一の共有 BYOK 経路を通る構成では client 境界を区別しないため、cross-client の誤共有防止にはカスタムキーが必須となる。`cache_enabled` が true のクライアントでも、安定した分離単位を導出できないリクエストでは `cf-aig-skip-cache: true`（またはカスタムキー未付与）としてキャッシュを無効化する。
 - Custom cost による仮想 token meter（要件第 21 章）は任意機能。quota 判定には使用しない。
+
+### 7.2 Custom Provider としての運用構成
+
+OCTG 自体を Cloudflare AI Gateway の Custom Provider（Gateway A）として登録し、OCTG Worker から別の AI Gateway（Gateway B）を経由して OpenAI へ接続する構成をサポートする。
+
+- 循環ルーティング防止のため、受信側（Gateway A）と送信側（Gateway B）で異なる AI Gateway インスタンスを使用する。
+- Gateway A → Worker への送信時、`Authorization: Bearer octg_sk_*` ヘッダーが伝送される。
+- Worker → Gateway B への送信時、`cf-aig-authorization: Bearer <Gateway B Run token>` ヘッダーを使用し、`cf-aig-collect-log-payload: false` でログペイロード保存を防止する。
+- 詳細な設定手順は [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照。
 
 ## 8. Reconciliation
 
@@ -352,6 +366,21 @@ POST /admin/reconcile
 - **返却スコープ**: STANDARD / MINI の**全クライアント共通 pool の集約値**（limit / confirmed / reserved / uncertain / remaining / usage_percent）を返す。クライアント個別の利用行跡（per-client の timestamps・model 内約・他クライアント存在の推測可能性）は含めない。per-client 可視化が必要になった場合は、pool 集約とは別の認可スコープ（例: 自分の `requests` 集約のみ）として別途設計する。
 - **認可条件**: 有効な client key を持つこと（`clients.enabled = true`）。pool 状態は共有リソースの情報であり、特定クライアントの機密を含まないため、認証済みクライアントであれば参照を許可する。
 - **エラー**: 未認証（missing/invalid key）は `401`（`authentication_error` / `invalid_api_key`）、認証済みだが無効化済みクライアントは `403`（`permission_error` / `client_disabled`）。これらの認可ケースを 12 章テスト戦略の必須テストに追加する。
+
+### 9.2 Admin API の仕様と認証
+
+- **認証方式**: `cf-access-jwt-assertion` ヘッダーによる Cloudflare Access JWT 検証（`verifyAccessJwt`）。Service Token 認証は廃止し、Access JWT 一本とする。JWT の検証要件は以下の通り：
+  - ヘッダー `cf-access-jwt-assertion` が存在しない場合は `401` を返す。`Authorization: Bearer` は Admin API では使用しない。
+  - 検証対象: `iss` は `ACCESS_TEAM_DOMAIN` と完全一致、`aud` は `ACCESS_AUD` と完全一致。いずれかが不一致の場合は `401`。
+  - 署名検証: Cloudflare Access 標準の RS256 JWT とし、`ACCESS_JWT_PUBLIC_JWK` が設定されていればその JWK set を使用、未設定であれば `<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` から JWKS を取得する。署名不正・ JWKS 取得失敗時は `401`。
+  - 期限検証: `exp` は必須クレームとし、現在時刻を含まない未来の有効期限を要求する。`exp` 欠落・期限切れは `401`。
+  - 上記いずれの検証失敗も共通して `401`（`authentication_error` / `invalid_api_key`）を返し、理由の詳細を応答 body に含めない（セキュリティ上の情報漏出防止）。
+- **`GET /admin/clients`**: クライアント一覧に加え、`client_policies` テーブルからポリシー設定を取得。ポリシー未設定のクライアントにはデフォルト値（`overflow_mode: REJECT`, `output_limit_mode: REJECT`, `max_paid_usd_day: 0`, `cache_enabled: false`）を適用した effective policy を返す。
+- **`PUT /admin/clients/:id/policy`**: クライアントポリシーの作成・更新。
+  - ボディ型: `{ overflow_mode: "REJECT" | "PAID_SHARED", output_limit_mode: "REJECT" | "CLAMP", max_paid_usd_day: number (>= 0), cache_enabled: boolean }`
+- **`PUT /admin/models/:model`**: モデルレジストリの作成・更新。
+  - ボディ型: `{ complimentary_pool: "STANDARD" | "MINI" | "NONE", enabled: boolean, fallback_model: string | null }`
+- **Admin Web UI（将来実装）**: 同一 Cloudflare Access セッションで保護された `/admin/ui/*` エンドポイントから Workers Static Assets (`public/admin/ui/*`) 経由でブラウザ UI（Pico.css + Vanilla JS）を配信する計画。配信パスとルーティング: `/admin/ui` → `public/admin/ui/index.html`（`html_handling: "auto-trailing-slash"`）、`/admin/ui/app.js`・`/admin/ui/styles.css` → Static Assets 配信、`/admin/*` → 既存 `handleAdmin` による JSON API。`not_found_handling: "none"` とし `/admin/ui/*` 配下以外は API handler に委ねる。HTML 内で CSS/JS を読み込む際は絶対パス `/admin/ui/app.js`・`/admin/ui/styles.css` を使用する。UI 構成は単一ページダッシュボード（Quota / Usage / Clients / Models セクション）で、Clients と Models はインライン編集をサポートする。エラー処理: API 取得失敗時はセクション内にエラーメッセージと再試行ボタンを表示、編集 PUT 失敗時は行内にエラーメッセージを表示、認証切れ時は Cloudflare Access がログイン画面へリダイレクト。Pico.css は `public/admin/ui/pico.min.css` として同梱し同一ドメインから配信する。
 
 ## 10. セキュリティとプライバシー
 
