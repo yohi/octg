@@ -49,6 +49,10 @@ OCTG Worker が Gateway A の Custom Provider エンドポイント（`custom-oc
 
 なお、同一 Gateway ID の `/openai` provider-native endpoint は OpenAI への単純な転送経路であり、Gateway A → OCTG → Gateway A `/openai` → OpenAI という経路では循環しない。Gateway 分離の主な目的は、inbound 側と outbound 側のログ・キー・ポリシーを分離し、運用境界を明確にすることにある。
 
+Gateway A と Gateway B を別の Gateway として作成しても、それ自体は認可境界ではない。AI Gateway の Run token はアカウント単位の権限であり、同一 Cloudflare アカウント内の他 Gateway や登録済み BYOK credential にアクセスできる範囲を持ち得る。そのため、強い認可境界が必要な場合は Gateway A と Gateway B を別 Cloudflare アカウントに配置するか、Worker 側の AI Gateway binding を使用して outbound 経路を Worker に束縛する。Run token が漏洩した場合の影響範囲（同一アカウント内の Gateway 実行、ログ・BYOK credential の利用可能範囲）は発行時に確認し、Gateway A/B ごとに別トークンとして管理する。
+
+Run token の漏洩時は、影響を受けるアカウント内の Gateway、BYOK credential、ログを確認し、該当 token を直ちに失効させる。新しい最小権限の Run token を発行して Secret を更新し、デプロイ後に Gateway B の疎通を確認してから旧 token を失効させる。別アカウント構成では、各アカウントの token と BYOK credential を混在させない。
+
 ## 5. 通信契約
 
 ### 5.1 Client → Gateway A
@@ -56,6 +60,7 @@ OCTG Worker が Gateway A の Custom Provider エンドポイント（`custom-oc
 ```text
 POST https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions
 Authorization: Bearer <OCTG client key>
+cf-aig-authorization: Bearer <Gateway A Run token>
 Content-Type: application/json
 
 {
@@ -65,7 +70,8 @@ Content-Type: application/json
 ```
 
 - モデル名は素の `gpt-5.6-luna` 形式で指定する。`custom-octg/` prefix は不要。
-- `Authorization` ヘッダーには OCTG クライアントキーを指定する。
+- `Authorization` ヘッダーには OCTG クライアントキーを指定する。これは OCTG Worker の provider access 用であり、Gateway A の実行認可には使用しない。
+- `cf-aig-authorization` ヘッダーには Gateway A の Authenticated Gateway 用 Run token を指定する。Gateway A の Run token は OCTG クライアントキーとは別に発行・配布・ローテーションする。
 - Gateway A の Provider Keys に登録した `octg_sk_*` は、AI Gateway から OCTG Worker へ転送される際に `Authorization: Bearer octg_sk_*` として到達する。
 
 ### 5.2 Gateway A → OCTG Worker
@@ -75,6 +81,7 @@ Content-Type: application/json
 - その結果、OCTG Worker への実際のリクエストは `/v1/chat/completions` となる。
 - `Authorization` ヘッダーには Provider Keys に登録した `octg_sk_*` が `Authorization: Bearer octg_sk_*` として到達する。OCTG Worker はこの値を D1 に登録された `key_hash` と照合する。
 - body はそのまま転送される。
+- Gateway A は Authenticated Gateway を有効化し、Run permission を持つ token を要求する。Run token は account-wide のため、Gateway A 用と Gateway B 用を同一 token にしない。
 
 ### 5.3 OCTG Worker → Gateway B
 
@@ -82,6 +89,7 @@ Content-Type: application/json
 - 例: `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_b_id}/openai`
 - OCTG Worker は `/chat/completions` または `/responses` を連結して呼び出す。
 - 認証には `OCTG_UPSTREAM_API_TOKEN` を使用する。
+- `OCTG_UPSTREAM_API_TOKEN` は Gateway B 専用の AI Gateway Run token とし、`cf-aig-authorization: Bearer <Gateway B Run token>` として送信する。OCTG client key や Gateway A の Run token を Gateway B の認証に流用しない。
 
 ## 6. 設定手順
 
@@ -101,7 +109,9 @@ Content-Type: application/json
    - **Base URL**: `https://octg-gateway.<subdomain>.workers.dev`
    - **Enable**: 有効化
 5. **Save**。
-6. **Provider Keys** → **Add API Key**:
+6. Gateway の **Settings** で **Authenticated Gateway** を有効化する。
+7. **Create authentication token** から Gateway A 用 token を作成し、必要な **Run** permission を付与する。token の scope（対象アカウントと account-wide であること）を記録し、OCTG client key とは別の Secret 管理経路で Gateway A の利用者へ配布する。
+8. **Provider Keys** → **Add API Key**:
    - プロバイダー: `octg`
    - alias: `default`
    - API Key: 発行済みの OCTG クライアントキー
@@ -113,6 +123,8 @@ Content-Type: application/json
 - `OCTG_UPSTREAM_API_TOKEN` は Gateway B への provider-native endpoint 呼び出しで、`cf-aig-authorization: Bearer <token>` として送信される。
 - Gateway B 上の OpenAI provider キーは BYOK 登録済みであり、Worker 側からは送信しないこと。
 - クライアントキーが D1 に `key_hash` として登録されていること。
+- Gateway A の curl では `cf-aig-authorization: Bearer <Gateway A Run token>` を付与し、OCTG client key（`Authorization`）とは別に管理すること。
+- Gateway B の Run token は Gateway A と別に発行し、`OCTG_UPSTREAM_API_TOKEN` として Worker Secret に設定すること。AI Gateway token は account-wide で登録済み BYOK key を利用できるため、A/B の token を共有しない。
 
 ## 7. 動作確認
 
@@ -121,6 +133,7 @@ Content-Type: application/json
 ```bash
 curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions \
   -H "Authorization: Bearer <OCTG client key>" \
+  -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -131,8 +144,9 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 ### 7.2 ストリーミング
 
 ```bash
-curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions \
+curl -N https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1/chat/completions \
   -H "Authorization: Bearer <OCTG client key>" \
+  -H "cf-aig-authorization: Bearer <Gateway A Run token>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.6-luna",
@@ -143,10 +157,14 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 
 ### 7.3 確認ポイント
 
+- Client → Gateway A の request では、必要に応じて `cf-aig-collect-log-payload: false` を設定し、payload を保存せず metadata のみ記録する。Gateway B への OCTG Worker outbound request でも同じ方針を適用する。
+- payload 保存は Gateway A/B とも opt-in とし、Gateway A では Client → Gateway A の request/response payload、Gateway B では OCTG → Gateway B および OpenAI outbound の payload を保存対象とする。保存する場合のアクセス権は、Gateway A/B の運用管理者と監査担当者に限定する。削除は各 Gateway の Logs 画面または対応する管理 API から対象ログを特定して実行し、削除結果を監査記録に残す。外部保存する場合は承認済みの暗号化ストレージへ転送し、保存先の IAM と暗号化鍵へのアクセスも同じ担当者に限定する。
+- Gateway A/B ごとに payload 容量上限を設定し、上限到達時は新規 payload の保存を停止して metadata-only に切り替える。payload 保存のためにリクエストを拒否したり、`cf-aig-cache-ttl: 0` で代替したりしない。保持は固定日数ではなく容量上限で管理し、上限と切替状態を定期確認する。prompt・response の独自保存は D1 では行わない。
 - AI Gateway A のログにリクエストが記録される。
 - OCTG の `/quota` でクォータが消費されている。
 - AI Gateway B のログに OpenAI への outbound が記録される。
 - OpenAI からのレスポンスがクライアントに返る。
+- Gateway A のレスポンスキャッシュを無効化し、同一リクエストがキャッシュから返らず、必ず OCTG Worker と QuotaController を通過することを確認する。Dashboard で無効化できない場合は Client → Gateway A の request に `cf-aig-skip-cache: true` を付与し、response の `cf-aig-cache-status` が `HIT` でないことを確認する。`cf-aig-cache-ttl: 0` は使用しない。
 
 ## 8. トラブルシューティング
 
@@ -197,6 +215,8 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 - `/quota` でクォータ残量を確認する。
 - AI Gateway A の timeout 設定を確認する。
 - D1 の `requests` テーブルでリクエスト到達を確認する。
+- Gateway A の自動 retry はデフォルトで無効化するか、最大試行回数を 1 に設定する。OCTG Worker は delivery ごとに新しい `req_${ulid()}` を生成するため、Gateway A が同じ delivery を再試行すると、重複した reservation・upstream call・settlement が発生し得る。
+- retry を有効化する場合は、Client が安定した idempotency key を Gateway A から Worker まで転送する契約を追加し、その key を reservation、Gateway B への upstream call、settlement の重複排除に使用する。retry 間で同じ key が使われ、最初の成功応答または最終状態を再利用することを確認する。現行の `req_${ulid()}` だけではこの end-to-end 冪等性を満たさない。
 
 ### 8.6 ストリーミングが動作しない
 
@@ -207,7 +227,8 @@ curl https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-oct
 **対処**:
 - まず非ストリーミングで動作確認する。
 - `stream: true` を含めて再試行する。
-- OCTG は `stream === true` の場合、upstream へ `stream_options: { include_usage: true }` を付与する。
+- `/chat/completions` では `stream === true` の場合に限り、upstream へ `stream_options: { include_usage: true }` を付与する。`/responses` にはこのオプションを付与しない。
+- `/responses` の streaming usage は `response.completed` イベントに含まれる `response.usage` を利用して settlement する。
 
 ## 9. 非スコープ・将来拡張
 
