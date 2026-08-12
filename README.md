@@ -93,6 +93,18 @@ API Key:  octg_sk_xxx
 
 > 注意: 共有無料枠の範囲内で処理されるため、利用状況（/quota）は管理者に問い合わせてください。超過時は 429 または REJECT ポリシーに応じた応答が返ります。
 
+### Cloudflare AI Gateway 経由で利用する
+
+管理者が OCTG を Cloudflare AI Gateway の **Custom Provider** として登録している場合、クライアントは Gateway A のエンドポイントを向けます。
+
+```text
+base URL: https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_a_id}/custom-octg/v1
+API Key:  <発行された octg_sk_xxx>
+追加ヘッダー: cf-aig-authorization: Bearer <Gateway A Run token>
+```
+
+詳細なセットアップ手順とトラブルシューティングは [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照してください。
+
 ---
 
 ## セットアップ（開発する場合）

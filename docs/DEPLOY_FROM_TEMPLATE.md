@@ -187,6 +187,13 @@ npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
 
 > Secrets の値をコード・ログ・コミットに含めないこと。[Secret ローテーション手順](../README.md#secret-ローテーション) も参照。
 
+## Custom Provider として AI Gateway 経由で公開する
+
+初回デプロイ後、OCTG を Cloudflare AI Gateway の Custom Provider として登録して利用者に配布できます。
+この場合は **Gateway A（受信側）と Gateway B（OpenAI 送信側）を別の AI Gateway インスタンスにすること** が必須です。同一 Gateway ID に Gateway A の `custom-octg` エンドポイントと Gateway B の `/openai` エンドポイントを混在させると、OCTG Worker が Gateway A へ outbound した際にルーティングループするリスクがあります。
+
+詳細は [docs/cloudflare-ai-gateway-custom-provider.md](./cloudflare-ai-gateway-custom-provider.md) を参照してください。
+
 ## 5. クライアント鍵の発行
 
 初回クライアントを本番 D1 に登録します。
