@@ -24,7 +24,6 @@ export interface Env {
   TEST_UPSTREAM_RESPONSE?: string;
   TEST_UPSTREAM_STATUS?: string;
   readonly ACCESS_JWT_PUBLIC_JWK?: string;
-  readonly ACCESS_ALLOWED_SERVICE_TOKEN_IDS?: string;
 }
 
 export default {

@@ -1,6 +1,6 @@
 import { errorResponse, quotaIdOf, utcDayOf, type OctgHttpError } from "@octg/shared";
 import { snapshotOf } from "./proxy";
-import { verifyAccessJwtOrServiceToken } from "./access";
+import { verifyAccessJwt } from "./access";
 import { invalidateConfigCaches, loadRegistry } from "./policy";
 import { runReconciliation, targetUtcDay } from "./reconcile";
 import type { Env } from "./index";
@@ -11,6 +11,16 @@ const badRequest = (requestId: string, message: string): OctgHttpError => ({ sta
 
 type ClientPolicyInput = { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean };
 type ModelInput = { complimentary_pool: "STANDARD" | "MINI" | "NONE"; enabled: boolean; fallback_model: string | null };
+type ClientListRow = { id: string; name: string; enabled: number; created_at: string; overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null };
+const DEFAULT_CLIENT_POLICY = { overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: true } as const;
+
+function effectiveClientPolicy(row: { overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null }): { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean } {
+  const overflow_mode = row.overflow_mode === "PAID_SHARED" ? "PAID_SHARED" : "REJECT";
+  const output_limit_mode = row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT";
+  const max_paid_usd_day = typeof row.max_paid_usd_day === "number" && Number.isFinite(row.max_paid_usd_day) && row.max_paid_usd_day >= 0 ? row.max_paid_usd_day : 0;
+  const cache_enabled = row.cache_enabled === 1 ? true : row.cache_enabled === 0 ? false : DEFAULT_CLIENT_POLICY.cache_enabled;
+  return { overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled };
+}
 
 function parseObject(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
@@ -33,7 +43,7 @@ function parseModel(value: Record<string, unknown> | undefined): ModelInput | un
 
 export async function handleAdmin(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
   const url = new URL(request.url); if (!url.pathname.startsWith("/admin/")) return undefined;
-  const verified = await verifyAccessJwtOrServiceToken(request, env, requestId); if (verified !== true) return errorResponse(verified);
+  const verified = await verifyAccessJwt(request, env, requestId); if (verified !== true) return errorResponse(verified);
   const day = utcDayOf(new Date());
   if (request.method === "GET" && url.pathname === "/admin/quota") {
     const view = async (pool: "STANDARD" | "MINI") => snapshotOf(await env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day))).getState());
@@ -44,8 +54,9 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
     return json({ request_id: requestId, utc_day: day, clients: rows.results });
   }
   if (request.method === "GET" && url.pathname === "/admin/clients") {
-    const rows = await env.DB.prepare("SELECT id, name, enabled, created_at FROM clients ORDER BY id").all();
-    return json({ request_id: requestId, clients: rows.results });
+    const rows = await env.DB.prepare("SELECT c.id, c.name, c.enabled, c.created_at, p.overflow_mode, p.output_limit_mode, p.max_paid_usd_day, p.cache_enabled FROM clients c LEFT JOIN client_policies p ON c.id = p.client_id ORDER BY c.id").all<ClientListRow>();
+    const clients = rows.results.map((row) => ({ id: row.id, name: row.name, enabled: row.enabled === 1, created_at: row.created_at, ...effectiveClientPolicy(row) }));
+    return json({ request_id: requestId, clients });
   }
   if (request.method === "GET" && url.pathname === "/admin/models") return json({ request_id: requestId, models: [...(await loadRegistry(env)).values()] });
   const policyMatch = url.pathname.match(/^\/admin\/clients\/([^/]+)\/policy$/);

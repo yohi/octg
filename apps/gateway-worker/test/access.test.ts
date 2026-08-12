@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
-import { verifyAccessJwt, verifyAccessJwtOrServiceToken } from "../src/access";
+import { verifyAccessJwt } from "../src/access";
 
 let privateKey: CryptoKey;
 beforeAll(async () => {
@@ -23,26 +23,5 @@ describe("verifyAccessJwt", () => {
   });
   it("rejects a token with the wrong issuer", async () => {
     await expect(verifyAccessJwt(request(await sign("test-aud", "10m", "https://wrong.example.com")), env, "r5")).resolves.toMatchObject({ status: 401 });
-  });
-});
-
-describe("verifyAccessJwtOrServiceToken", () => {
-  it("accepts a valid JWT", async () => {
-    await expect(verifyAccessJwtOrServiceToken(request(await sign()), env, "r6")).resolves.toBe(true);
-  });
-  it("accepts an allowed Service Token client id", async () => {
-    Object.assign(env, { ACCESS_ALLOWED_SERVICE_TOKEN_IDS: "allowed-token-id" });
-    await expect(verifyAccessJwtOrServiceToken(new Request("https://octg.test/admin/quota", { headers: { "CF-Access-Client-Id": "allowed-token-id" } }), env, "r7")).resolves.toBe(true);
-  });
-  it("rejects a disallowed Service Token client id", async () => {
-    Object.assign(env, { ACCESS_ALLOWED_SERVICE_TOKEN_IDS: "allowed-token-id" });
-    await expect(verifyAccessJwtOrServiceToken(new Request("https://octg.test/admin/quota", { headers: { "CF-Access-Client-Id": "unknown-token-id" } }), env, "r8")).resolves.toMatchObject({ status: 401 });
-  });
-  it("rejects missing Service Token when no JWT", async () => {
-    await expect(verifyAccessJwtOrServiceToken(request(), env, "r9")).resolves.toMatchObject({ status: 401 });
-  });
-  it("rejects an invalid JWT even when Service Token env is set", async () => {
-    Object.assign(env, { ACCESS_ALLOWED_SERVICE_TOKEN_IDS: "allowed-token-id" });
-    await expect(verifyAccessJwtOrServiceToken(request("bad-token"), env, "r10")).resolves.toMatchObject({ status: 401 });
   });
 });
