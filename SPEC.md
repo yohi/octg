@@ -174,6 +174,9 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 ### 5.5 Output 制御（要件第 12 章）
 
 `推定 input + 要求 output + margin` が remaining を超える場合、ClientPolicy の `outputLimitMode` に従う：
+  - Wire field `client_policies.output_limit_mode` は読み出し時に内部型 `ClientPolicy.outputLimitMode`（`"REJECT"` | `"CLAMP"`）へ変換される。
+  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。未設定または無効な値は `"REJECT"` にフォールバックする。
+  - enforcement 時には `ClientPolicy.outputLimitMode` を `decideOutput` に渡し、以下の分岐で適用する。
 
 - `REJECT`（デフォルト）: `429`（`complimentary_quota_exceeded`）で拒否。
 - `CLAMP`（opt-in）: `candidate = remaining - estimated_input - safety_margin` を計算し、
@@ -266,7 +269,6 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 
 > **要件第 37 章との差分メモ**: 要件の例は `error.type` に具体的コードを置く形式で示しているが、本設計では OpenAI SDK のコード分類体系（`type` = 理由コード、`code` = カテゴリ）に統一した。要件どおり「SDK 互換性を考慮した最終決定」の結論である。要件が候補として示した `413 / 422` は `413`、`402 / 403` は `403` を採用する。
 
-- いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
 - いずれのエラーでも `request_id` を応答 body トップレベルと `X-OCTG-Request-Id` ヘッダに含める。pool 確定後のエラー応答では、加えて上記の pool 系 `X-OCTG-*` ヘッダを付与する。エラー body の `pool` / `remaining_tokens` / `reset_at` は 429 のみ必須とし、それぞれ `X-OCTG-Pool` / `X-OCTG-Quota-Remaining` / `X-OCTG-Quota-Reset` と同じ値にする。
 - 監査ログの D1 への非同期書き込みは `ctx.waitUntil()` を用いた fire-and-forget とし、レスポンスレイテンシ目標 p50 < 50ms / p95 < 150ms（要件第 42 章）を阻害しない。**配送保証は best-effort とし、Worker 障害・同時実行制限超過時の監査ログ欠損を許容範囲として明示する**。authoritative な制御は DO が担い、監査は証跡用途に限定する（クォータ判定・課金制御を監査ログ到達に依存させない）。完全な配送保証が必要になった場合は、Cloudflare Queues 等の永続配送経路＋コンシューマでの重複排除（request_id 単位の idempotent upsert）への移行を、要件42章レイテンシ目標の再交渉とセットの設計判断として扱う。
 
@@ -366,7 +368,12 @@ POST /admin/reconcile
 
 ### 9.2 Admin API の仕様と認証
 
-- **認証方式**: `cf-access-jwt-assertion` ヘッダーによる Cloudflare Access JWT 検証（`verifyAccessJwt`）。Service Token 認証は廃止し、Access JWT 一本とする。
+- **認証方式**: `cf-access-jwt-assertion` ヘッダーによる Cloudflare Access JWT 検証（`verifyAccessJwt`）。Service Token 認証は廃止し、Access JWT 一本とする。JWT の検証要件は以下の通り：
+  - ヘッダー `cf-access-jwt-assertion` が存在しない場合は `401` を返す。`Authorization: Bearer` は Admin API では使用しない。
+  - 検証対象: `iss` は `ACCESS_TEAM_DOMAIN` と完全一致、`aud` は `ACCESS_AUD` と完全一致。いずれかが不一致の場合は `401`。
+  - 署名検証: Cloudflare Access 標準の RS256 JWT とし、`ACCESS_JWT_PUBLIC_JWK` が設定されていればその JWK set を使用、未設定であれば `<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` から JWKS を取得する。署名不正・ JWKS 取得失敗時は `401`。
+  - 期限検証: `exp` は必須クレームとし、現在時刻を含まない未来の有効期限を要求する。`exp` 欠落・期限切れは `401`。
+  - 上記いずれの検証失敗も共通して `401`（`authentication_error` / `invalid_api_key`）を返し、理由の詳細を応答 body に含めない（セキュリティ上の情報漏出防止）。
 - **`GET /admin/clients`**: クライアント一覧に加え、`client_policies` テーブルからポリシー設定を取得。ポリシー未設定のクライアントにはデフォルト値（`overflow_mode: REJECT`, `output_limit_mode: REJECT`, `max_paid_usd_day: 0`, `cache_enabled: false`）を適用した effective policy を返す。
 - **`PUT /admin/clients/:id/policy`**: クライアントポリシーの作成・更新。
   - ボディ型: `{ overflow_mode: "REJECT" | "PAID_SHARED", output_limit_mode: "REJECT" | "CLAMP", max_paid_usd_day: number (>= 0), cache_enabled: boolean }`
