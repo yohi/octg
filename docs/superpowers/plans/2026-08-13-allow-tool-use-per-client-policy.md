@@ -211,7 +211,8 @@ export async function seedPolicy(
 Run:
 
 ```bash
-npx vitest run -w apps/gateway-worker test/policy.test.ts
+cd apps/gateway-worker
+npx vitest run test/policy.test.ts
 ```
 
 Expected: all policy tests pass.
@@ -327,7 +328,8 @@ In `apps/gateway-worker/test/admin-api.test.ts`, add after the existing round-tr
 Run:
 
 ```bash
-npx vitest run -w apps/gateway-worker test/admin-api.test.ts
+cd apps/gateway-worker
+npx vitest run test/admin-api.test.ts
 ```
 
 Expected: all admin tests pass.
@@ -386,6 +388,7 @@ In `apps/gateway-worker/test/proxy.test.ts`, replace the existing tool-use rejec
   it("allows tool requests when client policy toolsMode is ALLOW", async () => {
     await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
     invalidateConfigCaches();
+    const stateBefore = await todayStub().getState();
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
       id: "chatcmpl-tool",
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
@@ -395,8 +398,8 @@ In `apps/gateway-worker/test/proxy.test.ts`, replace the existing tool-use rejec
     expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
     expect(response.headers.get("X-OCTG-Route")).toBe("free_shared");
     const state = await todayStub().getState();
-    expect(state.confirmedTokens).toBe(15);
-    expect(state.reservedTokens).toBe(0);
+    expect(state.confirmedTokens - stateBefore.confirmedTokens).toBe(15);
+    expect(state.reservedTokens).toBe(stateBefore.reservedTokens);
   });
 ```
 
@@ -405,7 +408,8 @@ In `apps/gateway-worker/test/proxy.test.ts`, replace the existing tool-use rejec
 Run:
 
 ```bash
-npx vitest run -w apps/gateway-worker test/proxy.test.ts
+cd apps/gateway-worker
+npx vitest run test/proxy.test.ts
 ```
 
 Expected: all proxy tests pass.
@@ -480,7 +484,7 @@ Change the existing paragraph:
 - `"REJECT"`: 無料枠 reservation を行わず、`model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
 - `"ALLOW"`: 既存の quota reservation / settlement フローへ進み、実 usage で精算する。
 
-Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。未設定または無効な値は `"REJECT"` にフォールバックする。
+Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。PUT リクエストの `tools_mode` が未設定または `"REJECT"` / `"ALLOW"` 以外の無効な値の場合、HTTP 400 (`invalid_request`) で拒否する。DB から読み出したポリシーの `tools_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
 ```
 
 - [ ] **Step 2: Update SPEC.md §6 schema bullet**
