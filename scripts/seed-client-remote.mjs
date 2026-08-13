@@ -10,8 +10,8 @@ const config = "apps/gateway-worker/wrangler.jsonc";
 const node = process.execPath;
 const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
 const args = process.argv.slice(2).reduce((acc, arg) => {
-  const match = arg.match(/^--(\w+)=(.*)$/);
-  if (match) acc[match[1]] = match[2];
+  const match = arg.match(/^--([-\w]+)=(.*)$/);
+  if (match) acc[match[1].replace(/-/g, "")] = match[2];
   return acc;
 }, {});
 
@@ -20,7 +20,7 @@ const name = args.name || process.env.OCTG_CLIENT_NAME;
 const rawKey = args.key || process.env.OCTG_CLIENT_KEY;
 
 if (!process.env.OCTG_KEY_PEPPER || !id || !name) {
-  console.error("usage: OCTG_KEY_PEPPER=... npm run seed:client:remote -- --id=<id> --name=<name> [--key=octg_sk_...]");
+  console.error("usage: OCTG_KEY_PEPPER=... npm run seed:client:remote -- --id=<id> --name=<name> [--key=octg_sk_...] [--tools-mode=REJECT|ALLOW]");
   console.error("  --name にスペースを含む場合は OCTG_CLIENT_NAME=\"...\" 環境変数を使用してください");
   process.exit(1);
 }
@@ -45,7 +45,7 @@ function run(command, commandArgs) {
 const tempDir = mkdtempSync(`${tmpdir()}/octg-seed-`);
 const sqlPath = `${tempDir}/seed.sql`;
 try {
-  const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, id, name, clientKey], {
+  const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, id, name, clientKey, args.toolsMode || "REJECT"], {
     cwd: root,
     env: { ...process.env, OCTG_KEY_PEPPER: process.env.OCTG_KEY_PEPPER },
     encoding: "utf8",

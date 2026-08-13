@@ -87,6 +87,7 @@ async function setupLocal() {
   const clientId = process.env.OCTG_CLIENT_ID || "client_demo";
   const clientName = process.env.OCTG_CLIENT_NAME || "Demo";
   const clientKey = process.env.OCTG_CLIENT_KEY || `octg_sk_local_${randomBytes(18).toString("hex")}`;
+  const clientToolsMode = process.env.OCTG_CLIENT_TOOLS_MODE === "ALLOW" ? "ALLOW" : "REJECT";
   const vars = [
     `OCTG_KEY_PEPPER=${pepper}`,
     `OCTG_UPSTREAM_BASE_URL=${upstream}`,
@@ -101,7 +102,7 @@ async function setupLocal() {
   const tempDir = mkdtempSync(`${tmpdir()}/octg-seed-`);
   const sqlPath = `${tempDir}/seed.sql`;
   try {
-    const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, clientId, clientName, clientKey], {
+    const seed = spawnSync(node, [`${root}/scripts/seed-client.mjs`, clientId, clientName, clientKey, clientToolsMode], {
       cwd: root,
       env: { ...process.env, OCTG_KEY_PEPPER: pepper },
       encoding: "utf8",
