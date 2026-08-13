@@ -160,7 +160,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 - `"REJECT"`: 無料枠 reservation を行わず、`model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
 - `"ALLOW"`: 既存の quota reservation / settlement フローへ進み、実 usage で精算する。
 
-Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。未設定または無効な値は `"REJECT"` にフォールバックする。
+Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。PUT リクエストの `tools_mode` が未設定または `"REJECT"` / `"ALLOW"` 以外の無効な値の場合、HTTP 400 (`invalid_request`) で拒否する。DB から読み出したポリシーの `tools_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
 
 ### 5.4 トークン推定
 
