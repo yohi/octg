@@ -155,7 +155,12 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 
 ### 5.3 Tool-use 判定
 
-`tools` / `tool_choice` / built-in tool 設定が存在するリクエストは一律 PAID_ONLY とする。無料枠 reservation を行わず、ポリシーが許可しない限り `model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
+`tools` / `tool_choice` / built-in tool 設定が存在するリクエストは、クライアントポリシーの `tools_mode` に基づいて制御される。`tools_mode` は `"REJECT"`（MVP デフォルト）または `"ALLOW"`。
+
+- `"REJECT"`: 無料枠 reservation を行わず、`model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
+- `"ALLOW"`: 既存の quota reservation / settlement フローへ進み、実 usage で精算する。
+
+Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。未設定または無効な値は `"REJECT"` にフォールバックする。
 
 ### 5.4 トークン推定
 
@@ -278,7 +283,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 D1 は authoritative quota には使用しない（要件第 32 章）。概念スキーマは要件第 33 章に準拠：
 
 - `clients` — id, name, key_hash, enabled, created_at
-- `client_policies` — client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled
+- `client_policies` — client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode
 - `model_registry` — model, provider, complimentary_pool, enabled, fallback_model, updated_at
 - `requests` — request_id, utc_day, client_id, requested_model, upstream_model, pool, eligibility, reserved_tokens, input/output/total_tokens, status, billing_class, openai_request_id, started_at, completed_at
 - `daily_usage` — utc_day, pool, confirmed_tokens, paid_tokens, request_count
