@@ -217,21 +217,31 @@ OCTG_KEY_PEPPER=<your-production-pepper> \
 npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
 ```
 
+ツール使用を許可する場合は、第 4 引数に `ALLOW` を指定してください。
+
+```bash
+OCTG_KEY_PEPPER=<your-production-pepper> \
+  node scripts/seed-client.mjs client_demo "Demo Client" octg_sk_xxx ALLOW > /tmp/octg-seed.sql
+
+npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+```
+
 または、より簡単に `npm run seed:client:remote` を使用します。`--key` を省略すると、`octg_sk_remote_` 形式のランダムな本番クライアントキーを自動生成して本番 D1 に登録します。
 
 ```bash
-# 本番クライアントキーを自動生成する場合
+# 本番クライアントキーを自動生成する場合（ツール使用を許可）
 OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient
+  npm run seed:client:remote -- --id=client_demo --name=DemoClient --tools-mode=ALLOW
 
 # 独自のキーを指定する場合
 OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient --key=octg_sk_my_custom_key
+  npm run seed:client:remote -- --id=client_demo --name=DemoClient --key=octg_sk_my_custom_key --tools-mode=ALLOW
 
 # --name にスペースを含む場合は環境変数を使用
 OCTG_KEY_PEPPER=<your-production-pepper> \
   OCTG_CLIENT_ID=client_demo \
   OCTG_CLIENT_NAME="Demo Client" \
+  OCTG_CLIENT_TOOLS_MODE=ALLOW \
   npm run seed:client:remote
 ```
 

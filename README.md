@@ -135,6 +135,7 @@ npm run dev -w apps/gateway-worker
 OCTG_CLIENT_ID=client_demo \
 OCTG_CLIENT_NAME=Demo \
 OCTG_CLIENT_KEY=octg_sk_local_demo \
+OCTG_CLIENT_TOOLS_MODE=ALLOW \
 npm run setup:local
 ```
 
