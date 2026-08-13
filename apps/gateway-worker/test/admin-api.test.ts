@@ -39,7 +39,17 @@ describe("admin API", () => {
     expect(response.status).toBe(200);
   });
 
-  it("rejects invalid write payloads without updating rows", async () => {
+  it("rejects missing tools_mode in policy writes", async () => {
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false }) }, "jwt");
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects invalid tools_mode values", async () => {
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false, tools_mode: "MAYBE" }) }, "jwt");
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects other invalid write payloads without updating rows", async () => {
     const policyResponse = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: -1, cache_enabled: false, tools_mode: "REJECT" }) }, "jwt");
     expect(policyResponse.status).toBe(400);
     const modelResponse = await admin("/admin/models/gpt-5", { method: "PUT", body: JSON.stringify({ complimentary_pool: "STANDARD", enabled: "yes", fallback_model: null }) }, "jwt");
