@@ -35,7 +35,7 @@ describe("admin API", () => {
   });
 
   it("allows client policy writes with an Access JWT", async () => {
-    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 5, cache_enabled: false }) }, "jwt");
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 5, cache_enabled: false, tools_mode: "REJECT" }) }, "jwt");
     expect(response.status).toBe(200);
   });
 
@@ -47,7 +47,7 @@ describe("admin API", () => {
   });
 
   it("returns effective client policy values in the list", async () => {
-    await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "PAID_SHARED", output_limit_mode: "CLAMP", max_paid_usd_day: 10, cache_enabled: true }) }, "jwt");
+    await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "PAID_SHARED", output_limit_mode: "CLAMP", max_paid_usd_day: 10, cache_enabled: true, tools_mode: "REJECT" }) }, "jwt");
     const response = await admin("/admin/clients", undefined, "jwt");
     expect(response.status).toBe(200);
     const body = await response.json<{ clients: Array<{ id: string; overflow_mode: string; output_limit_mode: string; max_paid_usd_day: number; cache_enabled: boolean }> }>();
@@ -65,10 +65,22 @@ describe("admin API", () => {
   });
 
   it("round-trips output_limit_mode from admin write through read-normalize", async () => {
-    await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "CLAMP", max_paid_usd_day: 0, cache_enabled: false }) }, "jwt");
+    await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "CLAMP", max_paid_usd_day: 0, cache_enabled: false, tools_mode: "REJECT" }) }, "jwt");
     const list = await admin("/admin/clients", undefined, "jwt");
     const body = await list.json<{ clients: Array<{ id: string; output_limit_mode: string }> }>();
     expect(body.clients.find((c) => c.id === TEST_CLIENT_ID)?.output_limit_mode).toBe("CLAMP");
+  });
+
+  it("round-trips tools_mode from admin write through read-normalize", async () => {
+    await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false, tools_mode: "ALLOW" }) }, "jwt");
+    const list = await admin("/admin/clients", undefined, "jwt");
+    const body = await list.json<{ clients: Array<{ id: string; tools_mode: string }> }>();
+    expect(body.clients.find((c) => c.id === TEST_CLIENT_ID)?.tools_mode).toBe("ALLOW");
+  });
+
+  it("rejects invalid tools_mode values", async () => {
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false, tools_mode: "MAYBE" }) }, "jwt");
+    expect(response.status).toBe(400);
   });
 
   it("falls back invalid output_limit_mode to REJECT when reading", async () => {
