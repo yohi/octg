@@ -203,6 +203,7 @@ describe("proxy pipeline", () => {
   it("allows tool requests when client policy toolsMode is ALLOW", async () => {
     await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
     invalidateConfigCaches();
+    const stateBefore = await todayStub().getState();
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
       id: "chatcmpl-tool",
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
@@ -212,7 +213,7 @@ describe("proxy pipeline", () => {
     expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
     expect(response.headers.get("X-OCTG-Route")).toBe("free_shared");
     const state = await todayStub().getState();
-    expect(state.confirmedTokens).toBeGreaterThan(0);
+    expect(state.confirmedTokens - stateBefore.confirmedTokens).toBe(15);
     expect(state.reservedTokens).toBe(0);
   });
 
