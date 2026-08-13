@@ -56,10 +56,10 @@ export async function loadPolicy(env: Env, clientId: string): Promise<ClientPoli
   const policy: ClientPolicy = row
     ? {
         overflowMode: row.overflow_mode === "PAID_SHARED" ? "PAID_SHARED" : "REJECT",
-      outputLimitMode: row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT",
-      maxPaidUsdDay: row.max_paid_usd_day,
-      cacheEnabled: row.cache_enabled === 1,
-      toolsMode: row.tools_mode === "ALLOW" ? "ALLOW" : "REJECT",
+        outputLimitMode: row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT",
+        maxPaidUsdDay: row.max_paid_usd_day,
+        cacheEnabled: row.cache_enabled === 1,
+        toolsMode: row.tools_mode === "ALLOW" ? "ALLOW" : "REJECT",
       }
     : DEFAULT_CLIENT_POLICY;
   policyCache.set(clientId, { policy, expiresAt: now + TTL_MS });
