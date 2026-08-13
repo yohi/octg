@@ -191,7 +191,7 @@ describe("proxy pipeline", () => {
     expect((await mini.getState()).confirmedTokens).toBe(150);
   });
 
-  it("rejects unknown models and tool requests before reservation", async () => {
+  it("rejects tool requests by default before reservation", async () => {
     const unknown = await authed({ model: "gpt-99", messages: [{ role: "user", content: "hi" }] });
     expect(unknown.status).toBe(403);
     expect((await unknown.json()) as { error: { code: string } }).toMatchObject({ error: { code: "model_requires_paid" } });
