@@ -191,13 +191,29 @@ describe("proxy pipeline", () => {
     expect((await mini.getState()).confirmedTokens).toBe(150);
   });
 
-  it("rejects unknown models and tool requests before reservation", async () => {
+  it("rejects tool requests by default before reservation", async () => {
     const unknown = await authed({ model: "gpt-99", messages: [{ role: "user", content: "hi" }] });
     expect(unknown.status).toBe(403);
     expect((await unknown.json()) as { error: { code: string } }).toMatchObject({ error: { code: "model_requires_paid" } });
     const tools = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], tools: [] });
     expect(tools.status).toBe(403);
     expect((await tools.json()) as { error: { code: string } }).toMatchObject({ error: { code: "model_not_allowed" } });
+  });
+
+  it("allows tool requests when client policy toolsMode is ALLOW", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
+    invalidateConfigCaches();
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+      id: "chatcmpl-tool",
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "test" } }] });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
+    expect(response.headers.get("X-OCTG-Route")).toBe("free_shared");
+    const state = await todayStub().getState();
+    expect(state.confirmedTokens).toBeGreaterThan(0);
+    expect(state.reservedTokens).toBe(0);
   });
 
   it("rejects non-text and conflicting max token requests", async () => {
