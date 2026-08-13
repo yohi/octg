@@ -180,8 +180,8 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 
 `推定 input + 要求 output + margin` が remaining を超える場合、ClientPolicy の `outputLimitMode` に従う：
   - Wire field `client_policies.output_limit_mode` は読み出し時に内部型 `ClientPolicy.outputLimitMode`（`"REJECT"` | `"CLAMP"`）へ変換される。
-  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。未設定または無効な値は `"REJECT"` にフォールバックする。
-  - `tools_mode` についても同様に `"REJECT"` / `"ALLOW"` に正規化され、未設定または無効な値は `"REJECT"` にフォールバックする。
+  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。Admin API からの未設定または無効な値は HTTP 400 (`invalid_request`) で拒否する。D1 から読み出したポリシーの `output_limit_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
+  - `tools_mode` についても同様に `"REJECT"` / `"ALLOW"` に正規化される。Admin API からの未設定または無効な値は HTTP 400 (`invalid_request`) で拒否する。D1 から読み出したポリシーの `tools_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
   - enforcement 時には `ClientPolicy.outputLimitMode` を `decideOutput` に渡し、以下の分岐で適用する。
 
 - `REJECT`（デフォルト）: `429`（`complimentary_quota_exceeded`）で拒否。
