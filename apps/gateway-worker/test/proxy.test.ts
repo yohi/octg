@@ -200,6 +200,23 @@ describe("proxy pipeline", () => {
     expect((await tools.json()) as { error: { code: string } }).toMatchObject({ error: { code: "model_not_allowed" } });
   });
 
+  it("allows tool requests when client policy toolsMode is ALLOW", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
+    invalidateConfigCaches();
+    const stateBefore = await todayStub().getState();
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+      id: "chatcmpl-tool",
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "test" } }] });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
+    expect(response.headers.get("X-OCTG-Route")).toBe("free_shared");
+    const state = await todayStub().getState();
+    expect(state.confirmedTokens - stateBefore.confirmedTokens).toBe(15);
+    expect(state.reservedTokens).toBe(0);
+  });
+
   it("rejects non-text and conflicting max token requests", async () => {
     const image = await authed({ model: "gpt-5", messages: [{ role: "user", content: [{ type: "image_url" }] }] });
     expect(image.status).toBe(400);
