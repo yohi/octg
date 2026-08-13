@@ -9,19 +9,20 @@ const json = (body: unknown, init?: ResponseInit) => new Response(JSON.stringify
 const notFound = (requestId: string): OctgHttpError => ({ status: 404, requestId, body: { error: { message: "Not found.", type: "invalid_request_error", param: null, code: "not_found" }, request_id: requestId } });
 const badRequest = (requestId: string, message: string): OctgHttpError => ({ status: 400, requestId, body: { error: { message, type: "invalid_request_error", param: null, code: "invalid_request" }, request_id: requestId } });
 
-type ClientPolicyInput = { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean };
+type ClientPolicyInput = { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean; tools_mode: "REJECT" | "ALLOW" };
 type ModelInput = { complimentary_pool: "STANDARD" | "MINI" | "NONE"; enabled: boolean; fallback_model: string | null };
-type ClientListRow = { id: string; name: string; enabled: number; created_at: string; overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null };
-const DEFAULT_CLIENT_POLICY = { overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false } as const;
+type ClientListRow = { id: string; name: string; enabled: number; created_at: string; overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null; tools_mode: string | null };
+const DEFAULT_CLIENT_POLICY = { overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false, tools_mode: "REJECT" } as const;
 
-function effectiveClientPolicy(row: { overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null }): { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean } {
+function effectiveClientPolicy(row: { overflow_mode: string | null; output_limit_mode: string | null; max_paid_usd_day: number | null; cache_enabled: number | null; tools_mode: string | null }): { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean; tools_mode: "REJECT" | "ALLOW" } {
   const overflow_mode = row.overflow_mode === "PAID_SHARED" ? "PAID_SHARED" : "REJECT";
   const output_limit_mode = row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT";
   const max_paid_usd_day = typeof row.max_paid_usd_day === "number" && Number.isFinite(row.max_paid_usd_day) && row.max_paid_usd_day >= 0 ? row.max_paid_usd_day : 0;
   let cache_enabled: boolean = DEFAULT_CLIENT_POLICY.cache_enabled;
   if (row.cache_enabled === 1) cache_enabled = true;
   else if (row.cache_enabled === 0) cache_enabled = false;
-  return { overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled };
+  const tools_mode = row.tools_mode === "ALLOW" ? "ALLOW" : "REJECT";
+  return { overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode };
 }
 
 function parseObject(value: unknown): Record<string, unknown> | undefined {
@@ -34,8 +35,8 @@ async function parseJson(request: Request): Promise<Record<string, unknown> | un
 }
 
 function parseClientPolicy(value: Record<string, unknown> | undefined): ClientPolicyInput | undefined {
-  if (!value || (value.overflow_mode !== "REJECT" && value.overflow_mode !== "PAID_SHARED") || (value.output_limit_mode !== "REJECT" && value.output_limit_mode !== "CLAMP") || typeof value.max_paid_usd_day !== "number" || !Number.isFinite(value.max_paid_usd_day) || value.max_paid_usd_day < 0 || typeof value.cache_enabled !== "boolean") return undefined;
-  return { overflow_mode: value.overflow_mode, output_limit_mode: value.output_limit_mode, max_paid_usd_day: value.max_paid_usd_day, cache_enabled: value.cache_enabled };
+  if (!value || (value.overflow_mode !== "REJECT" && value.overflow_mode !== "PAID_SHARED") || (value.output_limit_mode !== "REJECT" && value.output_limit_mode !== "CLAMP") || typeof value.max_paid_usd_day !== "number" || !Number.isFinite(value.max_paid_usd_day) || value.max_paid_usd_day < 0 || typeof value.cache_enabled !== "boolean" || (value.tools_mode !== "REJECT" && value.tools_mode !== "ALLOW")) return undefined;
+  return { overflow_mode: value.overflow_mode, output_limit_mode: value.output_limit_mode, max_paid_usd_day: value.max_paid_usd_day, cache_enabled: value.cache_enabled, tools_mode: value.tools_mode };
 }
 
 function parseModel(value: Record<string, unknown> | undefined): ModelInput | undefined {
@@ -56,7 +57,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
     return json({ request_id: requestId, utc_day: day, clients: rows.results });
   }
   if (request.method === "GET" && url.pathname === "/admin/clients") {
-    const rows = await env.DB.prepare("SELECT c.id, c.name, c.enabled, c.created_at, p.overflow_mode, p.output_limit_mode, p.max_paid_usd_day, p.cache_enabled FROM clients c LEFT JOIN client_policies p ON c.id = p.client_id ORDER BY c.id").all<ClientListRow>();
+    const rows = await env.DB.prepare("SELECT c.id, c.name, c.enabled, c.created_at, p.overflow_mode, p.output_limit_mode, p.max_paid_usd_day, p.cache_enabled, p.tools_mode FROM clients c LEFT JOIN client_policies p ON c.id = p.client_id ORDER BY c.id").all<ClientListRow>();
     const clients = rows.results.map((row) => ({ id: row.id, name: row.name, enabled: row.enabled === 1, created_at: row.created_at, ...effectiveClientPolicy(row) }));
     return json({ request_id: requestId, clients });
   }
@@ -66,7 +67,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
     const clientId = decodeURIComponent(policyMatch[1]!); if (!(await env.DB.prepare("SELECT id FROM clients WHERE id = ?").bind(clientId).first())) return errorResponse(notFound(requestId));
     const body = parseClientPolicy(await parseJson(request));
     if (!body) return errorResponse(badRequest(requestId, "Invalid client policy."));
-    await env.DB.prepare("INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, max_paid_usd_day=excluded.max_paid_usd_day, cache_enabled=excluded.cache_enabled").bind(clientId, body.overflow_mode, body.output_limit_mode, body.max_paid_usd_day, body.cache_enabled ? 1 : 0).run();
+    await env.DB.prepare("INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, max_paid_usd_day=excluded.max_paid_usd_day, cache_enabled=excluded.cache_enabled, tools_mode=excluded.tools_mode").bind(clientId, body.overflow_mode, body.output_limit_mode, body.max_paid_usd_day, body.cache_enabled ? 1 : 0, body.tools_mode).run();
     invalidateConfigCaches(); return json({ request_id: requestId, client_id: clientId, updated: true });
   }
   const modelMatch = url.pathname.match(/^\/admin\/models\/([^/]+)$/);
