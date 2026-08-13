@@ -30,7 +30,7 @@ REQUIREMENTS.md 第 52 章の 5 原則を継承する：
 | 3 | DO の粒度 | 1 DO / pool / UTC 日（例: `quota:STANDARD:2026-08-09`） |
 | 4 | Worker → AI Gateway 接続 | AI Gateway REST API 経由 |
 | 5 | クライアント認証 | `Authorization: Bearer octg_sk_*`。Admin API は Cloudflare Access で二重防御 |
-| 6 | Tool-use 判定 | `tools` / `tool_choice` 等が存在する場合は一律 PAID_ONLY |
+| 6 | Tool-use 判定 | `tools` / `tool_choice` 等が存在する場合は `client_policies.tools_mode` で制御。デフォルトは `REJECT` |
 | 7 | リポジトリ構成 | シンプルモノレポ（`apps/gateway-worker`, `durable-objects`, `packages/shared`） |
 | 8 | テスト基盤 | Vitest + Miniflare（DO 含む） |
 
@@ -161,8 +161,6 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 - `"ALLOW"`: 既存の quota reservation / settlement フローへ進み、実 usage で精算する。
 
 Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。未設定または無効な値は `"REJECT"` にフォールバックする。
-
-
 
 ### 5.4 トークン推定
 
