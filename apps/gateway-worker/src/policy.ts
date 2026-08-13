@@ -7,6 +7,7 @@ export interface ClientPolicy {
   outputLimitMode: "REJECT" | "CLAMP";
   maxPaidUsdDay: number;
   cacheEnabled: boolean;
+  toolsMode: "REJECT" | "ALLOW";
 }
 
 export const DEFAULT_CLIENT_POLICY: ClientPolicy = {
@@ -14,6 +15,7 @@ export const DEFAULT_CLIENT_POLICY: ClientPolicy = {
   outputLimitMode: "REJECT",
   maxPaidUsdDay: 0,
   cacheEnabled: false,
+  toolsMode: "REJECT",
 };
 
 const TTL_MS = 60_000;
@@ -39,6 +41,7 @@ interface PolicyRow {
   output_limit_mode: string;
   max_paid_usd_day: number;
   cache_enabled: number;
+  tools_mode: string;
 }
 
 export async function loadPolicy(env: Env, clientId: string): Promise<ClientPolicy> {
@@ -46,7 +49,7 @@ export async function loadPolicy(env: Env, clientId: string): Promise<ClientPoli
   const cached = policyCache.get(clientId);
   if (cached && cached.expiresAt > now) return cached.policy;
   const row = await env.DB.prepare(
-    "SELECT overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled FROM client_policies WHERE client_id = ?",
+    "SELECT overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode FROM client_policies WHERE client_id = ?",
   )
     .bind(clientId)
     .first<PolicyRow>();
@@ -56,6 +59,7 @@ export async function loadPolicy(env: Env, clientId: string): Promise<ClientPoli
         outputLimitMode: row.output_limit_mode === "CLAMP" ? "CLAMP" : "REJECT",
         maxPaidUsdDay: row.max_paid_usd_day,
         cacheEnabled: row.cache_enabled === 1,
+        toolsMode: row.tools_mode === "ALLOW" ? "ALLOW" : "REJECT",
       }
     : DEFAULT_CLIENT_POLICY;
   policyCache.set(clientId, { policy, expiresAt: now + TTL_MS });

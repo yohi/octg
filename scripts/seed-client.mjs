@@ -19,6 +19,6 @@ console.log(
     "ON CONFLICT(id) DO UPDATE SET name=excluded.name, key_hash=excluded.key_hash, enabled=1;"
 );
 console.log(
-  `INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES ('${esc(id)}', 'REJECT', 'REJECT', 0, 0) ` +
+  `INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode) VALUES ('${esc(id)}', 'REJECT', 'REJECT', 0, 0, 'REJECT') ` +
     "ON CONFLICT(client_id) DO NOTHING;"
 );

@@ -30,7 +30,7 @@ REQUIREMENTS.md 第 52 章の 5 原則を継承する：
 | 3 | DO の粒度 | 1 DO / pool / UTC 日（例: `quota:STANDARD:2026-08-09`） |
 | 4 | Worker → AI Gateway 接続 | AI Gateway REST API 経由 |
 | 5 | クライアント認証 | `Authorization: Bearer octg_sk_*`。Admin API は Cloudflare Access で二重防御 |
-| 6 | Tool-use 判定 | `tools` / `tool_choice` 等が存在する場合は一律 PAID_ONLY |
+| 6 | Tool-use 判定 | `tools` / `tool_choice` 等が存在する場合は `client_policies.tools_mode` で制御。デフォルトは `REJECT` |
 | 7 | リポジトリ構成 | シンプルモノレポ（`apps/gateway-worker`, `durable-objects`, `packages/shared`） |
 | 8 | テスト基盤 | Vitest + Miniflare（DO 含む） |
 
@@ -155,7 +155,12 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 
 ### 5.3 Tool-use 判定
 
-`tools` / `tool_choice` / built-in tool 設定が存在するリクエストは一律 PAID_ONLY とする。無料枠 reservation を行わず、ポリシーが許可しない限り `model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
+`tools` / `tool_choice` / built-in tool 設定が存在するリクエストは、クライアントポリシーの `tools_mode` に基づいて制御される。`tools_mode` は `"REJECT"`（MVP デフォルト）または `"ALLOW"`。
+
+- `"REJECT"`: 無料枠 reservation を行わず、`model_not_allowed` で拒否（要件第 17 章、エラー契約は 5.7）。
+- `"ALLOW"`: 既存の quota reservation / settlement フローへ進み、実 usage で精算する。
+
+Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる。PUT リクエストの `tools_mode` が未設定または `"REJECT"` / `"ALLOW"` 以外の無効な値の場合、HTTP 400 (`invalid_request`) で拒否する。DB から読み出したポリシーの `tools_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
 
 ### 5.4 トークン推定
 
@@ -175,7 +180,8 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 
 `推定 input + 要求 output + margin` が remaining を超える場合、ClientPolicy の `outputLimitMode` に従う：
   - Wire field `client_policies.output_limit_mode` は読み出し時に内部型 `ClientPolicy.outputLimitMode`（`"REJECT"` | `"CLAMP"`）へ変換される。
-  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。未設定または無効な値は `"REJECT"` にフォールバックする。
+  - `PUT /admin/clients/:id/policy` で書き込まれた値は、上記内部型に正規化されて D1 `client_policies.output_limit_mode` に保存される。Admin API からの未設定または無効な値は HTTP 400 (`invalid_request`) で拒否する。D1 から読み出したポリシーの `output_limit_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
+  - `tools_mode` についても同様に `"REJECT"` / `"ALLOW"` に正規化される。Admin API からの未設定または無効な値は HTTP 400 (`invalid_request`) で拒否する。D1 から読み出したポリシーの `tools_mode` が未設定または無効な値の場合、実行時ポリシーは `"REJECT"` にフォールバックする。
   - enforcement 時には `ClientPolicy.outputLimitMode` を `decideOutput` に渡し、以下の分岐で適用する。
 
 - `REJECT`（デフォルト）: `429`（`complimentary_quota_exceeded`）で拒否。
@@ -278,7 +284,7 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 D1 は authoritative quota には使用しない（要件第 32 章）。概念スキーマは要件第 33 章に準拠：
 
 - `clients` — id, name, key_hash, enabled, created_at
-- `client_policies` — client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled
+- `client_policies` — client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode
 - `model_registry` — model, provider, complimentary_pool, enabled, fallback_model, updated_at
 - `requests` — request_id, utc_day, client_id, requested_model, upstream_model, pool, eligibility, reserved_tokens, input/output/total_tokens, status, billing_class, openai_request_id, started_at, completed_at
 - `daily_usage` — utc_day, pool, confirmed_tokens, paid_tokens, request_count
@@ -375,9 +381,11 @@ POST /admin/reconcile
   - 署名検証: Cloudflare Access 標準の RS256 JWT とし、`ACCESS_JWT_PUBLIC_JWK` が設定されていればその JWK set を使用、未設定であれば `<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` から JWKS を取得する。署名不正・ JWKS 取得失敗時は `401`。
   - 期限検証: `exp` は必須クレームとし、現在時刻を含まない未来の有効期限を要求する。`exp` 欠落・期限切れは `401`。
   - 上記いずれの検証失敗も共通して `401`（`authentication_error` / `invalid_api_key`）を返し、理由の詳細を応答 body に含めない（セキュリティ上の情報漏出防止）。
-- **`GET /admin/clients`**: クライアント一覧に加え、`client_policies` テーブルからポリシー設定を取得。ポリシー未設定のクライアントにはデフォルト値（`overflow_mode: REJECT`, `output_limit_mode: REJECT`, `max_paid_usd_day: 0`, `cache_enabled: false`）を適用した effective policy を返す。
+- **`GET /admin/clients`**: クライアント一覧に加え、`client_policies` テーブルからポリシー設定を取得。ポリシー未設定のクライアントにはデフォルト値（`overflow_mode: REJECT`, `output_limit_mode: REJECT`, `max_paid_usd_day: 0`, `cache_enabled: false`, `tools_mode: REJECT`）を適用した effective policy を返す。
 - **`PUT /admin/clients/:id/policy`**: クライアントポリシーの作成・更新。
-  - ボディ型: `{ overflow_mode: "REJECT" | "PAID_SHARED", output_limit_mode: "REJECT" | "CLAMP", max_paid_usd_day: number (>= 0), cache_enabled: boolean }`
+  - ボディ型: `{ overflow_mode: "REJECT" | "PAID_SHARED", output_limit_mode: "REJECT" | "CLAMP", max_paid_usd_day: number (>= 0), cache_enabled: boolean, tools_mode: "REJECT" | "ALLOW" }`
+  - 無効な `tools_mode`（省略含む）または無効な値は HTTP 400 (`invalid_request`) で拒否する。
+
 - **`PUT /admin/models/:model`**: モデルレジストリの作成・更新。
   - ボディ型: `{ complimentary_pool: "STANDARD" | "MINI" | "NONE", enabled: boolean, fallback_model: string | null }`
 - **Admin Web UI（将来実装）**: 同一 Cloudflare Access セッションで保護された `/admin/ui/*` エンドポイントから Workers Static Assets (`public/admin/ui/*`) 経由でブラウザ UI（Pico.css + Vanilla JS）を配信する計画。配信パスとルーティング: `/admin/ui` → `public/admin/ui/index.html`（`html_handling: "auto-trailing-slash"`）、`/admin/ui/app.js`・`/admin/ui/styles.css` → Static Assets 配信、`/admin/*` → 既存 `handleAdmin` による JSON API。`not_found_handling: "none"` とし `/admin/ui/*` 配下以外は API handler に委ねる。HTML 内で CSS/JS を読み込む際は絶対パス `/admin/ui/app.js`・`/admin/ui/styles.css` を使用する。UI 構成は単一ページダッシュボード（Quota / Usage / Clients / Models セクション）で、Clients と Models はインライン編集をサポートする。エラー処理: API 取得失敗時はセクション内にエラーメッセージと再試行ボタンを表示、編集 PUT 失敗時は行内にエラーメッセージを表示、認証切れ時は Cloudflare Access がログイン画面へリダイレクト。Pico.css は `public/admin/ui/pico.min.css` として同梱し同一ドメインから配信する。

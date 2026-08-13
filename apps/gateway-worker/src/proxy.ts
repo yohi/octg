@@ -94,7 +94,7 @@ export async function handleProxy(
   const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day)));
   const policy = await loadPolicy(env, auth.id);
 
-  if (requestData.isToolUse) {
+  if (requestData.isToolUse && policy.toolsMode !== "ALLOW") {
     return errorResponse(errModelNotAllowed(requestId, snapshotOf(await stub.getState())));
   }
 
