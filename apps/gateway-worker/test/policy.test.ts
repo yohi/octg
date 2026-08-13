@@ -36,6 +36,13 @@ describe("policy and registry", () => {
       overflowMode: "REJECT",
       maxPaidUsdDay: 12.5,
       cacheEnabled: false,
+      toolsMode: "REJECT",
     });
+  });
+
+  it("loads toolsMode ALLOW when seeded", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
+    invalidateConfigCaches();
+    await expect(loadPolicy(env, TEST_CLIENT_ID)).resolves.toMatchObject({ toolsMode: "ALLOW" });
   });
 });

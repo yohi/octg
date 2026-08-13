@@ -20,10 +20,11 @@ export async function seedPolicy(
     outputLimitMode?: string;
     maxPaidUsdDay?: number;
     cacheEnabled?: boolean;
+    toolsMode?: string;
   },
 ): Promise<void> {
   await env.DB.prepare(
-    "INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, max_paid_usd_day=excluded.max_paid_usd_day, cache_enabled=excluded.cache_enabled",
+    "INSERT INTO client_policies (client_id, overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET overflow_mode=excluded.overflow_mode, output_limit_mode=excluded.output_limit_mode, max_paid_usd_day=excluded.max_paid_usd_day, cache_enabled=excluded.cache_enabled, tools_mode=excluded.tools_mode",
   )
     .bind(
       clientId,
@@ -31,6 +32,7 @@ export async function seedPolicy(
       policy.outputLimitMode ?? "REJECT",
       policy.maxPaidUsdDay ?? 0,
       policy.cacheEnabled ? 1 : 0,
+      policy.toolsMode ?? "REJECT",
     )
     .run();
 }
