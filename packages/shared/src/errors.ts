@@ -85,6 +85,30 @@ export function errRequestTooLarge(quota: QuotaSnapshot, requestId: string): Oct
   );
 }
 
+export function errInputTooLarge(requestId: string): OctgHttpError {
+  return makeError(
+    413,
+    requestId,
+    "Request exceeds the configured input size limit.",
+    "invalid_request_error",
+    null,
+    "request_too_large",
+    { route: "reject:request_too_large" },
+  );
+}
+
+export function errWorkerConcurrencyExceeded(quota: QuotaSnapshot, requestId: string): OctgHttpError {
+  return makeError(
+    429,
+    requestId,
+    "Worker concurrency limit reached for this quota pool.",
+    "rate_limit_error",
+    null,
+    "worker_concurrency_exceeded",
+    { quota, route: "reject:worker_concurrency" },
+  );
+}
+
 export function errModelNotAllowed(requestId: string, quota?: QuotaSnapshot): OctgHttpError {
   return makeError(
     403,
@@ -138,13 +162,13 @@ export function buildOctgHeaders(args: {
   route?: string;
 }): Record<string, string> {
   const headers: Record<string, string> = { "X-OCTG-Request-Id": args.requestId };
+  if (args.route) headers["X-OCTG-Route"] = args.route;
   if (args.quota && args.route) {
     headers["X-OCTG-Pool"] = toPoolLower(args.quota.pool);
     headers["X-OCTG-Quota-Limit"] = String(args.quota.limit);
     headers["X-OCTG-Quota-Used"] = String(args.quota.used);
     headers["X-OCTG-Quota-Remaining"] = String(args.quota.remaining);
     headers["X-OCTG-Quota-Reset"] = args.quota.resetAt;
-    headers["X-OCTG-Route"] = args.route;
   }
   return headers;
 }

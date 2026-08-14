@@ -49,6 +49,9 @@ export type MarkUncertainResult =
 export type ReleaseResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "unknown_request" };
+export type AcquireInFlightResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: "worker_concurrency_exceeded" };
 
 export type ReconcileDisposition = "consumed" | "unused";
 export type ReconcileResult = { readonly ok: true; readonly applied: boolean };

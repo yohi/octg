@@ -1,11 +1,13 @@
 import { hasToolUse } from "./classify";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+export const MAX_NORMALIZED_INPUT_BYTES = 1_048_576;
 
 export interface NormalizedRequest {
   endpoint: "chat" | "responses";
   model: string;
   inputText: string;
+  readonly inputBytes: number;
   messageCount: number;
   maxOutputTokens: number;
   stream: boolean;
@@ -13,7 +15,7 @@ export interface NormalizedRequest {
   opaqueInputBytes: number;
 }
 
-export type NormalizeError = "non_text" | "max_tokens_conflict" | "invalid_body";
+export type NormalizeError = "non_text" | "max_tokens_conflict" | "invalid_body" | "input_too_large";
 export type NormalizeResult =
   | { ok: true; value: NormalizedRequest }
   | { ok: false; error: NormalizeError };
@@ -30,6 +32,7 @@ const NON_TEXT_PART_TYPES = new Set([
 const CHAT_CONTENT_TYPES = new Set(["text", "input_text"]);
 const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text", "text"]);
 const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text", "text"]);
+const UTF8_ENCODER = new TextEncoder();
 
 type ContentWalk = { ok: true; text: string } | { ok: false; error: NormalizeError };
 
@@ -59,7 +62,10 @@ function optionalPositiveInteger(value: unknown): number | undefined | "invalid"
   return parsed === undefined ? "invalid" : parsed;
 }
 
-export function normalizeChatCompletions(body: unknown): NormalizeResult {
+export function normalizeChatCompletions(
+  body: unknown,
+  maxInputBytes = MAX_NORMALIZED_INPUT_BYTES,
+): NormalizeResult {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid_body" };
   const value = body as Record<string, unknown>;
   if (typeof value.model !== "string" || value.model.length === 0 || !Array.isArray(value.messages)) {
@@ -83,12 +89,17 @@ export function normalizeChatCompletions(body: unknown): NormalizeResult {
     texts.push(content.text);
   }
 
+  const inputText = texts.join("\n");
+  const inputBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
+
   return {
     ok: true,
     value: {
       endpoint: "chat",
       model: value.model,
-      inputText: texts.join("\n"),
+      inputText,
+      inputBytes,
       messageCount: value.messages.length,
       maxOutputTokens: maxCompletion ?? maxLegacy ?? DEFAULT_MAX_OUTPUT_TOKENS,
       stream: value.stream === true,
@@ -98,7 +109,10 @@ export function normalizeChatCompletions(body: unknown): NormalizeResult {
   };
 }
 
-export function normalizeResponses(body: unknown): NormalizeResult {
+export function normalizeResponses(
+  body: unknown,
+  maxInputBytes = MAX_NORMALIZED_INPUT_BYTES,
+): NormalizeResult {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid_body" };
   const value = body as Record<string, unknown>;
   if (typeof value.model !== "string" || value.model.length === 0 || value.input === undefined) {
@@ -198,7 +212,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
             }
             texts.push(summary.text);
           }
-          opaqueInputBytes += new TextEncoder().encode(entry.encrypted_content).length;
+          opaqueInputBytes += UTF8_ENCODER.encode(entry.encrypted_content).byteLength;
           break;
         }
         default:
@@ -219,6 +233,8 @@ export function normalizeResponses(body: unknown): NormalizeResult {
   if (value.max_output_tokens !== undefined && positiveInteger(value.max_output_tokens) === undefined) {
     return { ok: false, error: "invalid_body" };
   }
+  const inputBytes = UTF8_ENCODER.encode(inputText).byteLength + opaqueInputBytes;
+  if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
 
   return {
     ok: true,
@@ -226,6 +242,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
       endpoint: "responses",
       model: value.model,
       inputText,
+      inputBytes,
       messageCount,
       maxOutputTokens:
         value.max_output_tokens === undefined ? DEFAULT_MAX_OUTPUT_TOKENS : positiveInteger(value.max_output_tokens) ?? 0,
