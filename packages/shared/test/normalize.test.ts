@@ -37,6 +37,7 @@ describe("normalizeChatCompletions", () => {
         maxOutputTokens: 100,
         stream: true,
         isToolUse: false,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -60,6 +61,7 @@ describe("normalizeChatCompletions", () => {
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
         isToolUse: false,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -125,6 +127,7 @@ describe("normalizeChatCompletions", () => {
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
         isToolUse: true,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -157,6 +160,7 @@ describe("normalizeResponses", () => {
         maxOutputTokens: 50,
         stream: false,
         isToolUse: false,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -172,6 +176,7 @@ describe("normalizeResponses", () => {
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
         isToolUse: false,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -182,11 +187,12 @@ describe("normalizeResponses", () => {
       value: {
         endpoint: "responses",
         model: "gpt-5",
-        inputText: "hi",
+        inputText: "hi\n[]",
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
         isToolUse: true,
+        opaqueInputBytes: 0,
       },
     });
   });
@@ -238,7 +244,7 @@ describe("normalizeResponses", () => {
         model: "gpt-5",
         input: [
           { role: "user", content: [{ type: "input_text", text: "hi" }] },
-          { type: "function_call", name: "lookup" },
+          { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         ],
       }),
     ).toEqual({
@@ -246,12 +252,100 @@ describe("normalizeResponses", () => {
       value: {
         endpoint: "responses",
         model: "gpt-5",
-        inputText: "hi",
+        inputText: "hi\nlookup\n{}",
         messageCount: 2,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
         isToolUse: true,
+        opaqueInputBytes: 0,
       },
     });
+  });
+
+  it("accepts role-aware text history and meters tool and reasoning fields", () => {
+    const result = normalizeResponses({
+      model: "gpt-5.6-luna",
+      instructions: "instructions-marker",
+      tools: [{ type: "function", name: "tool-name-marker", description: "schema-marker", parameters: { type: "object", properties: {} } }],
+      tool_choice: { type: "function", name: "choice-marker" },
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "user-marker" }] },
+        { role: "assistant", content: [{ type: "output_text", text: "assistant-marker" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup-marker", arguments: "{\"city\":\"argument-marker\"}" },
+        { type: "function_call_output", call_id: "call_1", output: "tool-output-marker" },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker" }], encrypted_content: "opaque-marker" },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker-2" }], encrypted_content: "opaque-marker-2" },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        endpoint: "responses",
+        inputText: expect.stringContaining("tool-output-marker"),
+        messageCount: 6,
+        isToolUse: true,
+        opaqueInputBytes: 28,
+      },
+    });
+    if (result.ok) {
+      for (const marker of [
+        "user-marker",
+        "assistant-marker",
+        "lookup-marker",
+        "argument-marker",
+        "tool-output-marker",
+        "summary-marker",
+        "summary-marker-2",
+        "instructions-marker",
+        "tool-name-marker",
+        "schema-marker",
+        "choice-marker",
+      ]) {
+        expect(result.value.inputText).toContain(marker);
+      }
+    }
+  });
+
+  it("rejects output_text for non-assistant messages", () => {
+    expect(
+      normalizeResponses({
+        model: "gpt-5.6-luna",
+        input: [{ role: "user", content: [{ type: "output_text", text: "not-input" }] }],
+      }),
+    ).toEqual({ ok: false, error: "invalid_body" });
+  });
+
+  it("rejects unmeterable references and multimodal tool output", () => {
+    expect(normalizeResponses({ model: "gpt-5", input: [{ type: "item_reference", id: "resp_123" }] })).toEqual({
+      ok: false,
+      error: "invalid_body",
+    });
+    expect(normalizeResponses({ model: "gpt-5", previous_response_id: "resp_123", input: "hello" })).toEqual({
+      ok: false,
+      error: "invalid_body",
+    });
+    expect(normalizeResponses({ model: "gpt-5", conversation: "conv_123", input: "hello" })).toEqual({
+      ok: false,
+      error: "invalid_body",
+    });
+    expect(
+      normalizeResponses({
+        model: "gpt-5",
+        input: [{ type: "function_call_output", call_id: "call_1", output: [{ type: "input_image", image_url: "https://example.invalid/a.png" }] }],
+      }),
+    ).toEqual({ ok: false, error: "non_text" });
+    expect(
+      normalizeResponses({
+        model: "gpt-5",
+        input: [{ type: "unknown_item", content: [{ type: "input_text", text: "must-not-pass" }] }],
+      }),
+    ).toEqual({ ok: false, error: "invalid_body" });
+    expect(
+      normalizeResponses({
+        model: "gpt-5",
+        input: [{ type: "reasoning", summary: [{ type: "input_image", image_url: "https://example.invalid/a.png" }], encrypted_content: "opaque" }],
+      }),
+    ).toEqual({ ok: false, error: "non_text" });
   });
 });

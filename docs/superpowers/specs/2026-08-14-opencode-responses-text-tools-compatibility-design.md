@@ -64,7 +64,7 @@ message = Non-text input is not supported in the MVP.
 - item_reference、previous_response_id、conversation、未知のtop-level item / nested partは拒否される。
 - tools_mode=REJECTではreservation/upstream前にmodel_not_allowed、ALLOWでは元のinputを保持してupstreamへ送る。
 
-テストはまず現在の実装で失敗する形状を確認し、その後に最小修正を行う。既存の chat、quota、upstream body のテストは変更しない。
+テストはまず現在の実装で失敗する形状を確認し、その後に最小修正を行う。既存の chat、quota、upstream body の契約は維持し、`opaqueInputBytes` や新しいResponses履歴の期待値だけを更新する。
 
 ## 成功条件
 

@@ -137,6 +137,12 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
 - **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。retry を有効化する場合、同じ論理リクエストは同一の `Idempotency-Key` ヘッダーを付ける必要があります。OCTG Worker はその key を QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。Worker から Gateway B への outbound に設定する `cf-aig-max-attempts: 2` は inbound 側の retry とは独立です。
 
+### OpenCode / BYOK の Responses ツール履歴
+
+OpenCode を BYOK プラグイン経由で Responses API に接続する場合は、参照先をOCTGが取得できず quota 推定できないため、`store: false` を使用してください。`item_reference`、`previous_response_id`、`conversation` は送信せず、必要なテキスト・`function_call`・`function_call_output`・reasoning 履歴をリクエストへ再送します。
+
+OCTG は、assistant の `output_text`、user/system/developer の `input_text`、文字列または `input_text` の tool output、reasoning の `summary_text` と `encrypted_content` を受理します。画像・音声・ファイル、未知の item/part、参照状態は予約前に拒否します。BYOK プラグインのデプロイ後は、実際のプラグイン／OpenCode バージョンが `store: false` と履歴再送設定を使用していることを確認してください。
+
 ### ストリーミングが動作しない
 
 - まず非ストリーミングが動作することを確認してください。
