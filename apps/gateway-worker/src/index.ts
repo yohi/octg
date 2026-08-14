@@ -17,6 +17,8 @@ export interface Env {
   readonly OCTG_UPSTREAM_API_TOKEN: string;
   readonly QUOTA_LIMIT_STANDARD?: string;
   readonly QUOTA_LIMIT_MINI?: string;
+  readonly MAX_INPUT_BYTES?: string;
+  readonly MAX_IN_FLIGHT_REQUESTS?: string;
   readonly ACCESS_TEAM_DOMAIN: string;
   readonly ACCESS_AUD: string;
   readonly OPENAI_USAGE_API_KEY?: string;

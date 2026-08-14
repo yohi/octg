@@ -3,6 +3,7 @@ import {
   buildOctgHeaders,
   classifyModel,
   decideOutput,
+  errInputTooLarge,
   errInternal,
   errInvalidRequest,
   errMaxTokensConflict,
@@ -11,8 +12,10 @@ import {
   errNonTextInput,
   errQuotaExceeded,
   errRequestTooLarge,
+  errWorkerConcurrencyExceeded,
   errorResponse,
   estimateInputTokens,
+  MAX_NORMALIZED_INPUT_BYTES,
   nextUtcMidnight,
   normalizeChatCompletions,
   normalizeResponses,
@@ -24,14 +27,14 @@ import {
   type QuotaSnapshot,
   type QuotaView,
 } from "@octg/shared";
-import type { QuotaController } from "@octg/quota-controller";
 import { authenticate } from "./auth";
 import { completeRequestRow, insertRequestRow, setReservedTokens } from "./db";
 import { loadPolicy, loadRegistry } from "./policy";
 import { buildUpstreamBody, callUpstream, UpstreamConfigError } from "./upstream";
 import type { Env } from "./index";
+import { readJsonBody } from "./request-body";
+import { proxyStream } from "./stream";
 
-type Stub = DurableObjectStub<QuotaController>;
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = Parameters<typeof completeRequestRow>[2];
 
@@ -68,6 +71,16 @@ export function snapshotOf(view: QuotaView): QuotaSnapshot {
   };
 }
 
+export function resolveMaxInputBytes(configured: string | undefined): number {
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : MAX_NORMALIZED_INPUT_BYTES;
+}
+
+export function resolveMaxInFlightRequests(configured: string | undefined): number {
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 2;
+}
+
 export async function handleProxy(
   request: Request,
   env: Env,
@@ -79,9 +92,17 @@ export async function handleProxy(
   const auth = await authenticate(request, env, requestId);
   if (!("id" in auth)) return errorResponse(auth);
 
-  const body: unknown = await request.json().catch(() => null);
-  const normalized = endpoint === "chat" ? normalizeChatCompletions(body) : normalizeResponses(body);
+  const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
+  const parsedBody = await readJsonBody(request, maxInputBytes);
+  if (!parsedBody.ok) {
+    return errorResponse(parsedBody.reason === "too_large" ? errInputTooLarge(requestId) : errInvalidRequest(requestId));
+  }
+  const body = parsedBody.body;
+  const normalized = endpoint === "chat"
+    ? normalizeChatCompletions(body, maxInputBytes)
+    : normalizeResponses(body, maxInputBytes);
   if (!normalized.ok) {
+    if (normalized.error === "input_too_large") return errorResponse(errInputTooLarge(requestId));
     if (normalized.error === "non_text") return errorResponse(errNonTextInput(requestId));
     if (normalized.error === "max_tokens_conflict") return errorResponse(errMaxTokensConflict(requestId));
     return errorResponse(errInvalidRequest(requestId));
@@ -155,6 +176,13 @@ export async function handleProxy(
   }
   ctx.waitUntil(inserted.then(() => setReservedTokens(env, requestId, reservation)).catch(() => undefined));
 
+  const lease = await stub.acquireInFlight(requestId, resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS));
+  if (!lease.ok) {
+    await stub.release(requestId);
+    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
+    return errorResponse(errWorkerConcurrencyExceeded(snapshot, requestId));
+  }
+
   let upstream: Response;
   try {
     upstream = await callUpstream(
@@ -174,10 +202,12 @@ export async function handleProxy(
   } catch (error) {
     if (error instanceof UpstreamConfigError) {
       await stub.release(requestId);
+      await stub.releaseInFlight(requestId);
       ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
       return errorResponse(errInternal(requestId));
     }
     await stub.markUncertain(requestId);
+    await stub.releaseInFlight(requestId);
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
     return errorResponse(errInternal(requestId));
   }
@@ -185,6 +215,7 @@ export async function handleProxy(
     const uncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
     if (uncertain) await stub.markUncertain(requestId);
     else await stub.release(requestId);
+    await stub.releaseInFlight(requestId);
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: uncertain ? "uncertain" : "failed", billingClass: "none" }));
     return upstreamResponse(upstream, requestId, snapshot);
   }
@@ -195,6 +226,7 @@ export async function handleProxy(
     data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
   } catch {
     await stub.markUncertain(requestId);
+    await stub.releaseInFlight(requestId);
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
     return errorResponse(errInternal(requestId));
   }
@@ -216,101 +248,11 @@ export async function handleProxy(
     await stub.markUncertain(requestId);
     ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
   }
+  await stub.releaseInFlight(requestId);
   return new Response(JSON.stringify(data), {
     status: 200,
     headers: {
       "content-type": "application/json",
-      ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
-    },
-  });
-}
-
-export function proxyStream(
-  upstream: Response,
-  stub: Stub,
-  requestId: string,
-  env: Env,
-  ctx: ExecutionContext,
-  snapshot: QuotaSnapshot,
-  inserted: Promise<void>,
-): Response {
-  let finalized = false;
-  let usage: Usage | undefined;
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const finalize = async () => {
-    if (finalized) return;
-    finalized = true;
-    if (typeof usage?.total_tokens === "number") {
-      const settled = await stub.settle(requestId, usage.total_tokens);
-      if (!settled.ok && settled.reason === "unknown_request") {
-        await inserted;
-        await completeRequestRow(env, requestId, { status: "orphaned", billingClass: "none" });
-        return;
-      }
-      await inserted;
-      await completeRequestRow(env, requestId, {
-        status: "completed",
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens,
-        totalTokens: usage.total_tokens,
-        billingClass: "free",
-      });
-    } else {
-      await stub.markUncertain(requestId);
-      await inserted;
-      await completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" });
-    }
-  };
-  const parseEvents = (text: string) => {
-    for (const event of text.split("\n\n")) {
-      for (const line of event.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(payload) as Record<string, unknown>;
-          if (parsed.usage) usage = parsed.usage as Usage;
-          const response = parsed.response as { usage?: Usage } | undefined;
-          if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
-        } catch {
-          // Wait for the next chunk when a JSON event is split across chunks.
-        }
-      }
-    }
-  };
-  if (!upstream.body) {
-    ctx.waitUntil(finalize());
-    return new Response(null, {
-      status: 200,
-      headers: {
-        "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
-        ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
-      },
-    });
-  }
-  const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const cut = buffer.lastIndexOf("\n\n");
-      if (cut >= 0) {
-        parseEvents(buffer.slice(0, cut + 2));
-        buffer = buffer.slice(cut + 2);
-      }
-      controller.enqueue(chunk);
-    },
-    flush() {
-      if (buffer.trim()) parseEvents(`${buffer}\n\n`);
-      ctx.waitUntil(finalize());
-    },
-    cancel() {
-      ctx.waitUntil(finalize());
-    },
-  }));
-  return new Response(tapped, {
-    status: 200,
-    headers: {
-      "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
       ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
     },
   });
