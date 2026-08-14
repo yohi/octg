@@ -6,6 +6,7 @@ export const ENTRY_PREFIX = "req:";
 export const IDEMPOTENCY_PREFIX = "idem:";
 export const UNRESOLVED_KEY = "unresolved";
 export const FINALIZE_KEY = "finalized";
+export const IN_FLIGHT_KEY = "in_flight";
 
 export interface UnresolvedState {
   readonly uncertainCount: number;
@@ -106,4 +107,12 @@ export async function saveUnresolved(
   state: UnresolvedState,
 ): Promise<void> {
   await storage.put(UNRESOLVED_KEY, state);
+}
+
+export async function loadInFlight(storage: QuotaStorage): Promise<readonly string[]> {
+  return (await storage.get<readonly string[]>(IN_FLIGHT_KEY)) ?? [];
+}
+
+export async function saveInFlight(storage: QuotaStorage, requestIds: readonly string[]): Promise<void> {
+  await storage.put(IN_FLIGHT_KEY, requestIds);
 }

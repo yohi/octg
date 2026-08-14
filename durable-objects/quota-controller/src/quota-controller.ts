@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
 import type {
+  AcquireInFlightResult,
   FinalizeResult,
   MarkUncertainResult,
   QuotaView,
@@ -16,10 +17,12 @@ import {
   getEntry,
   getIdempotencyRequestId,
   FINALIZE_KEY,
+  loadInFlight,
   loadPool,
   loadUnresolved,
   putEntry,
   putIdempotencyRequestId,
+  saveInFlight,
   savePool,
   saveUnresolved,
 } from "./store";
@@ -170,6 +173,28 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
 
   async release(requestId: string): Promise<ReleaseResult> {
     return this.lifecycle.release(requestId);
+  }
+
+  async acquireInFlight(requestId: string, limit: number): Promise<AcquireInFlightResult> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new TypeError("In-flight limit must be a positive safe integer.");
+    }
+    return this.ctx.storage.transaction(async (storage) => {
+      const active = new Set(await loadInFlight(storage));
+      if (active.has(requestId)) return { ok: true };
+      if (active.size >= limit) return { ok: false, reason: "worker_concurrency_exceeded" };
+      active.add(requestId);
+      await saveInFlight(storage, [...active]);
+      return { ok: true };
+    });
+  }
+
+  async releaseInFlight(requestId: string): Promise<void> {
+    await this.ctx.storage.transaction(async (storage) => {
+      const active = new Set(await loadInFlight(storage));
+      if (!active.delete(requestId)) return;
+      await saveInFlight(storage, [...active]);
+    });
   }
 
   async reconcileRequest(

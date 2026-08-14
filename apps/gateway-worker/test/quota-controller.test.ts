@@ -174,6 +174,48 @@ describe("QuotaController.reserve", () => {
   }
 });
 
+describe("QuotaController in-flight leases", () => {
+  it("reuses a released pool slot without changing quota reservations", async () => {
+    // Given: a pool whose two in-flight slots are occupied.
+    const controller = stub("STANDARD", "2026-08-31");
+    const before = await controller.getState();
+    expect(await controller.acquireInFlight("request-one", 2)).toEqual({ ok: true });
+    expect(await controller.acquireInFlight("request-two", 2)).toEqual({ ok: true });
+
+    // When: a third request is admitted before and after one active request releases its slot.
+    const rejected = await controller.acquireInFlight("request-three", 2);
+    await controller.releaseInFlight("request-one");
+    const admitted = await controller.acquireInFlight("request-three", 2);
+
+    // Then: only the saturated admission is rejected, and lease bookkeeping does not spend quota.
+    expect(rejected).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
+    expect(admitted).toEqual({ ok: true });
+    expect(await controller.getState()).toMatchObject({
+      reservedTokens: before.reservedTokens,
+      confirmedTokens: before.confirmedTokens,
+      uncertainTokens: before.uncertainTokens,
+      requestCount: before.requestCount,
+    });
+  });
+
+  it("makes repeated acquire and release idempotent for one request", async () => {
+    // Given: one available in-flight slot.
+    const controller = stub("STANDARD", "2026-09-01");
+
+    // When: one request acquires twice, then releases twice.
+    const first = await controller.acquireInFlight("request-one", 1);
+    const repeated = await controller.acquireInFlight("request-one", 1);
+    await controller.releaseInFlight("request-one");
+    await controller.releaseInFlight("request-one");
+    const next = await controller.acquireInFlight("request-two", 1);
+
+    // Then: duplicate lifecycle signals neither consume nor release another request's slot.
+    expect(first).toEqual({ ok: true });
+    expect(repeated).toEqual({ ok: true });
+    expect(next).toEqual({ ok: true });
+  });
+});
+
 describe("QuotaController identity", () => {
   const invalidQuotaNames = [
     "quota:STANDARD:2026-09-08:extra",
