@@ -141,7 +141,7 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 
 OpenCode を BYOK プラグイン経由で Responses API に接続する場合は、参照先をOCTGが取得できず quota 推定できないため、`store: false` を使用してください。`item_reference`、`previous_response_id`、`conversation` は送信せず、必要なテキスト・`function_call`・`function_call_output`・reasoning 履歴をリクエストへ再送します。
 
-OCTG は、assistant の `output_text`、user/system/developer の `input_text`、文字列または `input_text` の tool output、reasoning の `summary_text` と `encrypted_content` を受理します。画像・音声・ファイル、未知の item/part、参照状態は予約前に拒否します。BYOK プラグインのデプロイ後は、実際のプラグイン／OpenCode バージョンが `store: false` と履歴再送設定を使用していることを確認してください。
+OCTG は、assistant の `output_text`、user/system/developer の `input_text`、文字列または `input_text` の tool output、reasoning の `summary_text` と `encrypted_content` を受理します。非テキストの `input_image`、`input_audio`、`input_file`、`image_url`、`audio`、`file`、`video` は未対応のため、予約前に拒否します。未知の item/part と参照状態も予約前に拒否します。`item_reference`、`previous_response_id`、`conversation` は送信しないでください。BYOK プラグインのデプロイ後は、実際のプラグイン／OpenCode バージョンが `store: false` と必要履歴の再送設定を使用していることを確認してください。
 
 ### ストリーミングが動作しない
 

@@ -169,11 +169,12 @@ export function normalizeResponses(body: unknown): NormalizeResult {
             return { ok: false, error: "invalid_body" };
           }
           isToolUse = true;
-          texts.push(entry.name, entry.arguments);
+          texts.push(entry.call_id, entry.name, entry.arguments);
           break;
         case "function_call_output": {
           if (typeof entry.call_id !== "string") return { ok: false, error: "invalid_body" };
           isToolUse = true;
+          texts.push(entry.call_id);
           const result = walkToolOutput(entry.output);
           if (result) return result;
           break;

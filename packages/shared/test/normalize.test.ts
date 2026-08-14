@@ -244,7 +244,7 @@ describe("normalizeResponses", () => {
         model: "gpt-5",
         input: [
           { role: "user", content: [{ type: "input_text", text: "hi" }] },
-          { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+          { type: "function_call", call_id: "call_id-with-a-long-unique-value-1234567890", name: "lookup", arguments: "{}" },
         ],
       }),
     ).toEqual({
@@ -252,7 +252,7 @@ describe("normalizeResponses", () => {
       value: {
         endpoint: "responses",
         model: "gpt-5",
-        inputText: "hi\nlookup\n{}",
+        inputText: "hi\ncall_id-with-a-long-unique-value-1234567890\nlookup\n{}",
         messageCount: 2,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -271,8 +271,16 @@ describe("normalizeResponses", () => {
       input: [
         { role: "user", content: [{ type: "input_text", text: "user-marker" }] },
         { role: "assistant", content: [{ type: "output_text", text: "assistant-marker" }] },
-        { type: "function_call", call_id: "call_1", name: "lookup-marker", arguments: "{\"city\":\"argument-marker\"}" },
-        { type: "function_call_output", call_id: "call_1", output: "tool-output-marker" },
+        { type: "function_call", call_id: "call_id-marker", name: "lookup-marker", arguments: "{\"city\":\"argument-marker\"}" },
+        {
+          type: "function_call_output",
+          call_id: "call_id-output-marker",
+          output: [
+            { type: "input_text", text: "tool-output-array-marker-1" },
+            { type: "input_text", text: "tool-output-array-marker-2" },
+          ],
+        },
+        { type: "function_call_output", call_id: "call_id-string-output-marker", output: "tool-output-marker" },
         { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker" }], encrypted_content: "opaque-marker" },
         { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker-2" }], encrypted_content: "opaque-marker-2" },
       ],
@@ -283,7 +291,7 @@ describe("normalizeResponses", () => {
       value: {
         endpoint: "responses",
         inputText: expect.stringContaining("tool-output-marker"),
-        messageCount: 6,
+        messageCount: 7,
         isToolUse: true,
         opaqueInputBytes: 28,
       },
@@ -293,7 +301,12 @@ describe("normalizeResponses", () => {
         "user-marker",
         "assistant-marker",
         "lookup-marker",
+        "call_id-marker",
         "argument-marker",
+        "call_id-output-marker",
+        "tool-output-array-marker-1",
+        "tool-output-array-marker-2",
+        "call_id-string-output-marker",
         "tool-output-marker",
         "summary-marker",
         "summary-marker-2",
