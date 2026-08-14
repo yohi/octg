@@ -197,6 +197,21 @@ describe("normalizeResponses", () => {
     });
   });
 
+  it("does not include null metadata in the normalized input text", () => {
+    expect(
+      normalizeResponses({
+        model: "gpt-5",
+        input: "hello",
+        instructions: null,
+        tools: null,
+        tool_choice: null,
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: { inputText: "hello" },
+    });
+  });
+
   it.each([0, -1, 1.5, "50"]) (
     "rejects explicitly invalid max_output_tokens: %s",
     (maxOutputTokens) => {

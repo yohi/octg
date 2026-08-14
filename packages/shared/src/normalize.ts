@@ -27,6 +27,9 @@ const NON_TEXT_PART_TYPES = new Set([
   "video",
   "file",
 ]);
+const CHAT_CONTENT_TYPES = new Set(["text", "input_text"]);
+const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text"]);
+const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text"]);
 
 type ContentWalk = { ok: true; text: string } | { ok: false; error: NormalizeError };
 
@@ -75,7 +78,7 @@ export function normalizeChatCompletions(body: unknown): NormalizeResult {
   const texts: string[] = [];
   for (const message of value.messages) {
     if (typeof message !== "object" || message === null) return { ok: false, error: "invalid_body" };
-    const content = walkContent((message as Record<string, unknown>).content, new Set(["text", "input_text"]), "non_text");
+    const content = walkContent((message as Record<string, unknown>).content, CHAT_CONTENT_TYPES, "non_text");
     if (!content.ok) return content;
     texts.push(content.text);
   }
@@ -116,6 +119,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
   let opaqueInputBytes = 0;
   const texts: string[] = [];
   const appendSerialized = (field: unknown): NormalizeResult | null => {
+    if (field === undefined || field === null) return null;
     try {
       const serialized = JSON.stringify(field);
       if (serialized !== undefined) texts.push(serialized);
@@ -134,7 +138,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
       texts.push(content);
       return null;
     }
-    const allowed = role === "assistant" ? new Set(["output_text"]) : new Set(["input_text"]);
+    const allowed = role === "assistant" ? RESPONSE_OUTPUT_CONTENT_TYPES : RESPONSE_INPUT_CONTENT_TYPES;
     const walked = walkContent(content, allowed, "invalid_body");
     if (!walked.ok) return walked.error === "non_text" ? walked : { ok: false, error: "invalid_body" };
     texts.push(walked.text);
@@ -145,7 +149,7 @@ export function normalizeResponses(body: unknown): NormalizeResult {
       texts.push(output);
       return null;
     }
-    const walked = walkContent(output, new Set(["input_text"]), "invalid_body");
+    const walked = walkContent(output, RESPONSE_INPUT_CONTENT_TYPES, "invalid_body");
     if (!walked.ok) return walked.error === "non_text" ? walked : { ok: false, error: "invalid_body" };
     texts.push(walked.text);
     return null;
@@ -201,7 +205,6 @@ export function normalizeResponses(body: unknown): NormalizeResult {
           return { ok: false, error: "invalid_body" };
       }
     }
-    inputText = texts.join("\n");
     messageCount = value.input.length;
   } else {
     return { ok: false, error: "invalid_body" };
