@@ -329,6 +329,14 @@ describe("normalizeResponses", () => {
       ok: false,
       error: "invalid_body",
     });
+    expect(normalizeResponses({ model: "gpt-5", previous_response_id: null, conversation: null, input: "hello" })).toMatchObject({
+      ok: true,
+      value: { inputText: "hello" },
+    });
+    expect(normalizeResponses({ model: "gpt-5", instructions: [{ type: "input_image", image_url: "https://example.invalid/a.png" }], input: "hello" })).toEqual({
+      ok: false,
+      error: "invalid_body",
+    });
     expect(
       normalizeResponses({
         model: "gpt-5",

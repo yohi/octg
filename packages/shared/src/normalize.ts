@@ -101,7 +101,12 @@ export function normalizeResponses(body: unknown): NormalizeResult {
   if (typeof value.model !== "string" || value.model.length === 0 || value.input === undefined) {
     return { ok: false, error: "invalid_body" };
   }
-  if ("item_reference" in value || "previous_response_id" in value || "conversation" in value) {
+  if (
+    "item_reference" in value ||
+    (value.previous_response_id !== undefined && value.previous_response_id !== null) ||
+    (value.conversation !== undefined && value.conversation !== null) ||
+    (value.instructions !== undefined && value.instructions !== null && typeof value.instructions !== "string")
+  ) {
     return { ok: false, error: "invalid_body" };
   }
 
