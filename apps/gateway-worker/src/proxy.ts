@@ -111,7 +111,7 @@ export async function handleProxy(
 
   const before = await stub.getState();
   const snapshot = snapshotOf(before);
-  const estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount);
+  const estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
   const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
   const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
   if (upperBound > before.limit) {

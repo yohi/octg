@@ -20,6 +20,13 @@ const authed = (body: unknown, key = TEST_CLIENT_KEY) =>
     body: JSON.stringify(body),
   });
 
+const authedResponses = (body: unknown, key = TEST_CLIENT_KEY) =>
+  SELF.fetch("https://octg.test/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  });
+
 describe("proxy pipeline", () => {
   it("settles actual usage and returns quota headers", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
@@ -282,5 +289,105 @@ describe("proxy pipeline", () => {
     expect(upstreamBody?.max_output_tokens).toBe(10);
     const body = (await response.json()) as { usage: { total_tokens: number } };
     expect(body.usage.total_tokens).toBe(10);
+  });
+
+  it("rejects composite Responses tool history before reservation when tools are not allowed", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "REJECT" });
+    invalidateConfigCaches();
+    const before = await todayStub().getState();
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), { status: 200 });
+    });
+
+    const response = await authedResponses({
+      model: "gpt-5",
+      store: false,
+      instructions: "instructions-marker",
+      tools: [{ type: "function", name: "tool-name-marker", description: "schema-marker", parameters: { type: "object", properties: {} } }],
+      tool_choice: { type: "function", name: "choice-marker" },
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "user-marker" }] },
+        { role: "assistant", content: [{ type: "output_text", text: "assistant-marker" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup-marker", arguments: "{\"city\":\"argument-marker\"}" },
+        { type: "function_call_output", call_id: "call_1", output: "tool-output-marker" },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker" }], encrypted_content: "opaque-marker" },
+      ],
+      max_output_tokens: 64,
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "model_not_allowed", param: "model" } });
+    expect(upstreamCallCount).toBe(0);
+    expect(await todayStub().getState()).toEqual(before);
+  });
+
+  it("forwards the complete allowed Responses tool history unchanged", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
+    invalidateConfigCaches();
+    const originalBody = {
+      model: "gpt-5",
+      store: false,
+      instructions: "instructions-marker",
+      tools: [{ type: "function", name: "tool-name-marker", description: "schema-marker", parameters: { type: "object", properties: {} } }],
+      tool_choice: { type: "function", name: "choice-marker" },
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "user-marker" }] },
+        { role: "assistant", content: [{ type: "output_text", text: "assistant-marker" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup-marker", arguments: "{\"city\":\"argument-marker\"}" },
+        { type: "function_call_output", call_id: "call_1", output: "tool-output-marker" },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "summary-marker" }], encrypted_content: "opaque-marker" },
+      ],
+      max_output_tokens: 64,
+    };
+    let upstreamBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const before = await todayStub().getState();
+
+    const response = await authedResponses(originalBody);
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody).toEqual({ ...originalBody, max_output_tokens: 64 });
+    const after = await todayStub().getState();
+    expect(after.confirmedTokens).toBeGreaterThan(before.confirmedTokens);
+    expect(after.reservedTokens).toBe(before.reservedTokens);
+    expect(after.uncertainTokens).toBe(before.uncertainTokens);
+  });
+
+  it("rejects unsupported Responses tool output and external references before reservation", async () => {
+    await seedPolicy(TEST_CLIENT_ID, { toolsMode: "ALLOW" });
+    invalidateConfigCaches();
+    const before = await todayStub().getState();
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), { status: 200 });
+    });
+
+    const imageResponse = await authedResponses({
+      model: "gpt-5",
+      input: [{ type: "function_call_output", call_id: "call_1", output: [{ type: "input_file", file_id: "file_1" }] }],
+    });
+    expect(imageResponse.status).toBe(400);
+    expect(await imageResponse.json()).toMatchObject({ error: { code: "invalid_request", param: "input" } });
+
+    for (const field of ["item_reference", "previous_response_id", "conversation"] as const) {
+      const body = field === "item_reference"
+        ? { model: "gpt-5", input: [{ type: "item_reference", id: "resp_123" }] }
+        : { model: "gpt-5", input: "hello", [field]: "state_123" };
+      const response = await authedResponses(body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "invalid_request", param: null } });
+    }
+
+    expect(upstreamCallCount).toBe(0);
+    expect(await todayStub().getState()).toEqual(before);
   });
 });

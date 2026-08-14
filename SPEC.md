@@ -174,6 +174,8 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 - 予約量 = `estimated_input + max_output_tokens + safety_margin`。
 - **max_output_tokens の既定値と上流フィールド**: クライアントが max output を指定しない場合、`DEFAULT_MAX_OUTPUT_TOKENS = 4096` を既定値として適用する。`/v1/chat/completions` では内部値を上流の `max_completion_tokens` として、`/v1/responses` では上流の `max_output_tokens` として必ず注入する（未指定 = 実質無制限の出力は reservation 不可能なため、MVP では fail-closed 側に倒す）。予約値に使用する `max_output_tokens` と上流へ送信する出力上限値は、既定値および CLAMP 適用後を含め、両 endpoint で一致させる。テストでは両 endpoint についてこの一致と endpoint 固有のフィールド名を検証する。
 - **非テキスト入力の扱い（MVP）**: `/v1/responses` および `/v1/chat/completions` の予約処理で `input_image`・`input_audio` など非テキストのモダリティを検出した場合、tokenizer 推定が成立しないため**予約前に明示的に拒否**する（エラー契約は 5.7 の `invalid_request` を使用）。将来対応としてモダリティ別の保守的上限を `estimated_input` へ加算する方式を採る場合は、モダリティごとの上限表を本書に追加し、過少計上を防ぐ。
+- **Responses のテキスト・ツール履歴（OpenCode互換）**: `/v1/responses` は `input` の message item（`type` 省略または `message`）について、user/system/developer の `input_text` と assistant の `output_text` を受理する。`function_call` の `call_id`・`name`・`arguments`、`function_call_output` の `call_id`・文字列または `input_text` 配列の `output`、および reasoning の `summary_text` 配列と `encrypted_content` を受理する。これらの prompt-bearing な可視文字列は input token 推定へ含め、encrypted reasoning state は `opaqueInputBytes` として UTF-8 byte 数を保守的に加算する。複数 reasoning item の opaque bytes は合算する。
+- **Responses の参照状態**: `item_reference`、`previous_response_id`、`conversation`、未知の top-level item、未知または不正な nested part は、参照先を取得して token 推定できないため、予約前に HTTP 400 (`invalid_request`, `param: null`) で拒否する。BYOK/OpenCode 側は `store: false` と必要履歴の再送を使用する。
 - tokenizer 未知のモデルは UTF-8 バイト数等から保守的上限を使用する。
 
 ### 5.5 Output 制御（要件第 12 章）

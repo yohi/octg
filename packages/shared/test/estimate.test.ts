@@ -16,6 +16,14 @@ describe("estimateInputTokens", () => {
     expect(estimateInputTokens("abcabcabc", 3)).toBeGreaterThan(estimateInputTokens("abc", 1));
   });
 
+  it("adds opaque reasoning bytes to the visible token estimate", () => {
+    const withoutOpaqueState = estimateInputTokens("visible", 1, 0);
+    const withOpaqueState = estimateInputTokens("visible", 1, 28);
+
+    expect(estimateInputTokens("visible", 1, 0)).toBe(withoutOpaqueState);
+    expect(withOpaqueState).toBe(withoutOpaqueState + 28);
+  });
+
   it("uses the full UTF-8 byte length when encoding lookup fails", async () => {
     vi.resetModules();
     vi.doMock("js-tiktoken", () => ({
