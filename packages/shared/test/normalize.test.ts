@@ -335,6 +335,42 @@ describe("normalizeResponses", () => {
     }
   });
 
+  it("accepts SDK text parts for every supported message role", () => {
+    const result = normalizeResponses({
+      model: "gpt-5.6-luna",
+      input: [
+        { role: "user", content: [{ type: "text", text: "user-text" }] },
+        { role: "developer", content: [{ type: "text", text: "developer-text" }] },
+        { role: "system", content: [{ type: "text", text: "system-text" }] },
+        { role: "assistant", content: [{ type: "text", text: "assistant-text" }] },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        inputText: "user-text\ndeveloper-text\nsystem-text\nassistant-text",
+        messageCount: 4,
+      },
+    });
+  });
+
+  it("accepts top-level reasoning configuration without changing input accounting", () => {
+    const result = normalizeResponses({
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "medium" },
+      input: "reasoning-config-marker",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        inputText: "reasoning-config-marker",
+        opaqueInputBytes: 0,
+      },
+    });
+  });
+
   it("rejects output_text for non-assistant messages", () => {
     expect(
       normalizeResponses({

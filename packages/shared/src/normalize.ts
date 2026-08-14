@@ -28,8 +28,8 @@ const NON_TEXT_PART_TYPES = new Set([
   "file",
 ]);
 const CHAT_CONTENT_TYPES = new Set(["text", "input_text"]);
-const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text"]);
-const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text"]);
+const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text", "text"]);
+const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text", "text"]);
 
 type ContentWalk = { ok: true; text: string } | { ok: false; error: NormalizeError };
 
