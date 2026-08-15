@@ -126,8 +126,14 @@ OCTG の中核設計原則は **意図しない課金の防止（Zero Unexpected
 10,000 tokens となる反例を確認しています。
 
 したがって、巨大入力では `/ 2` のような比率推定を使いません。正規化済み入力の
-UTF-8 byte 数を保守的な上限として扱うか、固定 byte 上限を超えた入力を reserve 前に
-`413 Request Entity Too Large` として拒否します。
+UTF-8 byte 数を保守的な上限として扱うか、既存の入力 byte 上限を超えた入力を reserve
+前に `413 Request Entity Too Large` として拒否します。
+
+入力 byte 上限は新規に追加する仕組みではありません。`handleProxy()` は既に
+`MAX_INPUT_BYTES` を `readJsonBody()` に渡し、raw body を JSON parse 前に制限します。
+正規化処理も正規化後の byte 数を検査します。まず障害発生時の `MAX_INPUT_BYTES` 実値と、
+74,000-token リクエストの raw body byte 数を確認し、必要な場合だけ既存設定を引き下げます。
+なお、正規化後の既定上限は `MAX_NORMALIZED_INPUT_BYTES = 1_048_576` です。
 
 ---
 
@@ -145,24 +151,31 @@ UTF-8 byte 数を保守的な上限として扱うか、固定 byte 上限を超
 2. 小さい入力は従来どおり `o200k_base` で推定します。
 3. profiling で決めた閾値以上の入力は BPE を実行せず、入力テキストの byte 数を
    input token の保守的な上限として使います。
-4. `opaqueInputBytes` は別の構成要素として一度だけ加算します。正規化処理で既に
-   算出した byte 数がある場合は再計算しません。
-5. 固定 byte 上限を超えた入力は、可能な限り JSON parse や reserve より前に 413 として
-   拒否します。
+4. 現行の `NormalizedRequest.inputBytes` は `inputText` と `opaqueInputBytes` の合計
+   なので、text 用 byte 数は `inputBytes - opaqueInputBytes` として求めます。
+   `opaqueInputBytes` は推定式で一度だけ加算します。
+5. 既存の `MAX_INPUT_BYTES` と `readJsonBody()` を一次防御として利用します。profiling
+   の結果、現在値が大きすぎる場合だけ `MAX_INPUT_BYTES` を引き下げます。
 
 疑似コードは次のとおりです。
 
 ```typescript
-const byteLength = normalizedInput.utf8ByteLength;
-const base = byteLength >= profiledThresholdBytes
-  ? byteLength
+const textInputBytes = normalizedInput.inputBytes
+  - normalizedInput.opaqueInputBytes;
+const base = textInputBytes >= profiledThresholdBytes
+  ? textInputBytes
   : exactEstimate(normalizedInput.text);
-const estimatedInput = base + opaqueInputBytes + 4 * messageCount + 3;
+const estimatedInput = base
+  + normalizedInput.opaqueInputBytes
+  + 4 * normalizedInput.messageCount
+  + 3;
 ```
 
 ここで `profiledThresholdBytes` は実測で決定する設定値です。`exactEstimate` は既存の
-`o200k_base` 推定処理を表します。この疑似コードはそのまま貼り付ける実装ではなく、
-byte 数の算出と二重計上防止を含む設計を示しています。
+`o200k_base` 推定処理を表します。実装時は `normalizedInput.opaqueInputBytes` を
+そのまま推定関数へ渡し、`inputBytes` 全体を base として再度加算しないでください。
+この疑似コードはそのまま貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上
+防止を含む設計を示しています。
 
 ### 4.2 効果と安全性の判定条件
 
@@ -194,7 +207,10 @@ byte 数の算出と二重計上防止を含む設計を示しています。
 ### 5.1 追加調査が必要な項目
 
 - Workers Logs で `exceededCpu` と `exceededMemory` を確認する。
-- 実際の request body byte 数と正規化後の `inputText` byte 数を比較する。
+- 実際の request body byte 数、正規化後の `inputText` byte 数、
+  `opaqueInputBytes`、および `inputBytes` の関係を比較する。
+- 障害発生時の `MAX_INPUT_BYTES` 実値と、74,000-token リクエストの raw request bytes
+  を記録から確認する。
 - `getEncoding()` 初期化、JSON parse、正規化、BPE、Durable Object RPC を分けて CPU
   profiling する。
 - canary 環境で大規模入力を送信し、Error 1102 が再現するか確認する。
