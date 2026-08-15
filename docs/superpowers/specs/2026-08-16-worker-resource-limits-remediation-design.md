@@ -96,13 +96,28 @@ CPU profiling で同期 BPE が主要因と確認された場合、normalized to
 
 ### Request 全体の安全性
 
-`inputTextBytes` は text tokenizer token 数の上限として扱うが、OpenAI が返す request
-全体の `usage.input_tokens` の上限を単独では保証しない。Chat Completions と Responses の
-受理する payload 形状ごとに、同一 payload の reserve 値と upstream usage を比較する。
+`inputTextBytes` は input 部分の保守的な推定に使う値であり、request 全体の使用量を
+単独では保証しない。Chat Completions と Responses は入力フィールドと upstream usage の
+input 名が異なるため、endpoint ごとの正規化を行ったうえで、同一 payload の予約値と
+upstream usage を比較する。
 
-`reservedInputTokens >= upstream usage.input_tokens` を確認できた形状だけを許可する。
-確認できない形状は追加 safety margin を検証するか、reserve 前に HTTP 400
-`invalid_request` で拒否する。サイズ超過ではないため HTTP 413 は使用しない。
+- Chat Completions は `messages` と `max_tokens` / `max_completion_tokens` を正規化し、
+  upstream へは `max_completion_tokens` を送る。
+- Responses は `input` と `max_output_tokens` を正規化し、tool history、reasoning の
+  visible text、opaque bytes を同じ input 推定へ反映する。
+- 両 endpoint の admission 予約値は、正規化後の
+  `estimatedInput + output.maxOutputTokens + margin` とする。
+
+payload differential test では、許可する各 payload 形状について、次の条件を確認する。
+
+```text
+estimatedInput + output.maxOutputTokens + margin >= upstream usage.total_tokens
+```
+
+これは upstream 応答後に実施する canary / differential 検証条件であり、予約前に
+`usage.total_tokens` を参照する実行時条件ではない。条件を検証できない形状、または
+検証に失敗した形状は許可リストへ含めず、reserve 前に HTTP 400 `invalid_request` で
+拒否する。サイズ超過ではないため HTTP 413 は使用しない。
 
 ## Memory 対策
 
@@ -126,10 +141,20 @@ peak 値を推定しない。
 
 - model、policy、pool の解決後、BPE 前に lease を取得する。
 - lease は quota reservation と別の state とし、取得・拒否で quota token を変更しない。
-- BPE または byte-based 推定の完了直後に解放する。
+- lease state は少なくとも `{ requestId, leaseId, expiresAt }` を持ち、`leaseId` は acquire
+  ごとに一意な値または単調増加する owner generation とする。`requestId` は冪等性の
+  識別子であり、lease の所有権そのものには使わない。
+- 有効期限内に同じ `requestId` で再取得した場合だけ、同じ lease の保存済み結果を返す。
+  期限切れ後の再取得は新しい `leaseId` / generation を発行する。
+- release は `requestId` と取得時に返された `leaseId` / generation の両方が一致する
+  場合だけ、期限確認と削除を同一 transaction 内で行う。不一致の stale release は
+  no-op とし、新しい lease を解放してはならない。
+- BPE または byte-based 推定の完了直後に、取得時の `leaseId` を指定して解放する。
 - Worker が Error 1102 で中断し解放処理を実行できない場合に備え、lease は期限を持つ。
-- 次回取得時に期限切れ lease を除去する。
-- request ID による同一 lease の再取得は冪等に扱う。
+  次回 acquire 時に期限切れ lease を除去する。
+- TTL は受理する最大 payload の実測 BPE wall time より長く設定する。実測上 TTL を超え
+  得る場合は、BPE が yield できる区間で renew / heartbeat を行い、renew できない同期
+  区間はその最大時間を包含する TTL 未満の設定を受理しない。
 
 admission を採用する場合は `MAX_TOKENIZATION_REQUESTS` と
 `TOKENIZATION_LEASE_TTL_MS` を導入する。production 値は単発の推測で決めず、受理する最大
@@ -151,18 +176,34 @@ authenticate
 → model / policy / pool resolution
 → best-effort audit start
 → optional tokenization admission lease
-→ exact BPE or conservative byte estimation
-→ tokenization lease release
-→ payload shape safety gate
-→ quota reserve
+→ try {
+     exact BPE or conservative byte estimation
+     → payload shape safety gate
+     → quota reserve
+  }
+  catch (estimation / safety / reserve exception) {
+     tokenization lease release (matching leaseId)
+     → best-effort audit completion
+     → 500 `internal_error`
+  }
+→ tokenization lease release (matching leaseId)
 → upstream in-flight lease
 → upstream
 → settle / markUncertain / release
 → upstream in-flight lease release
 ```
 
-tokenization admission を導入しない原因分岐では、その取得・解放だけを省略する。quota
-reserve、upstream 到達判定、settlement の既存契約は変更しない。
+tokenization admission を導入しない原因分岐では、その取得・解放だけを省略する。
+推定、margin、upper bound、output decision、または quota reserve の例外は upstream へ
+到達させず、tokenization lease を取得済みなら matching `leaseId` で解放し、監査行の
+完了を best-effort で試行して 500 `internal_error` を返す。reserve RPC の結果が不明な
+場合は、予約が未成立だと仮定して解放してはならない。request ID による DO 状態確認または
+冪等な後処理で予約状態を確定し、必要な場合だけ release する。
+
+reserve 成功後の upstream in-flight lease、upstream 到達後の settle / markUncertain /
+release、成功時の actual usage による settlement 契約は変更しない。D1 監査の insert / 完了
+更新は best-effort のままとし、監査書き込みの成否を quota 判定や upstream 到達条件に
+してはならない。
 
 ## エラー契約
 
@@ -191,8 +232,10 @@ confirmed、reserved、uncertain token を変更してはならない。
 
 Chat Completions と Responses について、text-only、複数 message / item、tools、reasoning、
 `function_call`、`function_call_output` を canary upstream へ送る。各形状で
-`reservedInputTokens >= upstream usage.input_tokens` を確認する。未確認または不合格の形状は
-許可リストへ含めない。
+`estimatedInput + output.maxOutputTokens + margin >= upstream usage.total_tokens` を確認する。
+Chat Completions では `max_tokens` / `max_completion_tokens` の正規化後フィールド、
+Responses では `max_output_tokens` の正規化後フィールドが upstream に送られ、予約計算と
+同じ値であることも確認する。未確認または不合格の形状は許可リストへ含めない。
 
 ### Limit 境界テスト
 
@@ -202,9 +245,15 @@ Chat Completions と Responses について、text-only、複数 message / item�
 
 ### Admission テスト
 
-- 上限内取得、上限超過、同一 request ID の冪等取得、正常解放を確認する。
-- 期限切れ lease と異常終了相当の lease が次回取得時に回収されることを確認する。
-- admission 拒否と期限切れ回収で quota state が変化しないことを確認する。
+- 上限内取得、上限超過、同一 request ID の有効期限内の冪等取得、正常解放を確認する。
+- 同一 request ID の期限切れ後の再取得が新しい lease ID / generation を返すことを確認する。
+- 旧 lease ID による stale release が、新しい lease を解放しないことを確認する。
+- BPE 処理時間が TTL より長くなり得る設定では、renew / heartbeat または最大処理時間を
+  包含する TTL によって処理中の lease が維持されることを確認する。
+- admission 拒否、期限切れ回収、stale release のいずれでも quota state が変化しない
+  ことを確認する。
+- 推定例外では tokenization lease が解放され、quota reserve と upstream が実行されず、
+  audit completion が best-effort で試行され、500 `internal_error` が返ることを確認する。
 
 ### 負荷試験
 
@@ -220,7 +269,8 @@ hard limit、admission 上限を決定しない。
 2. 約 74,000-token 級の確認済み payload が想定 concurrency で成功する。
 3. 対象 canary に `exceededCpu` と `exceededMemory` がない。
 4. CPU time、wall time、memory profile が採用した limit 内に収まる。
-5. 許可した全 payload 形状で予約値が upstream `usage.input_tokens` を下回らない。
+5. 許可した全 payload 形状で、`estimatedInput + output.maxOutputTokens + margin` が
+   upstream `usage.total_tokens` を下回らない。
 6. 拒否経路で quota reserve と upstream 呼び出しが発生しない。
 7. upstream 到達後の settle / uncertain / release 契約に回帰がない。
 
