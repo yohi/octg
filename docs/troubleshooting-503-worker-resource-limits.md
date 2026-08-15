@@ -203,7 +203,7 @@ profiling に基づいて既存設定を引き下げます。
 | 対策 | 実装箇所 | 現ブランチの既定値・動作 |
 | --- | --- | --- |
 | raw request body の上限 | `apps/gateway-worker/src/request-body.ts` / `apps/gateway-worker/src/proxy.ts` | `MAX_INPUT_BYTES=1 MiB`。JSON parse 前に超過を `413` で拒否 |
-| normalized input の上限 | `apps/gateway-worker/src/proxy.ts` / `packages/shared/src/normalize.ts` | raw body と同じ解決済み `maxInputBytes`（現ブランチの既定値 1 MiB）。`inputText` と `opaqueInputBytes` を検査 |
+| normalized input の上限 | `apps/gateway-worker/src/proxy.ts` / `packages/shared/src/normalize.ts` | raw body と同じ解決済み `maxInputBytes`（現ブランチの既定値 1 MiB）。`inputTextBytes` と `opaqueInputBytes` を含む `inputBytes` を検査 |
 | pool 単位の in-flight 制御 | `apps/gateway-worker/src/proxy.ts` / `durable-objects/quota-controller/src/quota-controller.ts` | `MAX_IN_FLIGHT_REQUESTS=2`。現行実装では reserve 後、upstream 前に acquire。BPE 実行前の admission ではない |
 
 ### 4.1 既存実装・BPE cutoff・追加 hard rejection の区別
@@ -231,7 +231,7 @@ revision と設定が適用されていたかは未確認です。
      代替・別名ではありません。
    - 正規化成功後、`requestData.inputBytes < BPE_MAX_INPUT_BYTES` の場合だけ従来の
      `js-tiktoken` / `encoding.encode()` を実行します。閾値以上でも既存 hard limit 未満なら、BPE を
-     実行せず、`requestData.inputBytes` と `requestData.opaqueInputBytes` から導出した byte-based
+     実行せず、`requestData.inputTextBytes` と `requestData.opaqueInputBytes` を使う byte-based
      estimation に切り替えます。この cutoff 自体は入力を拒否する hard limit ではありません。
    - `MAX_IN_FLIGHT_REQUESTS`（現ブランチの既定値は `2`）は QuotaController の pool 単位で
      upstream 呼出し中のリクエスト数を制限しますが、`acquireInFlight()` より前の BPE を保護する
@@ -254,6 +254,10 @@ JSON parse が raw body 上限の後にあります。したがって raw body �
 in-flight 制御は `estimateInputTokens()` と reserve の後に働くため、tokenizer 自身の同期 CPU spike や、
 その前段の JSON parse・正規化による負荷は防ぎません。
 
+ここまでの raw body 上限、JSON parse 前の 413、normalized input の上限は現ブランチで実装済みです。
+1102 対策として新たに追加する項目ではなく、74,000-token workload に対して既存の 1 MiB が十分かを
+profiling で再評価する対象です。
+
 この `MAX_IN_FLIGHT_REQUESTS` は QuotaController の pool 単位の制御であり、Worker isolate 内の
 tokenizer 実行を直接制限する admission control ではありません。したがって、同じ isolate に
 複数の threshold 未満の大きめ入力が同時に到着すると、各リクエストが `acquireInFlight()` より
@@ -274,10 +278,19 @@ normalize / reserve 失敗時の lease 解放を定義できないため、別�
 `encoding.encode(text)` による同期 BPE 推定を実行しています。byte-based fallback はまだ
 実装されていません。
 
-`NormalizedRequest` に `utf8ByteLength` というフィールドは存在しません。実装時は
-`handleProxy()` が受け取る既存の `requestData.inputBytes` と `requestData.opaqueInputBytes` を使います。
-Responses の `inputBytes` は `inputText` の UTF-8 bytes と `opaqueInputBytes` の合計なので、text-only
-bytes は `requestData.inputBytes - requestData.opaqueInputBytes` から導出します。
+この Proposed cutoff の前提契約は、`NormalizedRequest` が `inputTextBytes`（`inputText` の UTF-8
+bytes のみ）、`inputBytes`（正規化済み入力全体）、`opaqueInputBytes`（`encrypted_content` などの
+opaque bytes）を別々に公開することです。現在の作業ツリーではこの field を追加済みですが、
+この文書を型変更前のブランチへ適用する場合は、先に次の型・normalize 変更を実装してください。
+
+```typescript
+readonly inputTextBytes: number;
+```
+
+`normalizeChatCompletions()` / `normalizeResponses()` で `inputText` の UTF-8 bytes を一度算出して
+返し、Responses では `inputBytes = inputTextBytes + opaqueInputBytes`、Chat では
+`inputBytes = inputTextBytes` かつ `opaqueInputBytes = 0` を維持します。BPE cutoff の byte-based
+経路では `requestData.inputTextBytes` を使い、`requestData.inputBytes` を text bytes として扱いません。
 
 Chat では `opaqueInputBytes` が常に `0` のため、`inputTextBytes` は `inputBytes` と同じです。
 Responses では reasoning の `encrypted_content` などの opaque bytes がすでに
@@ -290,20 +303,20 @@ Responses では reasoning の `encrypted_content` などの opaque bytes がす
 
 #### 実装方針
 
-1. 正規化処理で算出済みの `requestData.inputBytes` と
-   `requestData.opaqueInputBytes` を再利用し、差分から `inputText` の UTF-8 byte 数を求めます。
+1. 上記の型変更後に正規化処理で算出された `requestData.inputTextBytes`、`requestData.inputBytes`、
+   `requestData.opaqueInputBytes` を使います。Responses の invariant は
+   `inputBytes = inputTextBytes + opaqueInputBytes` です。
 2. `requestData.inputBytes < BPE_MAX_INPUT_BYTES` の場合だけ、従来どおり `o200k_base` の
    `encoding.encode()` による正確な推定を実行します。
 3. `requestData.inputBytes >= BPE_MAX_INPUT_BYTES` かつ既存 hard limit 未満の場合は BPE を実行せず、
-   `inputText` の byte 数をその text の tokenizer token 数に対する保守的な上限として使います。
+   `requestData.inputTextBytes` をその text の tokenizer token 数に対する保守的な上限として使います。
 4. `opaqueInputBytes` は推定式で一度だけ加算します。既存の raw body 上限を変更する場合は、
    BPE の閾値や normalized input の上限とは別の設定として、profiling の結果に基づいて行います。
 
 疑似コードは次のとおりです。
 
 ```typescript
-const inputTextBytes = requestData.inputBytes
-  - requestData.opaqueInputBytes;
+const inputTextBytes = requestData.inputTextBytes;
 const base = requestData.inputBytes < BPE_MAX_INPUT_BYTES
   ? exactEstimate(requestData.inputText)
   : inputTextBytes;
@@ -324,11 +337,8 @@ bytes は式の後半で一度だけ加算します。したがって、opaque b
 この設計では cutoff の判定には normalized total bytes である `requestData.inputBytes` を使えますが、
 byte-based fallback の `base` には必ず `inputTextBytes` だけを使います。`inputBytes` はすでに
 `opaqueInputBytes` を含むため、`inputBytes` を `base` にして opaque bytes を加算する実装は禁止です。
-`NormalizedRequest` の invariant は、`inputBytes` が `inputText` の UTF-8 byte 数と
-`opaqueInputBytes` の合計であることです。このため `inputTextBytes` は上記の差分で
-求め、`opaqueInputBytes` は推定式で一度だけ加算します。この疑似コードはそのまま
-貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上防止を含む設計を示して
-います。
+`opaqueInputBytes` は推定式で一度だけ加算します。この疑似コードは、現行の型で byte 数の意味を
+分離し、opaque bytes の二重計上を防ぐ設計を示しています。
 
 #### 追加候補のテスト方針
 
@@ -403,7 +413,7 @@ per-isolate の memory limit を超過した invocation outcome であり、実�
 5. **正確なクォータ精算:** Upstream が `usage.total_tokens` を返した場合は、
    `stub.settle(requestId, usage.total_tokens)` で実使用量に精算します。ただし settle は
    既に発生した過小予約を取り消せないため、安全な予約上限の代替にはなりません。
-6. **raw body の境界:** `Content-Length` あり・なしの両方で、`MAX_INPUT_BYTES + 1` bytes の
+6. **運用・統合検証項目（raw body の境界）:** `Content-Length` あり・なしの両方で、`MAX_INPUT_BYTES + 1` bytes の
    body が JSON parse、正規化、reserve、Upstream 呼出より前に `413` になることを確認します。
 7. **推定経路の境界:** BPE threshold の下側と上側で期待する経路を確認し、byte-based 経路で
    `estimatedInput >= inputText の tokenizer tokens` が維持されることを検証します。さらに
