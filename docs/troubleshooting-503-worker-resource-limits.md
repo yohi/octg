@@ -43,6 +43,24 @@ AI Gateway ログの詳細から、Cloudflare エッジが以下のエラー HTM
 この 503 は OCTG Worker が生成した通常の OpenAI 互換エラーではなく、Worker の実行
 中断に伴う Cloudflare エッジの応答です。
 
+### インシデント環境の記録
+
+今回確認できた記録だけでは、障害時に実際に稼働していた Worker の revision と
+Cloudflare 側の実効リソース設定を特定できません。Workers のプラン既定値を、対象
+Worker に適用された上限として扱わないでください。
+
+| 項目 | 現時点の記録 | 確認方法・注記 |
+| --- | --- | --- |
+| Worker deployment/version ID または commit SHA | 未取得 | 障害時の deployment とログの revision を照合する |
+| Workers プラン | 未取得 | 対象 Worker のアカウント設定で確認する |
+| 実効 `limits.cpu_ms` | 未取得 | `wrangler.jsonc` に明示設定がないことだけでは実効値を確定できない |
+| 実効 memory limit | 未取得 | Error 1102 は memory 制限超過でも発生し得るため、CPU と別に確認する |
+| `MAX_INPUT_BYTES`（現ブランチ設定） | `1048576`（1 MiB） | 障害時 deployment の設定が同じか別途確認する |
+| `MAX_IN_FLIGHT_REQUESTS`（現ブランチ設定） | `2` | 障害時 deployment の設定が同じか別途確認する |
+| `compatibility_date`（現ブランチ設定） | `2026-08-01` | 障害時 deployment の設定が同じか別途確認する |
+| インシデント時間帯 | 2026-08-16 02:16:29〜02:16:47 JST | ログに記録された観測範囲 |
+| `exceededCpu` / `exceededMemory`、CPU time、wall time | 未取得 | Workers Logs または Trace Events から確認する |
+
 ---
 
 ## 2. 根本原因の分析（Root Cause Analysis）
@@ -57,6 +75,8 @@ limits）** です。Cloudflare のエラー一覧では 1102 は CPU 時間制�
 現時点で確定できるのは Worker がリソース制限に達したことです。同期トークン推定に
 よる CPU 超過は有力な原因候補ですが、Workers Logs の `exceededCpu`、
 `exceededMemory`、CPU time、wall time を確認するまで根本原因として断定しません。
+また、Free/Paid のプラン既定値や旧 Bundled usage model の値ではなく、障害時の
+deployment に適用された実効 `cpu_ms` を確認する必要があります。
 
 ### 2.2 ボトルネック候補のコード
 
@@ -129,10 +149,12 @@ OCTG の中核設計原則は **意図しない課金の防止（Zero Unexpected
 UTF-8 byte 数を保守的な上限として扱うか、既存の入力 byte 上限を超えた入力を reserve
 前に `413 Request Entity Too Large` として拒否します。
 
-入力 byte 上限は新規に追加する仕組みではありません。`handleProxy()` は既に
-`MAX_INPUT_BYTES` を `readJsonBody()` に渡し、raw body を JSON parse 前に制限します。
-正規化処理も正規化後の byte 数を検査します。まず障害発生時の `MAX_INPUT_BYTES` 実値と、
-74,000-token リクエストの raw body byte 数を確認し、必要な場合だけ既存設定を引き下げます。
+入力 byte 上限は新規に追加する仕組みではありません。対象 proxy endpoint の
+`handleProxy()` は既に `MAX_INPUT_BYTES` を `readJsonBody()` に渡し、`Content-Length` と
+ストリーミング実測値を JSON parse 前に検査します。超過時は HTTP 413 を返し、D1 監査行の
+登録、quota reserve、Upstream 呼出の前に処理を終了します。正規化処理も正規化後の byte
+数を検査します。まず障害発生時の `MAX_INPUT_BYTES` 実値と、74,000-token リクエストの
+raw body byte 数を確認し、必要な場合だけ既存設定を引き下げます。
 なお、正規化後の既定上限は `MAX_NORMALIZED_INPUT_BYTES = 1_048_576` です。
 
 ---
@@ -160,11 +182,11 @@ UTF-8 byte 数を保守的な上限として扱うか、既存の入力 byte 上
 疑似コードは次のとおりです。
 
 ```typescript
-const textInputBytes = normalizedInput.inputBytes
+const inputTextBytes = normalizedInput.inputBytes
   - normalizedInput.opaqueInputBytes;
-const base = textInputBytes >= profiledThresholdBytes
-  ? textInputBytes
-  : exactEstimate(normalizedInput.text);
+const base = inputTextBytes >= profiledThresholdBytes
+  ? inputTextBytes
+  : exactEstimate(normalizedInput.inputText);
 const estimatedInput = base
   + normalizedInput.opaqueInputBytes
   + 4 * normalizedInput.messageCount
@@ -174,8 +196,11 @@ const estimatedInput = base
 ここで `profiledThresholdBytes` は実測で決定する設定値です。`exactEstimate` は既存の
 `o200k_base` 推定処理を表します。実装時は `normalizedInput.opaqueInputBytes` を
 そのまま推定関数へ渡し、`inputBytes` 全体を base として再度加算しないでください。
-この疑似コードはそのまま貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上
-防止を含む設計を示しています。
+`NormalizedRequest` の invariant は、`inputBytes` が `inputText` の UTF-8 byte 数と
+`opaqueInputBytes` の合計であることです。このため `inputTextBytes` は上記の差分で
+求め、`opaqueInputBytes` は推定式で一度だけ加算します。この疑似コードはそのまま
+貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上防止を含む設計を示して
+います。
 
 ### 4.2 効果と安全性の判定条件
 
@@ -200,13 +225,20 @@ const estimatedInput = base
    圧縮を推奨します。
 2. **Workers プランの確認:** HTTP リクエストの CPU 制限は Free が 10 ms、Paid は既定
    30 秒で、設定により最大 5 分まで引き上げられます。50 ms は旧 Bundled usage model
-   の値です。プラン変更だけで解決したと判断せず、profiling と入力制限を併用します。
+   の値として知られていますが、これらの値から障害時の実効上限を推定しません。対象
+   deployment の Worker 設定で実効 `limits.cpu_ms` を確認し、プラン変更だけで解決した
+   と判断せず、profiling と入力制限を併用します。
 3. **観測データの保存:** request ID、入力 byte 数、正規化後 byte 数、推定値、CPU time、
    memory outcome、Upstream 到達有無を保存します。認証素材や入力本文はログに保存しません。
 
 ### 5.1 追加調査が必要な項目
 
 - Workers Logs で `exceededCpu` と `exceededMemory` を確認する。
+- 障害時の deployment/version ID または commit SHA、Workers プラン、実効
+  `limits.cpu_ms`、実効 memory limit を取得する。取得できない場合は「取得不能」と
+  記録する。
+- Workers Logs または Trace Events で `exceededCpu` / `exceededMemory`、CPU time、
+  wall time を取得する。どちらも確認できない場合は原因を未確定のまま維持する。
 - 実際の request body byte 数、正規化後の `inputText` byte 数、
   `opaqueInputBytes`、および `inputBytes` の関係を比較する。
 - 障害発生時の `MAX_INPUT_BYTES` 実値と、74,000-token リクエストの raw request bytes
