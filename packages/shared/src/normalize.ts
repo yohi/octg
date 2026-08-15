@@ -7,6 +7,7 @@ export interface NormalizedRequest {
   endpoint: "chat" | "responses";
   model: string;
   inputText: string;
+  readonly inputTextBytes: number;
   readonly inputBytes: number;
   messageCount: number;
   maxOutputTokens: number;
@@ -90,7 +91,8 @@ export function normalizeChatCompletions(
   }
 
   const inputText = texts.join("\n");
-  const inputBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  const inputTextBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  const inputBytes = inputTextBytes;
   if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
 
   return {
@@ -99,6 +101,7 @@ export function normalizeChatCompletions(
       endpoint: "chat",
       model: value.model,
       inputText,
+      inputTextBytes,
       inputBytes,
       messageCount: value.messages.length,
       maxOutputTokens: maxCompletion ?? maxLegacy ?? DEFAULT_MAX_OUTPUT_TOKENS,
@@ -233,7 +236,8 @@ export function normalizeResponses(
   if (value.max_output_tokens !== undefined && positiveInteger(value.max_output_tokens) === undefined) {
     return { ok: false, error: "invalid_body" };
   }
-  const inputBytes = UTF8_ENCODER.encode(inputText).byteLength + opaqueInputBytes;
+  const inputTextBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  const inputBytes = inputTextBytes + opaqueInputBytes;
   if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
 
   return {
@@ -242,6 +246,7 @@ export function normalizeResponses(
       endpoint: "responses",
       model: value.model,
       inputText,
+      inputTextBytes,
       inputBytes,
       messageCount,
       maxOutputTokens:
