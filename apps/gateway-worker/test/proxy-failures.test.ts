@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { MAX_NORMALIZED_INPUT_BYTES } from "@octg/shared";
+import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveMaxInputBytes } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
@@ -144,6 +144,34 @@ describe("proxy failure paths", () => {
       if (original) Object.defineProperty(env, "MAX_INPUT_BYTES", original);
       else Reflect.deleteProperty(env, "MAX_INPUT_BYTES");
     }
+  });
+
+  it("counts Responses opaque reasoning bytes once in the reservation", async () => {
+    // Given: a Responses request with visible summary text and encrypted reasoning state.
+    const before = await stub().getState();
+    const inputText = "visible-summary";
+    const opaqueInputBytes = new TextEncoder().encode("秘密状態").byteLength;
+    const maxOutputTokens = 10;
+    const estimatedInput = estimateInputTokens(inputText, 1, opaqueInputBytes);
+    const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
+    const expectedReservation = estimatedInput + maxOutputTokens + margin;
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: { code: "upstream" } }), { status: 500 }));
+
+    // When: the request passes through normalization, estimation, and reservation.
+    const response = await SELF.fetch("https://octg.test/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
+      body: JSON.stringify({
+        model: "gpt-5",
+        input: [{ type: "reasoning", summary: [{ type: "summary_text", text: inputText }], encrypted_content: "秘密状態" }],
+        max_output_tokens: maxOutputTokens,
+      }),
+    });
+
+    // Then: the uncertain reservation contains the opaque bytes exactly once.
+    const after = await stub().getState();
+    expect(response.status).toBe(500);
+    expect(after.uncertainTokens - before.uncertainTokens).toBe(expectedReservation);
   });
 
   it("marks upstream 5xx as uncertain and passes through the body", async () => {
