@@ -280,8 +280,9 @@ normalize / reserve 失敗時の lease 解放を定義できないため、別�
 
 この Proposed cutoff の前提契約は、`NormalizedRequest` が `inputTextBytes`（`inputText` の UTF-8
 bytes のみ）、`inputBytes`（正規化済み入力全体）、`opaqueInputBytes`（`encrypted_content` などの
-opaque bytes）を別々に公開することです。現在の作業ツリーではこの field を追加済みですが、
-この文書を型変更前のブランチへ適用する場合は、先に次の型・normalize 変更を実装してください。
+opaque bytes）を別々に公開することです。現行ブランチでは `inputBytes` と `opaqueInputBytes` は
+公開されていますが、`inputTextBytes` はまだ公開されていません。BPE cutoff を実装する際は、
+先に次の型・normalize 変更を行います。
 
 ```typescript
 readonly inputTextBytes: number;
@@ -303,7 +304,7 @@ Responses では reasoning の `encrypted_content` などの opaque bytes がす
 
 #### 実装方針
 
-1. 上記の型変更後に正規化処理で算出された `requestData.inputTextBytes`、`requestData.inputBytes`、
+1. 上記の型・normalize 変更後に正規化処理で算出された `requestData.inputTextBytes`、`requestData.inputBytes`、
    `requestData.opaqueInputBytes` を使います。Responses の invariant は
    `inputBytes = inputTextBytes + opaqueInputBytes` です。
 2. `requestData.inputBytes < BPE_MAX_INPUT_BYTES` の場合だけ、従来どおり `o200k_base` の
@@ -313,7 +314,8 @@ Responses では reasoning の `encrypted_content` などの opaque bytes がす
 4. `opaqueInputBytes` は推定式で一度だけ加算します。既存の raw body 上限を変更する場合は、
    BPE の閾値や normalized input の上限とは別の設定として、profiling の結果に基づいて行います。
 
-疑似コードは次のとおりです。
+以下は `inputTextBytes` を追加済みの型を前提にした、BPE cutoff 実装後の想定コードです。現行の
+`proxy.ts` にそのまま存在するコードではなく、BPE cutoff を実装する際の疑似コードです。
 
 ```typescript
 const inputTextBytes = requestData.inputTextBytes;
