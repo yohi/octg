@@ -166,9 +166,10 @@ in-flight 制御を置き換える実装ではなく、障害時の outcome と 
 `reproduces a printable 20 KB counterexample to byte-halving` に固定しています。UTF-8 byte 数を
 使う場合も、まず `inputText` そのものの `o200k_base` token 数に対する上限として扱います。
 
-したがって、巨大入力では `/ 2` のような比率推定を使いません。正規化済みの
-`inputText` の UTF-8 byte 数を、その text の tokenizer token 数に対する保守的な上限として
-扱うか、安全性を証明できない入力を reserve 前に `413 Request Entity Too Large` として拒否します。
+したがって、巨大入力では `/ 2` のような比率推定を使いません。BPE 専用 cutoff を導入する場合は、
+正規化済みの `inputText` の UTF-8 byte 数を、その text の tokenizer token 数に対する保守的な上限として
+扱います。安全性を証明できない入力を reserve 前に `413 Request Entity Too Large` として拒否するのは、
+BPE cutoff そのものではなく、必要と判断した場合だけ追加する hard rejection です。
 ただし、この関係だけでは Responses API の item 構造、message overhead、tools、reasoning、
 その他の upstream 固有形式を含む**request 全体の `usage.input_tokens` の上限は保証しません**。
 request 全体を fail-closed に予約するには、受理する payload 形状ごとの構造 overhead を別途
@@ -179,10 +180,12 @@ byte 上限による拒否は新規に追加する仕組みではありません
 `handleProxy()` は既に `MAX_INPUT_BYTES` を `readJsonBody()` に渡し、raw JSON body の
 `Content-Length` とストリーミング実測値を JSON parse 前に検査します。超過時は HTTP 413 を
 返し、正規化、D1 監査行の登録、quota reserve、Upstream 呼出の前に処理を終了します。
-さらに正規化後の入力も、`handleProxy()` が解決した `MAX_INPUT_BYTES` と同じ上限で検査されます。
-`MAX_NORMALIZED_INPUT_BYTES` は `MAX_INPUT_BYTES` が未設定または不正な場合の fallback 定数であり、
-独立した runtime 設定ではありません。前者は raw body 全体、後者は抽出した `inputText` と
-Responses API の `opaqueInputBytes` を測るため、測定対象は同じではありません。
+さらに正規化後の入力も、`handleProxy()` が `env.MAX_INPUT_BYTES` から解決した
+`maxInputBytes` と同じ実効閾値で検査されます。`MAX_NORMALIZED_INPUT_BYTES` は normalize 関数を
+引数なしで単独呼出しする場合のデフォルト値であり、proxy では `MAX_INPUT_BYTES` が未設定または
+不正な場合に `resolveMaxInputBytes()` が返す fallback 値として使われるだけです。独立した
+Worker runtime 設定ではありません。raw body と normalized input は測定対象こそ異なりますが、
+現行 proxy 経路では同じ `maxInputBytes` を共有します。
 まず障害発生時の deployment に適用された `MAX_INPUT_BYTES` と、74,000-token リクエストの
 raw body byte 数を比較し、既存の 413 防御の対象だったかを確認します。必要な場合だけ、
 profiling に基づいて既存設定を引き下げます。
@@ -193,44 +196,63 @@ profiling に基づいて既存設定を引き下げます。
 
 この節は、**現ブランチで実装済みの緩和策**と、障害時の profiling 後にだけ検討する
 **未実装の追加改善候補**を分けて記載します。現時点では byte-based estimation や
-`profiledThresholdBytes` は存在せず、`estimateInputTokens()` は BPE 推定を実行します。
+`BPE_MAX_INPUT_BYTES` cutoff は存在せず、`estimateInputTokens()` は BPE 推定を実行します。
 
 実装と設定の対応は次のとおりです。
 
 | 対策 | 実装箇所 | 現ブランチの既定値・動作 |
 | --- | --- | --- |
 | raw request body の上限 | `apps/gateway-worker/src/request-body.ts` / `apps/gateway-worker/src/proxy.ts` | `MAX_INPUT_BYTES=1 MiB`。JSON parse 前に超過を `413` で拒否 |
-| normalized input の上限 | `apps/gateway-worker/src/proxy.ts` / `packages/shared/src/normalize.ts` | 解決済み `MAX_INPUT_BYTES`（現ブランチの既定値 1 MiB）。`inputText` と `opaqueInputBytes` を検査 |
+| normalized input の上限 | `apps/gateway-worker/src/proxy.ts` / `packages/shared/src/normalize.ts` | raw body と同じ解決済み `maxInputBytes`（現ブランチの既定値 1 MiB）。`inputText` と `opaqueInputBytes` を検査 |
 | pool 単位の in-flight 制御 | `apps/gateway-worker/src/proxy.ts` / `durable-objects/quota-controller/src/quota-controller.ts` | `MAX_IN_FLIGHT_REQUESTS=2`。現行実装では reserve 後、upstream 前に acquire。BPE 実行前の admission ではない |
 
-### 4.1 実装済みの緩和策と適用範囲
+### 4.1 既存実装・BPE cutoff・追加 hard rejection の区別
 
-現在のブランチの実装には、次の入力 hard limit と pool 単位の同時実行制御が既にあります。
-ただし、障害時 deployment に同じ設定・revision が適用されていたかは未確認です。
+この節では、入力サイズに関する制御を次の 3 つに分けて扱います。障害時 deployment に同じ
+revision と設定が適用されていたかは未確認です。
 
-1. `MAX_INPUT_BYTES`（現ブランチの既定値は 1 MiB）は raw request body に対する上限です。
-   `Content-Length` が存在して上限を超える場合は body を読み込む前に拒否し、存在しない場合も
-   `readJsonBody()` が body のストリーム実測値を byte 単位で制限します。上限を超えた時点で
-   JSON parse、正規化、reserve、Upstream 呼出を行わず、`413` を返します。
-2. 正規化後の semantic input は、`handleProxy()` が解決した `MAX_INPUT_BYTES`（現ブランチの既定値は
-   1 MiB）で検査されます。未設定または不正な値の場合だけ、`MAX_NORMALIZED_INPUT_BYTES` が fallback
-   として使われます。`normalizeChatCompletions()` と `normalizeResponses()` が検査し、超過時は
-   `413` を返します。
-3. `MAX_IN_FLIGHT_REQUESTS`（現ブランチの既定値は `2`）は QuotaController の pool 単位で
-   upstream 呼出し中のリクエスト数を制限します。上限到達時は upstream 呼出し前に
-   `429 worker_concurrency_exceeded` を返します。
+1. **既存実装: raw body / normalized input の hard limit**
+   - `MAX_INPUT_BYTES`（現ブランチの既定値は 1 MiB）は raw request body の上限です。
+     `Content-Length` が存在して上限を超える場合は body を読む前に拒否し、存在しない場合も
+     `readJsonBody()` が stream の累積 byte 数を制限します。超過時は JSON parse、正規化、reserve、
+     Upstream 呼出を行わず、`413` を返します。
+   - 正規化後の semantic input も、`handleProxy()` が `env.MAX_INPUT_BYTES` から解決した
+     `maxInputBytes` で検査されます。raw body と normalized input は測定対象が異なりますが、
+     現行 proxy 経路では両方に同じ実効閾値が渡されます。`normalizeChatCompletions()` と
+     `normalizeResponses()` は `inputBytes` を算出し、上限超過時に `413` を返します。これは今回
+     新たに追加する仕組みではありません。
+   - `MAX_NORMALIZED_INPUT_BYTES` は normalize 関数を引数なしで単独呼出しする場合のデフォルト値です。
+     proxy では `MAX_INPUT_BYTES` が未設定または不正な場合に `resolveMaxInputBytes()` が返す fallback
+     として使われますが、独立した Worker runtime 設定ではありません。
 
-ここで説明した raw body と normalized input の byte 上限は、今回新たに導入する対策では
-ありません。現ブランチの既存防御として維持され、障害時 deployment に同じ revision と設定が
-適用されていたかだけを確認します。今回追加する実装の候補は、上限内の大規模入力で同期 BPE
-を回避するトークン推定経路です。
+2. **今回追加する候補: BPE 専用 cutoff（Proposed / 未実装）**
+   - `BPE_MAX_INPUT_BYTES` は、CPU profiling で決める BPE 専用の概念的な閾値です。現ブランチには
+     この設定も cutoff 経路も存在しません。`MAX_INPUT_BYTES` や `MAX_NORMALIZED_INPUT_BYTES` の
+     代替・別名ではありません。
+   - 正規化成功後、`requestData.inputBytes < BPE_MAX_INPUT_BYTES` の場合だけ従来の
+     `js-tiktoken` / `encoding.encode()` を実行します。閾値以上でも既存 hard limit 未満なら、BPE を
+     実行せず、`requestData.inputBytes` と `requestData.opaqueInputBytes` から導出した byte-based
+     estimation に切り替えます。この cutoff 自体は入力を拒否する hard limit ではありません。
+   - `MAX_IN_FLIGHT_REQUESTS`（現ブランチの既定値は `2`）は QuotaController の pool 単位で
+     upstream 呼出し中のリクエスト数を制限しますが、`acquireInFlight()` より前の BPE を保護する
+     admission control ではありません。
+
+3. **必要な場合だけ追加する hard rejection（Proposed / 未実装）**
+   - profiling で既存の 1 MiB hard limit が CPU または memory 保護に不十分と判明した場合だけ、
+     `MAX_INPUT_BYTES` を安全値へ引き下げる、または別の hard limit を設けることを検討します。
+     この変更は BPE cutoff とは別の入力拒否制御であり、既定の追加対策ではありません。
+   - hard limit を変更する場合は、Issue #33 の合法な Responses API の text / reasoning / tool
+     history を不用意に拒否しないことを回帰テストで確認します。安全な上限を証明できない structured
+     payload だけを拒否する方針も、同じ回帰テストの対象にします。
 
 処理順序は概ね
-`authenticate → readJsonBody → normalize → estimateInputTokens → reserve → acquireInFlight → upstream`
-です。したがって raw body の 1 MiB 制限は JSON parse・正規化・BPE・reserve より前に働きますが、
-in-flight 制御は `estimateInputTokens()` と reserve の後に働きます。in-flight 制御は同時に
-upstream へ進むリクエスト数を抑えますが、tokenizer 自身の同期 CPU spike や、その前段の JSON parse・
-正規化による負荷は防ぎません。
+`authenticate → request body 1 MiB hard limit → JSON.parse → normalize / normalized size check
+→ BPE cutoff 判定 → BPE または byte-based estimation → reserve → acquireInFlight → upstream`
+です。`readJsonBody()` が request body の byte 上限と JSON parse をまとめて実行しますが、処理順序上は
+JSON parse が raw body 上限の後にあります。したがって raw body の 1 MiB 制限は正規化・BPE・reserve
+より前に働きますが、BPE cutoff は正規化後の `requestData.inputBytes` を見て推定経路だけを切り替えます。
+in-flight 制御は `estimateInputTokens()` と reserve の後に働くため、tokenizer 自身の同期 CPU spike や、
+その前段の JSON parse・正規化による負荷は防ぎません。
 
 この `MAX_IN_FLIGHT_REQUESTS` は QuotaController の pool 単位の制御であり、Worker isolate 内の
 tokenizer 実行を直接制限する admission control ではありません。したがって、同じ isolate に
@@ -246,19 +268,16 @@ normalize / reserve 失敗時の lease 解放を定義できないため、別�
 決めるべきなのは、障害時の invocation outcome を確認したうえで、既存 limit を調整するか、
 未実装のトークン推定経路を変更するかです。
 
-### 4.2 CPU 超過が確認された場合のトークン推定改善（Proposed / 未実装）
+### 4.2 BPE cutoff によるトークン推定改善（Proposed / 未実装）
 
 現在も正規化後に `estimateInputTokens()` が無条件に呼ばれ、内部で
 `encoding.encode(text)` による同期 BPE 推定を実行しています。byte-based fallback はまだ
 実装されていません。
 
-`NormalizedRequest` に `utf8ByteLength` というフィールドは存在しません。既存の型で byte-based
-経路を実装する場合、Responses の `inputBytes` は `inputText` の UTF-8 bytes と
-`opaqueInputBytes` の合計なので、text-only bytes は必ず次の不変条件から導出します。
-
-```typescript
-const inputTextBytes = normalizedInput.inputBytes - normalizedInput.opaqueInputBytes;
-```
+`NormalizedRequest` に `utf8ByteLength` というフィールドは存在しません。実装時は
+`handleProxy()` が受け取る既存の `requestData.inputBytes` と `requestData.opaqueInputBytes` を使います。
+Responses の `inputBytes` は `inputText` の UTF-8 bytes と `opaqueInputBytes` の合計なので、text-only
+bytes は `requestData.inputBytes - requestData.opaqueInputBytes` から導出します。
 
 Chat では `opaqueInputBytes` が常に `0` のため、`inputTextBytes` は `inputBytes` と同じです。
 Responses では reasoning の `encrypted_content` などの opaque bytes がすでに
@@ -271,26 +290,26 @@ Responses では reasoning の `encrypted_content` などの opaque bytes がす
 
 #### 実装方針
 
-1. 正規化処理で算出済みの `NormalizedRequest.inputBytes` と
-   `NormalizedRequest.opaqueInputBytes` を再利用し、`inputBytes - opaqueInputBytes` から
-   `inputText` の UTF-8 byte 数を求めます。
-2. 小さい入力は従来どおり `o200k_base` で推定します。
-3. profiling で決めた閾値以上の入力は BPE を実行せず、`inputText` の byte 数を
-   その text の tokenizer token 数に対する保守的な上限として使います。
+1. 正規化処理で算出済みの `requestData.inputBytes` と
+   `requestData.opaqueInputBytes` を再利用し、差分から `inputText` の UTF-8 byte 数を求めます。
+2. `requestData.inputBytes < BPE_MAX_INPUT_BYTES` の場合だけ、従来どおり `o200k_base` の
+   `encoding.encode()` による正確な推定を実行します。
+3. `requestData.inputBytes >= BPE_MAX_INPUT_BYTES` かつ既存 hard limit 未満の場合は BPE を実行せず、
+   `inputText` の byte 数をその text の tokenizer token 数に対する保守的な上限として使います。
 4. `opaqueInputBytes` は推定式で一度だけ加算します。既存の raw body 上限を変更する場合は、
    BPE の閾値や normalized input の上限とは別の設定として、profiling の結果に基づいて行います。
 
 疑似コードは次のとおりです。
 
 ```typescript
-const inputTextBytes = normalizedInput.inputBytes
-  - normalizedInput.opaqueInputBytes;
-const base = inputTextBytes >= profiledThresholdBytes
-  ? inputTextBytes
-  : exactEstimate(normalizedInput.inputText);
+const inputTextBytes = requestData.inputBytes
+  - requestData.opaqueInputBytes;
+const base = requestData.inputBytes < BPE_MAX_INPUT_BYTES
+  ? exactEstimate(requestData.inputText)
+  : inputTextBytes;
 const estimatedInput = base
-  + normalizedInput.opaqueInputBytes
-  + 4 * normalizedInput.messageCount
+  + requestData.opaqueInputBytes
+  + 4 * requestData.messageCount
   + 3;
 ```
 
@@ -299,14 +318,31 @@ request では、`inputBytes` は 120,000 です。大入力経路の `base` は
 bytes は式の後半で一度だけ加算します。したがって、opaque bytes を 120,000 の `base` に
 含めたうえで再度加算する実装は誤りです。
 
-ここで `profiledThresholdBytes` は実測で決定する設定値です。`exactEstimate` は既存の
-`o200k_base` 推定処理を表します。実装時は `normalizedInput.opaqueInputBytes` を
-そのまま推定関数へ渡し、`inputBytes` 全体を base として再度加算しないでください。
+ここで `BPE_MAX_INPUT_BYTES` は実測で決定する設定値です。`exactEstimate` は既存の
+`o200k_base` 推定処理を表します。実装時は `requestData.opaqueInputBytes` をそのまま推定式へ渡し、
+`requestData.inputBytes` 全体を base として再度加算しないでください。
+この設計では cutoff の判定には normalized total bytes である `requestData.inputBytes` を使えますが、
+byte-based fallback の `base` には必ず `inputTextBytes` だけを使います。`inputBytes` はすでに
+`opaqueInputBytes` を含むため、`inputBytes` を `base` にして opaque bytes を加算する実装は禁止です。
 `NormalizedRequest` の invariant は、`inputBytes` が `inputText` の UTF-8 byte 数と
 `opaqueInputBytes` の合計であることです。このため `inputTextBytes` は上記の差分で
 求め、`opaqueInputBytes` は推定式で一度だけ加算します。この疑似コードはそのまま
 貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上防止を含む設計を示して
 います。
+
+#### 追加候補のテスト方針
+
+`packages/shared/test/estimate.test.ts` などの推定テストでは、少なくとも次を固定します。
+
+- `requestData.inputBytes < BPE_MAX_INPUT_BYTES` の cutoff 前では `encoding.encode()` が実行される。
+- `MAX_INPUT_BYTES` 未満でも `requestData.inputBytes >= BPE_MAX_INPUT_BYTES` の cutoff 後では
+  `encoding.encode()` が実行されず、byte-based estimation が選ばれる。
+- `opaqueInputBytes = 0` の Chat と、`opaqueInputBytes > 0` になる Responses の reasoning / tool
+  history の両方で、`inputBytes === inputTextBytes + opaqueInputBytes` の invariant を確認する。
+- cutoff 前後とも `opaqueInputBytes` がちょうど一度だけ加算され、`estimatedInput` が過小評価にも
+  opaque bytes の二重計上にもならないことを確認する。
+- `MAX_INPUT_BYTES` を引き下げる、または別の hard limit を追加する場合は、Issue #33 の合法な
+  Responses API payload（text / reasoning / tool history）が不用意に `413` にならない回帰テストを通す。
 
 この疑似コードが保証する対象は、`inputText` の tokenizer token 数と、既存の近似式に
 明示された `opaqueInputBytes` および message overhead だけです。これを OpenAI が返す
@@ -319,26 +355,39 @@ reservation 前に拒否します。
 
 ### 4.3 memory 超過が確認された場合の別 remediation
 
-`exceededMemory` が確認された場合、BPE bypass だけを解決策として扱いません。次の変更を
-別途 profiling し、必要な範囲で適用します。
+`exceededMemory` が確認された場合、BPE bypass だけを解決策として扱いません。`exceededMemory` は
+per-isolate の memory limit を超過した invocation outcome であり、実際の peak memory や allocation
+量そのものではありません。次の変更を別途 profiling し、必要な範囲で適用します。
 
-1. 既存の `MAX_INPUT_BYTES` および `MAX_NORMALIZED_INPUT_BYTES` を、対象 deployment の
-   実効 memory limit と負荷試験に基づく安全値へ引き下げます。
+1. 現行 proxy 経路で raw body と normalized input が共有する `MAX_INPUT_BYTES` の実効値を、
+   対象 deployment の memory limit と負荷試験に基づく安全値へ引き下げます。
+   `MAX_NORMALIZED_INPUT_BYTES` は現状では fallback 定数であり、独立した deployment 設定ではありません。
+   `MAX_INPUT_BYTES` が有効な場合にこの定数だけを変更しても、proxy 経路の normalized input 上限は
+   変わりません。raw body と normalized input を独立して tuning する場合は、新しい runtime 設定と
+   それを別々に `readJsonBody()` / `normalize*()` へ渡すコード変更として設計・検証します。
 2. `readJsonBody()` の chunks、結合後 `Uint8Array`、decoded string、JSON object が同時に
    生存する時間を測定し、body buffering と JSON parse の一時 allocation を削減します。
 3. `normalizeResponses()` の serialized text と `inputText` の構築が同時に保持される範囲を
    測定し、必要なら正規化処理を分割または早期拒否します。
+4. DevTools の memory profiling で、request stream buffering → 結合後の `Uint8Array` →
+   `TextDecoder` → `JSON.parse` → normalize / `join` → `TextEncoder` → `getEncoding()` 初期化
+   → `encoding.encode()` の各段階における peak allocation を比較します。
 
-memory outcome を確認できない場合は、これらを適用したことだけで 1102 解消とは判定せず、
+`exceededMemory` だけを確認できて実際の memory profile を取得できない場合は、これらを適用した
+ことだけで 1102 解消とは判定せず、
 原因を未確定のまま維持します。
 
 ### 4.4 効果と安全性の判定条件
 
-1. **CPU・メモリ負荷:** Metrics > Errors > Invocation Statuses、Analytics、または Logpush の
-   `Outcome` で `exceededCpu` / `exceededMemory` を確認し、Workers Logs または Trace Events
-   で入力サイズ別の CPU time / wall time を比較します。「0.1ms 未満」のような未測定の保証は
-   記載しません。
-2. **過小評価防止:** byte-based 経路が `inputText` の tokenizer token 数を下回らないことを、
+1. **CPU 負荷:** Metrics > Errors > Invocation Statuses、Analytics、または Logpush の `Outcome`
+   で `exceededCpu` を確認し、Workers Logs または Trace Events で CPU time / wall time を
+   入力サイズ別に比較します。CPU のどの処理が重いかは DevTools の CPU profiling で調べます。
+   「0.1ms 未満」のような未測定の保証は記載しません。
+2. **メモリ負荷:** `Outcome` の `exceededMemory` は per-isolate の memory limit breach の有無を
+   示す invocation outcome であり、memory 使用量や peak 値ではありません。実際の allocation や
+   peak の比較には DevTools の memory profiling / Memory snapshots を使い、CPU の CPU time / wall
+   time と混同しません。
+3. **過小評価防止:** byte-based 経路が `inputText` の tokenizer token 数を下回らないことを、
    deterministic fixture と代表的な反例を含むテストで確認します。ただし、これは request 全体の
    upstream `usage.input_tokens` を保証しません。Chat Completions と Responses の text-only、
    複数 message/item、tools、reasoning、`function_call`、`function_call_output` を含む代表的な
@@ -349,25 +398,25 @@ memory outcome を確認できない場合は、これらを適用したこと�
    serialization に対する安全な上限を保証できない shape は、追加 safety margin を適用するか
    reserve 前に拒否します。`settle()` は既に発生した過小予約を取り消せないため、この確認の代替には
    なりません。
-3. **Upstream 到達制御:** 推定または固定 byte 上限で拒否した場合、reserve と Upstream
+4. **Upstream 到達制御:** 推定または固定 byte 上限で拒否した場合、reserve と Upstream
    呼出が発生しないことを確認します。
-4. **正確なクォータ精算:** Upstream が `usage.total_tokens` を返した場合は、
+5. **正確なクォータ精算:** Upstream が `usage.total_tokens` を返した場合は、
    `stub.settle(requestId, usage.total_tokens)` で実使用量に精算します。ただし settle は
    既に発生した過小予約を取り消せないため、安全な予約上限の代替にはなりません。
-5. **raw body の境界:** `Content-Length` あり・なしの両方で、`MAX_INPUT_BYTES + 1` bytes の
+6. **raw body の境界:** `Content-Length` あり・なしの両方で、`MAX_INPUT_BYTES + 1` bytes の
    body が JSON parse、正規化、reserve、Upstream 呼出より前に `413` になることを確認します。
-6. **推定経路の境界:** BPE threshold の下側と上側で期待する経路を確認し、byte-based 経路で
+7. **推定経路の境界:** BPE threshold の下側と上側で期待する経路を確認し、byte-based 経路で
    `estimatedInput >= inputText の tokenizer tokens` が維持されることを検証します。さらに
    plain text、複数 message、text part、large tool schema、function call 履歴、reasoning
    summary、large encrypted content、およびこれらを組み合わせた Issue #33 相当 payload で、
    `estimated/reserved input >= upstream reported input_tokens` を検証します。`opaqueInputBytes`
    は一度だけ加算されることも確認します。
-7. **同時実行時の負荷:** 同一 payload を concurrency `1`、`2`、および想定ピーク並行数で
-   実行し、各ケースの `exceededCpu` / `exceededMemory`、CPU time、wall time を比較します。
+8. **同時実行時の負荷:** 同一 payload を concurrency `1`、`2`、および想定ピーク並行数で
+   実行し、各ケースの `exceededCpu` / `exceededMemory`、CPU time、wall time、memory profile を比較します。
    単発で threshold を決めず、threshold 未満の入力を複数同時に BPE へ通す現行順序での
    合算負荷も評価します。必要に応じて BPE 前 admission/concurrency control を導入し、
    導入前後で同じ測定を再実施します。
-8. **canary の invocation outcome:** 同程度の大規模入力を canary で実行し、
+9. **canary の invocation outcome:** 同程度の大規模入力を canary で実行し、
    `exceededCpu` / `exceededMemory` のいずれにもならないことを確認します。CPU 原因と memory
    原因を区別できない場合、「解決済み」と判定しません。
 
@@ -384,26 +433,34 @@ memory outcome を確認できない場合は、これらを適用したこと�
    deployment の Worker 設定で実効 `limits.cpu_ms` を確認し、プラン変更だけで解決した
    と判断せず、profiling と入力制限を併用します。
 3. **観測データの保存:** request ID、入力 byte 数、正規化後 byte 数、推定値、CPU time、
-   memory outcome、Upstream 到達有無を保存します。認証素材や入力本文はログに保存しません。
+   wall time、invocation outcome（`exceededCpu` / `exceededMemory`）、Upstream 到達有無を保存します。
+   `exceededMemory` は memory 使用量ではないため、実測値として扱いません。認証素材や入力本文は
+   ログに保存しません。
 
 ### 5.1 追加調査が必要な項目
 
-- Metrics > Errors > Invocation Statuses、Analytics、または Logpush の `Outcome` で
-  `exceededCpu` と `exceededMemory` を確認する。Workers Logs では CPU time / wall time を確認する。
+- **CPU:** Metrics > Errors > Invocation Statuses、Analytics、または Logpush の `Outcome` で
+  `exceededCpu` を確認し、Workers Logs または Trace Events で CPU time / wall time を取得する。
+  CPU の負荷箇所は DevTools の CPU profiling で確認する。
+- **メモリ:** `Outcome` の `exceededMemory` を memory limit breach の有無として確認する。
+  これは memory 使用量・peak 値ではないため、実際の allocation や peak の比較には DevTools の
+  memory profiling / Memory snapshots を使う。本番の実メモリピークをこの outcome だけから推定せず、
+  memory profile を取得できない場合は memory 原因を未確定のまま維持する。
 - 障害時の deployment/version ID または commit SHA、Workers プラン、実効
   `limits.cpu_ms`、実効 memory limit を取得する。取得できない場合は「取得不能」と
   記録する。
-- Workers Logs または Trace Events で CPU time と wall time を取得する。Outcome と
-  CPU time / wall time のいずれかを確認できない場合は原因を未確定のまま維持する。
 - 実際の request body byte 数、正規化後の `inputText` byte 数、
   `opaqueInputBytes`、および `inputBytes` の関係を比較する。
 - 障害発生時の raw request body に適用された `MAX_INPUT_BYTES` 実値と、74,000-token
   リクエストの raw request bytes を比較し、既存の 413 防御の対象だったかを記録から確認する。
-- `getEncoding()` 初期化、JSON parse、正規化、BPE、Durable Object RPC を分けて CPU
-  profiling する。
+- 同一 payload について、request stream buffering → 結合後の `Uint8Array` → `TextDecoder` →
+  `JSON.parse` → normalize / `join` → `TextEncoder` → `getEncoding()` 初期化 → `encoding.encode()`
+  → Durable Object RPC を処理段階ごとに分け、CPU profiling と memory profiling の両方を行う。
+  BPE を無効化した比較ケースも用意し、推定処理以外の allocation と CPU 負荷を切り分ける。
 - 同一 payload を concurrency `1`、`2`、想定ピーク並行数で canary 実行し、BPE 前の
-  admission/concurrency control が必要かを `exceededCpu` / `exceededMemory`、CPU time、wall time
-  で判定する。現行の `MAX_IN_FLIGHT_REQUESTS` は `acquireInFlight()` より前の BPE を保護しない。
+  admission/concurrency control が必要かを `exceededCpu` / `exceededMemory`、CPU time、wall time、
+  memory profile で判定する。現行の `MAX_IN_FLIGHT_REQUESTS` は `acquireInFlight()` より前の BPE を
+  保護しないため、設定値 `1` と `2` の比較も行う。
 - canary 環境で大規模入力を送信し、Error 1102 が再現するか確認する。
 
 ### 5.2 参照資料
