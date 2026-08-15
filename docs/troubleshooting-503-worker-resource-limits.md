@@ -143,11 +143,17 @@ OCTG の中核設計原則は **意図しない課金の防止（Zero Unexpected
 
 `Math.ceil(UTF8Bytes / 2)` は安全な上限ではありません。実際の `o200k_base` で、
 20,000 byte の printable input が 14,846 tokens となる一方、同じ入力の `/ 2` 推定は
-10,000 tokens となる反例を確認しています。
+10,000 tokens となる反例を確認しています。UTF-8 byte 数を使う場合も、まず
+`inputText` そのものの `o200k_base` token 数に対する上限として扱います。
 
-したがって、巨大入力では `/ 2` のような比率推定を使いません。正規化済み入力の
-UTF-8 byte 数を保守的な上限として扱うか、安全性を証明できない入力を reserve 前に
-`413 Request Entity Too Large` として拒否します。
+したがって、巨大入力では `/ 2` のような比率推定を使いません。正規化済みの
+`inputText` の UTF-8 byte 数を、その text の tokenizer token 数に対する保守的な上限として
+扱うか、安全性を証明できない入力を reserve 前に `413 Request Entity Too Large` として拒否します。
+ただし、この関係だけでは Responses API の item 構造、message overhead、tools、reasoning、
+その他の upstream 固有形式を含む**request 全体の `usage.input_tokens` の上限は保証しません**。
+request 全体を fail-closed に予約するには、受理する payload 形状ごとの構造 overhead を別途
+保守的に加算するか、raw request bytes を request 全体の上限として使えることを検証するか、
+検証できない structured payload を拒否します。
 
 byte 上限による拒否は新規に追加する仕組みではありません。対象 proxy endpoint の
 `handleProxy()` は既に `MAX_INPUT_BYTES` を `readJsonBody()` に渡し、raw JSON body の
@@ -188,8 +194,8 @@ profiling に基づいて既存設定を引き下げます。
 
 1. 正規化済み入力の UTF-8 byte 数を算出します。
 2. 小さい入力は従来どおり `o200k_base` で推定します。
-3. profiling で決めた閾値以上の入力は BPE を実行せず、入力テキストの byte 数を
-   input token の保守的な上限として使います。
+3. profiling で決めた閾値以上の入力は BPE を実行せず、`inputText` の byte 数を
+   その text の tokenizer token 数に対する保守的な上限として使います。
 4. 現行の `NormalizedRequest.inputBytes` は `inputText` と `opaqueInputBytes` の合計
    なので、text 用 byte 数は `inputBytes - opaqueInputBytes` として求めます。
    `opaqueInputBytes` は推定式で一度だけ加算します。
@@ -220,6 +226,15 @@ const estimatedInput = base
 貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上防止を含む設計を示して
 います。
 
+この疑似コードが保証する対象は、`inputText` の tokenizer token 数と、既存の近似式に
+明示された `opaqueInputBytes` および message overhead だけです。これを OpenAI が返す
+request 全体の `usage.input_tokens` の証明済み upper bound と解釈してはいけません。
+Responses API の `function_call` / `function_call_output`、tool schema、reasoning の
+`summary` / `encrypted_content`、多数の structured item を受理する場合は、各構造を
+upstream の usage と比較する differential test を実施し、`estimated/reserved input >=
+upstream reported input_tokens` を確認できた形状だけを許可します。確認できない形状は
+reservation 前に拒否します。
+
 ### 4.3 memory 超過が確認された場合の別 remediation
 
 `exceededMemory` が確認された場合、BPE bypass だけを解決策として扱いません。次の変更を
@@ -240,9 +255,11 @@ memory outcome を確認できない場合は、これらを適用したこと�
 1. **CPU・メモリ負荷:** Workers Logs または Trace Events で、入力サイズ別の CPU time、
    memory outcome、wall time を比較します。「0.1ms 未満」のような未測定の保証は記載
    しません。
-2. **過小評価防止:** byte-based 経路が対象入力の token 数を下回らないことを、tokenizer
-   の仕様と代表的な反例を含むテストで確認します。証明できない入力形式は reserve 前に
-   拒否します。
+2. **過小評価防止:** byte-based 経路が `inputText` の tokenizer token 数を下回らないことを、
+   tokenizer の仕様と代表的な反例を含むテストで確認します。これは request 全体の
+   upstream `usage.input_tokens` を自動的に保証するものではありません。structured payload
+   は構造 overhead を含めた differential test を通過した形状だけを許可し、証明できない
+   入力形式は reserve 前に拒否します。
 3. **Upstream 到達制御:** 推定または固定 byte 上限で拒否した場合、reserve と Upstream
    呼出が発生しないことを確認します。
 4. **正確なクォータ精算:** Upstream が `usage.total_tokens` を返した場合は、
@@ -251,8 +268,11 @@ memory outcome を確認できない場合は、これらを適用したこと�
 5. **raw body の境界:** `MAX_INPUT_BYTES + 1` bytes の body が JSON parse、正規化、
    reserve、Upstream 呼出より前に `413` になることを確認します。
 6. **推定経路の境界:** BPE threshold の下側と上側で期待する経路を確認し、byte-based 経路で
-   `estimatedInput >= actual input tokens` が維持されることを検証します。`opaqueInputBytes` は
-   一度だけ加算されることも確認します。
+   `estimatedInput >= inputText の tokenizer tokens` が維持されることを検証します。さらに
+   plain text、複数 message、text part、large tool schema、function call 履歴、reasoning
+   summary、large encrypted content、およびこれらを組み合わせた Issue #33 相当 payload で、
+   `estimated/reserved input >= upstream reported input_tokens` を検証します。`opaqueInputBytes`
+   は一度だけ加算されることも確認します。
 7. **canary の invocation outcome:** 同程度の大規模入力を canary で実行し、
    `exceededCpu` / `exceededMemory` のいずれにもならないことを確認します。CPU 原因と memory
    原因を区別できない場合、「解決済み」と判定しません。
