@@ -67,6 +67,7 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "You are helpful.\nHello  world",
+        inputTextBytes: 29,
         inputBytes: 29,
         messageCount: 2,
         maxOutputTokens: 100,
@@ -92,6 +93,7 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "hi",
+        inputTextBytes: 2,
         inputBytes: 2,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -159,6 +161,7 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "hi",
+        inputTextBytes: 2,
         inputBytes: 2,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -181,6 +184,23 @@ describe("normalizeChatCompletions", () => {
 });
 
 describe("normalizeResponses", () => {
+  it("separates visible text bytes from opaque reasoning bytes", () => {
+    // Given: visible summary text and opaque encrypted reasoning state.
+    const body = {
+      model: "gpt-5",
+      input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "x" }], encrypted_content: "秘密" }],
+    };
+
+    // When: the Responses request is normalized.
+    const result = normalizeResponses(body);
+
+    // Then: total input bytes are the text bytes plus opaque bytes, exposed separately.
+    expect(result).toMatchObject({
+      ok: true,
+      value: { inputTextBytes: 1, inputBytes: 7, opaqueInputBytes: 6 },
+    });
+  });
+
   it("includes opaque Responses bytes in the normalized input byte count", () => {
     // Given: one UTF-8 text byte plus six opaque UTF-8 bytes for encrypted content.
     const body = {
@@ -221,6 +241,7 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hello",
+        inputTextBytes: 5,
         inputBytes: 5,
         messageCount: 1,
         maxOutputTokens: 50,
@@ -238,6 +259,7 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "function_call",
+        inputTextBytes: 13,
         inputBytes: 13,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -255,6 +277,7 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hi\n[]",
+        inputTextBytes: 5,
         inputBytes: 5,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -336,6 +359,7 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hi\ncall_id-with-a-long-unique-value-1234567890\nlookup\n{}",
+        inputTextBytes: 56,
         inputBytes: 56,
         messageCount: 2,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
