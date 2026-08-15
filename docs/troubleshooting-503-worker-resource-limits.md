@@ -55,7 +55,7 @@ Worker に適用された上限として扱わないでください。
 | Workers プラン | 未取得 | 対象 Worker のアカウント設定で確認する |
 | 実効 `limits.cpu_ms` | 未取得 | `wrangler.jsonc` に明示設定がないことだけでは実効値を確定できない |
 | 実効 memory limit | 未取得 | Error 1102 は memory 制限超過でも発生し得るため、CPU と別に確認する |
-| `MAX_INPUT_BYTES`（現ブランチ設定） | `1048576`（1 MiB） | 障害時 deployment の設定が同じか別途確認する |
+| `MAX_INPUT_BYTES`（現ブランチの raw request body 上限） | `1048576`（1 MiB） | 障害時 deployment の設定が同じか別途確認する |
 | `MAX_IN_FLIGHT_REQUESTS`（現ブランチ設定） | `2` | 障害時 deployment の設定が同じか別途確認する |
 | `compatibility_date`（現ブランチ設定） | `2026-08-01` | 障害時 deployment の設定が同じか別途確認する |
 | インシデント時間帯 | 2026-08-16 02:16:29〜02:16:47 JST | ログに記録された観測範囲 |
@@ -146,22 +146,39 @@ OCTG の中核設計原則は **意図しない課金の防止（Zero Unexpected
 10,000 tokens となる反例を確認しています。
 
 したがって、巨大入力では `/ 2` のような比率推定を使いません。正規化済み入力の
-UTF-8 byte 数を保守的な上限として扱うか、既存の入力 byte 上限を超えた入力を reserve
-前に `413 Request Entity Too Large` として拒否します。
+UTF-8 byte 数を保守的な上限として扱うか、安全性を証明できない入力を reserve 前に
+`413 Request Entity Too Large` として拒否します。
 
-入力 byte 上限は新規に追加する仕組みではありません。対象 proxy endpoint の
-`handleProxy()` は既に `MAX_INPUT_BYTES` を `readJsonBody()` に渡し、`Content-Length` と
-ストリーミング実測値を JSON parse 前に検査します。超過時は HTTP 413 を返し、D1 監査行の
-登録、quota reserve、Upstream 呼出の前に処理を終了します。正規化処理も正規化後の byte
-数を検査します。まず障害発生時の `MAX_INPUT_BYTES` 実値と、74,000-token リクエストの
-raw body byte 数を確認し、必要な場合だけ既存設定を引き下げます。
-なお、正規化後の既定上限は `MAX_NORMALIZED_INPUT_BYTES = 1_048_576` です。
+byte 上限による拒否は新規に追加する仕組みではありません。対象 proxy endpoint の
+`handleProxy()` は既に `MAX_INPUT_BYTES` を `readJsonBody()` に渡し、raw JSON body の
+`Content-Length` とストリーミング実測値を JSON parse 前に検査します。超過時は HTTP 413 を
+返し、正規化、D1 監査行の登録、quota reserve、Upstream 呼出の前に処理を終了します。
+さらに正規化後の入力は、別の `MAX_NORMALIZED_INPUT_BYTES`（既定値
+`1_048_576` bytes）で検査されます。前者は raw body 全体、後者は抽出した `inputText` と
+Responses API の `opaqueInputBytes` を測るため、両者を同一の byte 数として扱ってはいけません。
+まず障害発生時の deployment に適用された `MAX_INPUT_BYTES` と、74,000-token リクエストの
+raw body byte 数を比較し、既存の 413 防御の対象だったかを確認します。必要な場合だけ、
+profiling に基づいて既存設定を引き下げます。
 
 ---
 
 ## 4. 具体的な解決策（Solution）
 
-### 4.1 トークン推定ロジックの改善
+### 4.1 既存状態と今回の追加変更
+
+現在の実装には、次の二段階の hard limit が既にあります。
+
+1. `MAX_INPUT_BYTES`（現ブランチの既定値は 1 MiB）は raw request body に対する上限です。
+   `readJsonBody()` が `Content-Length` またはストリーム実測値を JSON parse 前に検査し、超過時は
+   `413` を返します。
+2. `MAX_NORMALIZED_INPUT_BYTES`（既定値は 1 MiB）は正規化後の semantic input に対する上限です。
+   `normalizeChatCompletions()` と `normalizeResponses()` が検査し、超過時は `413` を返します。
+
+したがって、「固定 byte 上限を追加する」こと自体は今回の解決策ではありません。今回新たに
+決めるべきなのは、障害時の invocation outcome を確認したうえで、既存 limit を調整するか、
+トークン推定の経路を変更するかです。
+
+### 4.2 CPU 超過が確認された場合のトークン推定改善
 
 対象ファイルは [`packages/shared/src/estimate.ts`](../packages/shared/src/estimate.ts)
 です。閾値は任意の文字数ではなく、Workers の CPU profiling 結果を基に UTF-8 byte
@@ -176,8 +193,9 @@ raw body byte 数を確認し、必要な場合だけ既存設定を引き下げ
 4. 現行の `NormalizedRequest.inputBytes` は `inputText` と `opaqueInputBytes` の合計
    なので、text 用 byte 数は `inputBytes - opaqueInputBytes` として求めます。
    `opaqueInputBytes` は推定式で一度だけ加算します。
-5. 既存の `MAX_INPUT_BYTES` と `readJsonBody()` を一次防御として利用します。profiling
-   の結果、現在値が大きすぎる場合だけ `MAX_INPUT_BYTES` を引き下げます。
+5. 既存の `MAX_INPUT_BYTES` と `readJsonBody()` は raw request body に対する一次防御として
+   そのまま利用します。これは BPE の閾値や正規化後入力の上限とは別の設定です。profiling の
+   結果、raw body を早期拒否する必要がある場合に限り、既存の `MAX_INPUT_BYTES` を引き下げます。
 
 疑似コードは次のとおりです。
 
@@ -202,7 +220,22 @@ const estimatedInput = base
 貼り付ける実装ではなく、既存の型での byte 数の算出と二重計上防止を含む設計を示して
 います。
 
-### 4.2 効果と安全性の判定条件
+### 4.3 memory 超過が確認された場合の別 remediation
+
+`exceededMemory` が確認された場合、BPE bypass だけを解決策として扱いません。次の変更を
+別途 profiling し、必要な範囲で適用します。
+
+1. 既存の `MAX_INPUT_BYTES` および `MAX_NORMALIZED_INPUT_BYTES` を、対象 deployment の
+   実効 memory limit と負荷試験に基づく安全値へ引き下げます。
+2. `readJsonBody()` の chunks、結合後 `Uint8Array`、decoded string、JSON object が同時に
+   生存する時間を測定し、body buffering と JSON parse の一時 allocation を削減します。
+3. `normalizeResponses()` の serialized text と `inputText` の構築が同時に保持される範囲を
+   測定し、必要なら正規化処理を分割または早期拒否します。
+
+memory outcome を確認できない場合は、これらを適用したことだけで 1102 解消とは判定せず、
+原因を未確定のまま維持します。
+
+### 4.4 効果と安全性の判定条件
 
 1. **CPU・メモリ負荷:** Workers Logs または Trace Events で、入力サイズ別の CPU time、
    memory outcome、wall time を比較します。「0.1ms 未満」のような未測定の保証は記載
@@ -215,6 +248,14 @@ const estimatedInput = base
 4. **正確なクォータ精算:** Upstream が `usage.total_tokens` を返した場合は、
    `stub.settle(requestId, usage.total_tokens)` で実使用量に精算します。ただし settle は
    既に発生した過小予約を取り消せないため、安全な予約上限の代替にはなりません。
+5. **raw body の境界:** `MAX_INPUT_BYTES + 1` bytes の body が JSON parse、正規化、
+   reserve、Upstream 呼出より前に `413` になることを確認します。
+6. **推定経路の境界:** BPE threshold の下側と上側で期待する経路を確認し、byte-based 経路で
+   `estimatedInput >= actual input tokens` が維持されることを検証します。`opaqueInputBytes` は
+   一度だけ加算されることも確認します。
+7. **canary の invocation outcome:** 同程度の大規模入力を canary で実行し、
+   `exceededCpu` / `exceededMemory` のいずれにもならないことを確認します。CPU 原因と memory
+   原因を区別できない場合、「解決済み」と判定しません。
 
 ---
 
@@ -241,8 +282,8 @@ const estimatedInput = base
   wall time を取得する。どちらも確認できない場合は原因を未確定のまま維持する。
 - 実際の request body byte 数、正規化後の `inputText` byte 数、
   `opaqueInputBytes`、および `inputBytes` の関係を比較する。
-- 障害発生時の `MAX_INPUT_BYTES` 実値と、74,000-token リクエストの raw request bytes
-  を記録から確認する。
+- 障害発生時の raw request body に適用された `MAX_INPUT_BYTES` 実値と、74,000-token
+  リクエストの raw request bytes を比較し、既存の 413 防御の対象だったかを記録から確認する。
 - `getEncoding()` 初期化、JSON parse、正規化、BPE、Durable Object RPC を分けて CPU
   profiling する。
 - canary 環境で大規模入力を送信し、Error 1102 が再現するか確認する。
