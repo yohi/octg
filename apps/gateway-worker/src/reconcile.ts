@@ -56,11 +56,11 @@ export async function runReconciliation(env: Env, now: Date): Promise<Reconcilia
     const pending = await stub.getReconcileSnapshot();
     const localTokens = local?.total ?? 0; const usage = await fetchUsageWithRetry(env, day); const registry = await loadRegistry(env); const openaiTokens = [...registry.entries()].filter(([, entry]) => entry.complimentary_pool === pool).reduce((sum, [model]) => sum + (usage.get(model) ?? 0), 0); const difference = openaiTokens - localTokens;
     const uncertainRequests = pending.requests.filter((row) => row.state === "uncertain");
-    const hasReserveUnknown = uncertainRequests.some((row) => row.uncertaintyOrigin === "reserve_unknown");
-    const uncertainTotal = uncertainRequests.reduce((sum, row) => sum + row.reservedTokens, 0);
+    const reconcilableUncertainRequests = uncertainRequests.filter((row) => row.uncertaintyOrigin !== "reserve_unknown");
+    const uncertainTotal = reconcilableUncertainRequests.reduce((sum, row) => sum + row.reservedTokens, 0);
     let matchedUncertainUsage = false;
-    if (uncertainRequests.length > 0 && !hasReserveUnknown && difference === uncertainTotal) {
-      for (const row of uncertainRequests) { const result = await stub.reconcileRequest(row.requestId, "consumed"); if (result.applied) await env.DB.prepare("UPDATE requests SET status = 'completed', completed_at = ? WHERE request_id = ?").bind(new Date().toISOString(), row.requestId).run(); }
+    if (reconcilableUncertainRequests.length > 0 && difference === uncertainTotal) {
+      for (const row of reconcilableUncertainRequests) { const result = await stub.reconcileRequest(row.requestId, "consumed"); if (result.applied) await env.DB.prepare("UPDATE requests SET status = 'completed', completed_at = ? WHERE request_id = ?").bind(new Date().toISOString(), row.requestId).run(); }
       matchedUncertainUsage = true;
     }
     const remainingPending = (await stub.getReconcileSnapshot()).requests;
