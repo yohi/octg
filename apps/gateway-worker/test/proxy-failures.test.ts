@@ -85,6 +85,21 @@ describe("proxy failure paths", () => {
     expect(after.reservedTokens).toBe(before.reservedTokens);
   });
 
+  it("propagates a Worker-generated ULID request ID", async () => {
+    // Given: an unauthenticated request sent through the Worker entrypoint.
+    // When: the Worker rejects the request before proxy processing.
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+
+    // Then: every response representation uses the same Worker-generated ULID request ID.
+    const requestId = response.headers.get("X-OCTG-Request-Id");
+    const body = await response.json() as { request_id: string };
+    expect(requestId).toMatch(/^req_[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(body.request_id).toBe(requestId);
+  });
+
   it("rejects a saturated pool before upstream contact without consuming quota", async () => {
     const controller = stub();
     expect(await controller.acquireInFlight("occupied-one", 2)).toEqual({ ok: true });

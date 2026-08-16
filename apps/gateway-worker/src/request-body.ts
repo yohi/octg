@@ -73,7 +73,7 @@ export async function readJsonBody(
     if (chunk.done) break;
     length += chunk.value.byteLength;
     if (length > maxBytes) {
-      await reader.cancel();
+      await reader.cancel().catch(() => undefined);
       return {
         ok: false,
         reason: "too_large",

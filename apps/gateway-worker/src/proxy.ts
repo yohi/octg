@@ -1,4 +1,3 @@
-import { ulid } from "ulid";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -172,7 +171,7 @@ export async function handleProxy(
   env: Env,
   ctx: ExecutionContext,
   endpoint: "chat" | "responses",
-  requestId = `req_${ulid()}`,
+  requestId: string,
 ): Promise<Response> {
   let auditInserted: Promise<boolean> | undefined;
   let quotaStub: DurableObjectStub<QuotaController> | undefined;

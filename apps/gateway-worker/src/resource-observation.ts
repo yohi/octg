@@ -51,5 +51,24 @@ export type ResourceStageEvent =
     });
 
 export function emitResourceStage(event: ResourceStageEvent): void {
-  console.info(event);
+  const runtimeEvent = {
+    event: event.event,
+    requestId: event.requestId,
+    revisionId: event.revisionId,
+    stage: event.stage,
+    phase: event.phase,
+    ...(event.route === undefined ? {} : { route: event.route }),
+    ...(event.rawBodyBytes === undefined ? {} : { rawBodyBytes: event.rawBodyBytes }),
+    ...(event.rawBodyBytesSource === undefined ? {} : { rawBodyBytesSource: event.rawBodyBytesSource }),
+    ...(event.rawBodyTruncated === undefined ? {} : { rawBodyTruncated: event.rawBodyTruncated }),
+    ...(event.inputBytes === undefined ? {} : { inputBytes: event.inputBytes }),
+    ...(event.inputTextBytes === undefined ? {} : { inputTextBytes: event.inputTextBytes }),
+    ...(event.opaqueInputBytes === undefined ? {} : { opaqueInputBytes: event.opaqueInputBytes }),
+    ...(event.estimationPath === undefined ? {} : { estimationPath: event.estimationPath }),
+    ...(event.concurrency === undefined ? {} : { concurrency: event.concurrency }),
+    ...(event.quotaReserved === undefined ? {} : { quotaReserved: event.quotaReserved }),
+    ...(event.upstreamReached === undefined ? {} : { upstreamReached: event.upstreamReached }),
+    ...(event.phase === "finish" ? { durationMs: event.durationMs, outcome: event.outcome } : {}),
+  };
+  console.info(runtimeEvent);
 }

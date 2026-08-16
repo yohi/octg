@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   emitResourceStage,
   type ResourceStageEvent,
@@ -13,8 +13,37 @@ const baseEvent = {
 };
 
 describe("resource stage event contract", () => {
-  it("emits only the typed primitive event object", () => {
-    const event: ResourceStageEvent = {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("emits only allowlisted primitive event fields", () => {
+    const event = Object.assign(
+      {
+        ...baseEvent,
+        phase: "finish" as const,
+        durationMs: 12,
+        outcome: "success" as const,
+        inputBytes: 120,
+        inputTextBytes: 100,
+        opaqueInputBytes: 20,
+        estimationPath: "exact_bpe" as const,
+        quotaReserved: true,
+        upstreamReached: false,
+      } satisfies ResourceStageEvent,
+      {
+        payload: "secret payload",
+        headers: { authorization: "Bearer secret" },
+        authenticationMaterial: "secret key",
+        exception: "secret exception",
+        extra: "must not be logged",
+      },
+    );
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitResourceStage(event);
+
+    expect(info).toHaveBeenCalledWith({
       ...baseEvent,
       phase: "finish",
       durationMs: 12,
@@ -25,13 +54,7 @@ describe("resource stage event contract", () => {
       estimationPath: "exact_bpe",
       quotaReserved: true,
       upstreamReached: false,
-    };
-    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
-
-    emitResourceStage(event);
-
-    expect(info).toHaveBeenCalledWith(event);
-    expect(JSON.stringify(info.mock.calls[0]?.[0])).not.toContain("payload");
+    });
   });
 
   it("allows a start event without finish-only fields", () => {
