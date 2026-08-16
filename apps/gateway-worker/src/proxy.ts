@@ -28,23 +28,38 @@ import {
   type QuotaView,
 } from "@octg/shared";
 import { authenticate } from "./auth";
-import { completeRequestRow, insertRequestRow, setReservedTokens } from "./db";
+import {
+  completeRequestAuditBestEffort,
+  setReservedTokens,
+  startRequestAuditBestEffort,
+  type RequestCompleteFields,
+} from "./db";
 import { loadPolicy, loadRegistry } from "./policy";
 import { buildUpstreamBody, callUpstream, UpstreamConfigError } from "./upstream";
+import { reserveFailClosed, type ReserveOutcome } from "./quota-reservation";
+import type { QuotaController } from "@octg/quota-controller";
 import type { Env } from "./index";
 import { readJsonBody } from "./request-body";
+import {
+  emitResourceStage,
+  type ResourceStage,
+  type ResourceStageOutcome,
+  type ResourceStageRoute,
+} from "./resource-observation";
 import { proxyStream } from "./stream";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
-type Completion = Parameters<typeof completeRequestRow>[2];
+type Completion = RequestCompleteFields;
 
-function completeAfterInsert(
-  inserted: Promise<void>,
+function completeAudit(
+  ctx: ExecutionContext,
   env: Env,
   requestId: string,
+  inserted: Promise<boolean> | undefined,
   fields: Completion,
-): Promise<void> {
-  return inserted.then(() => completeRequestRow(env, requestId, fields));
+): void {
+  if (!inserted) return;
+  ctx.waitUntil(completeRequestAuditBestEffort(env, requestId, fields, inserted));
 }
 
 function upstreamResponse(
@@ -81,45 +96,193 @@ export function resolveMaxInFlightRequests(configured: string | undefined): numb
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 2;
 }
 
+type ResourceStageFields = {
+  readonly route?: ResourceStageRoute;
+  readonly rawBodyBytes?: number;
+  readonly rawBodyBytesSource?: "measured" | "declared_content_length" | "measured_partial";
+  readonly rawBodyTruncated?: boolean;
+  readonly inputBytes?: number;
+  readonly inputTextBytes?: number;
+  readonly opaqueInputBytes?: number;
+  readonly estimationPath?: "exact_bpe" | "conservative_bytes";
+  readonly concurrency?: number;
+  readonly quotaReserved?: boolean;
+  readonly upstreamReached?: boolean;
+};
+
+function revisionIdOf(env: Env): string {
+  const revisionId = env.CF_VERSION_METADATA?.id;
+  return typeof revisionId === "string" && revisionId.length > 0 ? revisionId : "local";
+}
+
+function startResourceStage(env: Env, requestId: string, stage: ResourceStage): number {
+  const startedAt = performance.now();
+  emitResourceStage({
+    event: "octg.resource_stage",
+    requestId,
+    revisionId: revisionIdOf(env),
+    stage,
+    phase: "start",
+  });
+  return startedAt;
+}
+
+function finishResourceStage(
+  env: Env,
+  requestId: string,
+  stage: ResourceStage,
+  startedAt: number,
+  outcome: ResourceStageOutcome,
+  fields: ResourceStageFields = {},
+  measuredDurationMs?: number,
+): void {
+  const definedFields: ResourceStageFields = {
+    ...(fields.route === undefined ? {} : { route: fields.route }),
+    ...(fields.rawBodyBytes === undefined ? {} : { rawBodyBytes: fields.rawBodyBytes }),
+    ...(fields.rawBodyBytesSource === undefined ? {} : { rawBodyBytesSource: fields.rawBodyBytesSource }),
+    ...(fields.rawBodyTruncated === undefined ? {} : { rawBodyTruncated: fields.rawBodyTruncated }),
+    ...(fields.inputBytes === undefined ? {} : { inputBytes: fields.inputBytes }),
+    ...(fields.inputTextBytes === undefined ? {} : { inputTextBytes: fields.inputTextBytes }),
+    ...(fields.opaqueInputBytes === undefined ? {} : { opaqueInputBytes: fields.opaqueInputBytes }),
+    ...(fields.estimationPath === undefined ? {} : { estimationPath: fields.estimationPath }),
+    ...(fields.concurrency === undefined ? {} : { concurrency: fields.concurrency }),
+    ...(fields.quotaReserved === undefined ? {} : { quotaReserved: fields.quotaReserved }),
+    ...(fields.upstreamReached === undefined ? {} : { upstreamReached: fields.upstreamReached }),
+  };
+  emitResourceStage({
+    event: "octg.resource_stage",
+    requestId,
+    revisionId: revisionIdOf(env),
+    stage,
+    phase: "finish",
+    durationMs: Math.max(0, measuredDurationMs ?? performance.now() - startedAt),
+    outcome,
+    ...definedFields,
+  });
+}
+
+function routeForReserveFailure(reason: string): ResourceStageRoute {
+  return reason === "duplicate_idempotency_key"
+    ? "reject:duplicate_idempotency_key"
+    : "reject:complimentary_quota";
+}
+
 export async function handleProxy(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
   endpoint: "chat" | "responses",
+  requestId = `req_${ulid()}`,
 ): Promise<Response> {
-  const requestId = `req_${ulid()}`;
-  const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
-  const auth = await authenticate(request, env, requestId);
-  if (!("id" in auth)) return errorResponse(auth);
+  let auditInserted: Promise<boolean> | undefined;
+  let quotaStub: DurableObjectStub<QuotaController> | undefined;
+  let reservationState: "none" | "resolved" | "unknown" = "none";
+  let upstreamAttempted = false;
+  let upstreamReached = false;
+  let inFlightAcquired = false;
+  let reserveStageStartedAt: number | undefined;
+  let upstreamStageStartedAt: number | undefined;
 
-  const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
-  const parsedBody = await readJsonBody(request, maxInputBytes);
-  if (!parsedBody.ok) {
-    return errorResponse(parsedBody.reason === "too_large" ? errInputTooLarge(requestId) : errInvalidRequest(requestId));
-  }
-  const body = parsedBody.body;
-  const normalized = endpoint === "chat"
-    ? normalizeChatCompletions(body, maxInputBytes)
-    : normalizeResponses(body, maxInputBytes);
-  if (!normalized.ok) {
-    if (normalized.error === "input_too_large") return errorResponse(errInputTooLarge(requestId));
-    if (normalized.error === "non_text") return errorResponse(errNonTextInput(requestId));
-    if (normalized.error === "max_tokens_conflict") return errorResponse(errMaxTokensConflict(requestId));
-    return errorResponse(errInvalidRequest(requestId));
-  }
+  try {
+    const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
+    const auth = await authenticate(request, env, requestId);
+    if (!("id" in auth)) return errorResponse(auth);
 
-  const requestData = normalized.value;
-  const pool = classifyModel(requestData.model, await loadRegistry(env));
-  if (pool === "NONE") return errorResponse(errModelRequiresPaid(requestId));
-  const day = utcDayOf(new Date());
-  const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day)));
-  const policy = await loadPolicy(env, auth.id);
+    const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
+    const bodyReadStartedAt = startResourceStage(env, requestId, "body_read");
+    const parseStartedAt = startResourceStage(env, requestId, "parse");
+    let parsedBody;
+    try {
+      parsedBody = await readJsonBody(request, maxInputBytes);
+    } catch (error) {
+      finishResourceStage(env, requestId, "body_read", bodyReadStartedAt, "exception");
+      finishResourceStage(env, requestId, "parse", parseStartedAt, "exception");
+      throw error;
+    }
+    const bodyOutcome: ResourceStageOutcome = parsedBody.ok ? "success" : "rejected";
+    const bodyRoute = parsedBody.ok || parsedBody.reason !== "too_large"
+      ? undefined
+      : "reject:request_too_large";
+    const bodyFields: ResourceStageFields = {
+      route: bodyRoute,
+      rawBodyBytes: parsedBody.metrics.rawBodyBytes,
+      rawBodyBytesSource: parsedBody.metrics.rawBodyBytesSource,
+      rawBodyTruncated: parsedBody.metrics.truncated,
+    };
+    finishResourceStage(
+      env,
+      requestId,
+      "body_read",
+      bodyReadStartedAt,
+      bodyOutcome,
+      bodyFields,
+      parsedBody.metrics.bodyReadMs,
+    );
+    finishResourceStage(
+      env,
+      requestId,
+      "parse",
+      parseStartedAt,
+      bodyOutcome,
+      bodyFields,
+      parsedBody.metrics.parseMs,
+    );
+    if (!parsedBody.ok) {
+      return errorResponse(parsedBody.reason === "too_large" ? errInputTooLarge(requestId) : errInvalidRequest(requestId));
+    }
+    const body = parsedBody.body;
+    const normalizeStartedAt = startResourceStage(env, requestId, "normalize");
+    let normalized;
+    try {
+      normalized = endpoint === "chat"
+        ? normalizeChatCompletions(body, maxInputBytes)
+        : normalizeResponses(body, maxInputBytes);
+    } catch (error) {
+      finishResourceStage(env, requestId, "normalize", normalizeStartedAt, "exception");
+      throw error;
+    }
+    finishResourceStage(
+      env,
+      requestId,
+    "normalize",
+    normalizeStartedAt,
+    normalized.ok ? "success" : "rejected",
+    normalized.ok
+      ? {
+          inputBytes: normalized.value.inputBytes,
+          inputTextBytes: normalized.value.inputTextBytes,
+          opaqueInputBytes: normalized.value.opaqueInputBytes,
+        }
+      : {},
+  );
+    if (!normalized.ok) {
+      if (normalized.error === "input_too_large") return errorResponse(errInputTooLarge(requestId));
+      if (normalized.error === "non_text") return errorResponse(errNonTextInput(requestId));
+      if (normalized.error === "max_tokens_conflict") return errorResponse(errMaxTokensConflict(requestId));
+      return errorResponse(errInvalidRequest(requestId));
+    }
 
-  if (requestData.isToolUse && policy.toolsMode !== "ALLOW") {
-    return errorResponse(errModelNotAllowed(requestId, snapshotOf(await stub.getState())));
-  }
+    const requestData = normalized.value;
+    const pool = classifyModel(requestData.model, await loadRegistry(env));
+    if (pool === "NONE") return errorResponse(errModelRequiresPaid(requestId));
+    const day = utcDayOf(new Date());
+    const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day)));
+    quotaStub = stub;
+    const policy = await loadPolicy(env, auth.id);
 
-  const inserted = insertRequestRow(env, {
+    if (requestData.isToolUse && policy.toolsMode !== "ALLOW") {
+      const getStateStartedAt = startResourceStage(env, requestId, "quota_get_state");
+      try {
+        const state = await stub.getState();
+        finishResourceStage(env, requestId, "quota_get_state", getStateStartedAt, "success");
+        return errorResponse(errModelNotAllowed(requestId, snapshotOf(state)));
+      } catch (error) {
+        finishResourceStage(env, requestId, "quota_get_state", getStateStartedAt, "exception");
+        throw error;
+      }
+    }
+
+    auditInserted = startRequestAuditBestEffort(env, {
       requestId,
       utcDay: day,
       clientId: auth.id,
@@ -130,130 +293,308 @@ export async function handleProxy(
       reservedTokens: null,
     });
 
-  const before = await stub.getState();
-  const snapshot = snapshotOf(before);
-  const estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
-  const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
-  const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
-  if (upperBound > before.limit) {
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
-    return errorResponse(errRequestTooLarge(snapshot, requestId));
-  }
-  const output = decideOutput({
-    estimatedInput,
-    maxOutputTokens: requestData.maxOutputTokens,
-    margin,
-    remaining: before.remaining,
-    outputLimitMode: policy.outputLimitMode,
-  });
-  if (output.action === "reject") {
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
-    return errorResponse(errQuotaExceeded(snapshot, requestId));
-  }
-
-  const reservation = estimatedInput + output.maxOutputTokens + margin;
-  const reserved = await stub.reserve(requestId, reservation, upperBound, idempotencyKey, auth.id);
-  if (!reserved.ok) {
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
-    if (reserved.reason === "duplicate_idempotency_key") {
-      return errorResponse({
-        status: 409,
-        requestId,
-        quota: snapshot,
-        route: "reject:duplicate_idempotency_key",
-        body: {
-          error: {
-            message: "Duplicate Idempotency-Key.",
-            type: "invalid_request_error",
-            param: null,
-            code: "duplicate_idempotency_key",
-          },
-          request_id: requestId,
-        },
-      });
+    const getStateStartedAt = startResourceStage(env, requestId, "quota_get_state");
+    let before;
+    try {
+      before = await stub.getState();
+      finishResourceStage(env, requestId, "quota_get_state", getStateStartedAt, "success");
+    } catch (error) {
+      finishResourceStage(env, requestId, "quota_get_state", getStateStartedAt, "exception");
+      throw error;
     }
-    return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
-  }
-  ctx.waitUntil(inserted.then(() => setReservedTokens(env, requestId, reservation)).catch(() => undefined));
+    const snapshot = snapshotOf(before);
 
-  const lease = await stub.acquireInFlight(requestId, resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS));
-  if (!lease.ok) {
-    await stub.release(requestId);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
-    return errorResponse(errWorkerConcurrencyExceeded(snapshot, requestId));
-  }
+    const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
+    let estimatedInput: number;
+    try {
+      estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+      });
+    } catch (error) {
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+      });
+      throw error;
+    }
 
-  let upstream: Response;
-  try {
-    upstream = await callUpstream(
-      env,
-      endpoint === "chat" ? "/chat/completions" : "/responses",
-      buildUpstreamBody(endpoint, body as Record<string, unknown>, output.maxOutputTokens),
-      {
-        client_id: auth.id,
-        pool: toPoolLower(pool),
-        eligibility: "COMPLIMENTARY",
-        route: "free_shared",
-        request_id: requestId,
-      },
-      policy.cacheEnabled ? `octg:${auth.id}` : null,
-      idempotencyKey,
-    );
-  } catch (error) {
-    if (error instanceof UpstreamConfigError) {
-      await stub.release(requestId);
-      await stub.releaseInFlight(requestId);
-      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "failed", billingClass: "none" }));
+    const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
+    const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
+    if (upperBound > before.limit) {
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      return errorResponse(errRequestTooLarge(snapshot, requestId));
+    }
+    const output = decideOutput({
+      estimatedInput,
+      maxOutputTokens: requestData.maxOutputTokens,
+      margin,
+      remaining: before.remaining,
+      outputLimitMode: policy.outputLimitMode,
+    });
+    if (output.action === "reject") {
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      return errorResponse(errQuotaExceeded(snapshot, requestId));
+    }
+
+    const reservation = estimatedInput + output.maxOutputTokens + margin;
+    const reserveStartedAt = startResourceStage(env, requestId, "quota_reserve");
+    reserveStageStartedAt = reserveStartedAt;
+    let reserveOutcome: ReserveOutcome;
+    try {
+      reserveOutcome = await reserveFailClosed(
+        (sameRequestId, sameTokens, sameUpperBound, sameIdempotencyKey, sameClientId) =>
+          stub.reserve(sameRequestId, sameTokens, sameUpperBound, sameIdempotencyKey, sameClientId),
+        {
+          requestId,
+          tokens: reservation,
+          upperBoundTokens: upperBound,
+          idempotencyKey,
+          clientId: auth.id,
+        },
+      );
+    } catch (error) {
+      finishResourceStage(env, requestId, "quota_reserve", reserveStartedAt, "exception", {
+        route: "error:pre_upstream",
+        upstreamReached: false,
+      });
+      reserveStageStartedAt = undefined;
+      throw error;
+    }
+    if (reserveOutcome.kind === "unknown") {
+      reservationState = "unknown";
+      finishResourceStage(env, requestId, "quota_reserve", reserveStartedAt, "exception", {
+        route: "error:pre_upstream",
+        upstreamReached: false,
+      });
+      reserveStageStartedAt = undefined;
+      await stub.markReserveOutcomeUnknown(requestId);
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
-    await stub.markUncertain(requestId);
-    await stub.releaseInFlight(requestId);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
-    return errorResponse(errInternal(requestId));
-  }
-  if (!upstream.ok) {
-    const uncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
-    if (uncertain) await stub.markUncertain(requestId);
-    else await stub.release(requestId);
-    await stub.releaseInFlight(requestId);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: uncertain ? "uncertain" : "failed", billingClass: "none" }));
-    return upstreamResponse(upstream, requestId, snapshot);
-  }
-
-  if (requestData.stream) return proxyStream(upstream, stub, requestId, env, ctx, snapshot, inserted);
-  let data: Record<string, unknown> & { usage?: Usage };
-  try {
-    data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
-  } catch {
-    await stub.markUncertain(requestId);
-    await stub.releaseInFlight(requestId);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
-    return errorResponse(errInternal(requestId));
-  }
-  const usage = data.usage;
-  if (typeof usage?.total_tokens === "number") {
-    const settled = await stub.settle(requestId, usage.total_tokens);
-    if (!settled.ok && settled.reason === "unknown_request") {
-      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "orphaned", billingClass: "none" }));
-    } else {
-      ctx.waitUntil(completeAfterInsert(inserted, env, requestId, {
-        status: "completed",
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens,
-        totalTokens: usage.total_tokens,
-        billingClass: "free",
-      }));
+    const reserved = reserveOutcome.result;
+    if (reserved.ok) reservationState = "resolved";
+    finishResourceStage(
+      env,
+      requestId,
+      "quota_reserve",
+      reserveStartedAt,
+      reserved.ok ? "success" : "rejected",
+      {
+        route: reserved.ok ? "free_shared" : routeForReserveFailure(reserved.reason),
+        quotaReserved: reserved.ok,
+      },
+    );
+    reserveStageStartedAt = undefined;
+    if (!reserved.ok) {
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      if (reserved.reason === "duplicate_idempotency_key") {
+        return errorResponse({
+          status: 409,
+          requestId,
+          quota: snapshot,
+          route: "reject:duplicate_idempotency_key",
+          body: {
+            error: {
+              message: "Duplicate Idempotency-Key.",
+              type: "invalid_request_error",
+              param: null,
+              code: "duplicate_idempotency_key",
+            },
+            request_id: requestId,
+          },
+        });
+      }
+      return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
     }
-  } else {
-    await stub.markUncertain(requestId);
-    ctx.waitUntil(completeAfterInsert(inserted, env, requestId, { status: "uncertain", billingClass: "none" }));
+    if (auditInserted) {
+      ctx.waitUntil(auditInserted.then((insertSucceeded) =>
+        insertSucceeded ? setReservedTokens(env, requestId, reservation) : undefined).catch(() => undefined));
+    }
+
+    const lease = await stub.acquireInFlight(requestId, resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS));
+    if (!lease.ok) {
+      await stub.release(requestId);
+      reservationState = "none";
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      return errorResponse(errWorkerConcurrencyExceeded(snapshot, requestId));
+    }
+    inFlightAcquired = true;
+
+    const upstreamStartedAt = startResourceStage(env, requestId, "upstream");
+    upstreamStageStartedAt = upstreamStartedAt;
+    let upstream: Response;
+    try {
+      const upstreamBody = buildUpstreamBody(endpoint, body as Record<string, unknown>, output.maxOutputTokens);
+      upstreamAttempted = true;
+      upstream = await callUpstream(
+        env,
+        endpoint === "chat" ? "/chat/completions" : "/responses",
+        upstreamBody,
+        {
+          client_id: auth.id,
+          pool: toPoolLower(pool),
+          eligibility: "COMPLIMENTARY",
+          route: "free_shared",
+          request_id: requestId,
+        },
+        policy.cacheEnabled ? `octg:${auth.id}` : null,
+        idempotencyKey,
+      );
+    } catch (error) {
+      finishResourceStage(
+        env,
+        requestId,
+        "upstream",
+        upstreamStartedAt,
+        "exception",
+        {
+          route: error instanceof UpstreamConfigError || !upstreamAttempted
+            ? "error:pre_upstream"
+            : "error:upstream_uncertain",
+          quotaReserved: true,
+          upstreamReached: false,
+        },
+      );
+      upstreamStageStartedAt = undefined;
+      if (error instanceof UpstreamConfigError || !upstreamAttempted) {
+        await stub.release(requestId);
+        reservationState = "none";
+        await stub.releaseInFlight(requestId);
+        inFlightAcquired = false;
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errInternal(requestId));
+      }
+      await stub.markUncertain(requestId);
+      reservationState = "none";
+      await stub.releaseInFlight(requestId);
+      inFlightAcquired = false;
+      completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
+      return errorResponse(errInternal(requestId));
+    }
+    upstreamReached = true;
+    const upstreamUncertain = !upstream.ok && (upstream.status === 408 || upstream.status === 429 || upstream.status >= 500);
+    const upstreamOutcome: ResourceStageOutcome = upstream.ok
+      ? "success"
+      : upstreamUncertain
+        ? "uncertain"
+        : "rejected";
+    const upstreamFields: ResourceStageFields = {
+      route: upstream.ok ? "free_shared" : upstreamUncertain ? "error:upstream_uncertain" : undefined,
+      quotaReserved: true,
+      upstreamReached: true,
+    };
+    if (requestData.stream && upstream.ok) {
+      return proxyStream(
+        upstream,
+        stub,
+        requestId,
+        env,
+        ctx,
+        snapshot,
+        auditInserted,
+        (finalizationOutcome) => {
+          if (upstreamStageStartedAt === undefined) return;
+          const stageStartedAt = upstreamStageStartedAt;
+          upstreamStageStartedAt = undefined;
+          finishResourceStage(
+            env,
+            requestId,
+            "upstream",
+            stageStartedAt,
+            finalizationOutcome,
+            finalizationOutcome === "success"
+              ? upstreamFields
+              : { ...upstreamFields, route: "error:upstream_uncertain" },
+          );
+        },
+      );
+    }
+    upstreamStageStartedAt = undefined;
+    finishResourceStage(env, requestId, "upstream", upstreamStartedAt, upstreamOutcome, upstreamFields);
+    if (!upstream.ok) {
+      if (upstreamUncertain) await stub.markUncertain(requestId);
+      else await stub.release(requestId);
+      reservationState = "none";
+      await stub.releaseInFlight(requestId);
+      inFlightAcquired = false;
+      completeAudit(ctx, env, requestId, auditInserted, { status: upstreamUncertain ? "uncertain" : "failed", billingClass: "none" });
+      return upstreamResponse(upstream, requestId, snapshot);
+    }
+
+    let data: Record<string, unknown> & { usage?: Usage };
+    try {
+      data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
+    } catch {
+      await stub.markUncertain(requestId);
+      reservationState = "none";
+      await stub.releaseInFlight(requestId);
+      inFlightAcquired = false;
+      completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
+      return errorResponse(errInternal(requestId));
+    }
+    const usage = data.usage;
+    if (typeof usage?.total_tokens === "number") {
+      const settled = await stub.settle(requestId, usage.total_tokens);
+      reservationState = "none";
+      if (!settled.ok && settled.reason === "unknown_request") {
+        completeAudit(ctx, env, requestId, auditInserted, { status: "orphaned", billingClass: "none" });
+      } else {
+        completeAudit(ctx, env, requestId, auditInserted, {
+          status: "completed",
+          inputTokens: usage.prompt_tokens,
+          outputTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+          billingClass: "free",
+        });
+      }
+    } else {
+      await stub.markUncertain(requestId);
+      reservationState = "none";
+      completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
+    }
+    await stub.releaseInFlight(requestId);
+    inFlightAcquired = false;
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+      },
+    });
+  } catch {
+    if (reserveStageStartedAt !== undefined) {
+      finishResourceStage(env, requestId, "quota_reserve", reserveStageStartedAt, "exception", {
+        route: "error:pre_upstream",
+        upstreamReached: false,
+      });
+      reserveStageStartedAt = undefined;
+    }
+    if (upstreamStageStartedAt !== undefined) {
+      finishResourceStage(env, requestId, "upstream", upstreamStageStartedAt, "exception", {
+        route: upstreamAttempted ? "error:upstream_uncertain" : "error:pre_upstream",
+        quotaReserved: reservationState === "resolved",
+        upstreamReached,
+      });
+      upstreamStageStartedAt = undefined;
+    }
+    const auditStatus: Completion["status"] = upstreamAttempted || upstreamReached ? "uncertain" : "failed";
+    if (quotaStub) {
+      if (reservationState === "unknown") {
+        await quotaStub.markReserveOutcomeUnknown(requestId).catch(() => undefined);
+      } else if (reservationState === "resolved") {
+        if (upstreamAttempted || upstreamReached) {
+          await quotaStub.markUncertain(requestId).catch(() => undefined);
+        } else {
+          await quotaStub.release(requestId).catch(() => undefined);
+        }
+      }
+      if (inFlightAcquired) await quotaStub.releaseInFlight(requestId).catch(() => undefined);
+    }
+    completeAudit(ctx, env, requestId, auditInserted, { status: auditStatus, billingClass: "none" });
+    return errorResponse(errInternal(requestId));
   }
-  await stub.releaseInFlight(requestId);
-  return new Response(JSON.stringify(data), {
-    status: 200,
-    headers: {
-      "content-type": "application/json",
-      ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
-    },
-  });
 }

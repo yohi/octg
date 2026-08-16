@@ -216,6 +216,66 @@ describe("QuotaController in-flight leases", () => {
   });
 });
 
+describe("QuotaController reserve uncertainty", () => {
+  it("discovers reserved and uncertain entries with bounded origins", async () => {
+    const controller = stub("STANDARD", "2026-09-30");
+    await controller.reserve("req-reserved-snapshot", 100, 100);
+    await controller.reserve("req-upstream-uncertain", 200, 200);
+    await controller.markUncertain("req-upstream-uncertain");
+    await controller.reserve("req-reserve-unknown", 300, 300);
+    await controller.markReserveOutcomeUnknown("req-reserve-unknown");
+
+    const snapshot = await controller.getReconcileSnapshot();
+
+    expect(snapshot.requests).toEqual(expect.arrayContaining([
+      { requestId: "req-reserved-snapshot", reservedTokens: 100, state: "reserved", uncertaintyOrigin: undefined },
+      { requestId: "req-upstream-uncertain", reservedTokens: 200, state: "uncertain", uncertaintyOrigin: "upstream_uncertain" },
+      { requestId: "req-reserve-unknown", reservedTokens: 300, state: "uncertain", uncertaintyOrigin: "reserve_unknown" },
+    ]));
+  });
+
+  it("moves an unresolved reservation to reserve_unknown exactly once", async () => {
+    const controller = stub("STANDARD", "2026-10-01");
+    await controller.reserve("req-mark-unknown", 400, 400);
+
+    const first = await controller.markReserveOutcomeUnknown("req-mark-unknown");
+    const second = await controller.markReserveOutcomeUnknown("req-mark-unknown");
+    const state = await controller.getState();
+    const snapshot = await controller.getReconcileSnapshot();
+
+    expect(first).toEqual({ ok: true, applied: true });
+    expect(second).toEqual(first);
+    expect(state.reservedTokens).toBe(0);
+    expect(state.uncertainTokens).toBe(400);
+    expect(snapshot.requests).toContainEqual({
+      requestId: "req-mark-unknown",
+      reservedTokens: 400,
+      state: "uncertain",
+      uncertaintyOrigin: "reserve_unknown",
+    });
+  });
+
+  it("keeps the reserve-unknown entry until an explicit disposition", async () => {
+    const controller = stub("STANDARD", "2026-10-02");
+    await controller.reserve("req-explicit-disposition", 500, 500);
+    await controller.markReserveOutcomeUnknown("req-explicit-disposition");
+
+    const pending = await controller.getReconcileSnapshot();
+    const reconciled = await controller.reconcileRequest("req-explicit-disposition", "consumed");
+    const retry = await controller.reconcileRequest("req-explicit-disposition", "consumed");
+
+    expect(pending.requests).toContainEqual(expect.objectContaining({
+      requestId: "req-explicit-disposition",
+      uncertaintyOrigin: "reserve_unknown",
+    }));
+    expect(reconciled).toEqual({ ok: true, applied: true });
+    expect(retry).toEqual(reconciled);
+    expect((await controller.getReconcileSnapshot()).requests).not.toContainEqual(
+      expect.objectContaining({ requestId: "req-explicit-disposition" }),
+    );
+  });
+});
+
 describe("QuotaController identity", () => {
   const invalidQuotaNames = [
     "quota:STANDARD:2026-09-08:extra",

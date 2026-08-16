@@ -31,6 +31,13 @@ export async function insertRequestRow(env: Env, row: RequestLogRow): Promise<vo
     .run();
 }
 
+export function startRequestAuditBestEffort(env: Env, row: RequestLogRow): Promise<boolean> {
+  return insertRequestRow(env, row).then(
+    () => true,
+    () => false,
+  );
+}
+
 export interface RequestCompleteFields {
   status: "completed" | "failed" | "uncertain" | "orphaned";
   inputTokens?: number;
@@ -55,6 +62,20 @@ export async function completeRequestRow(env: Env, requestId: string, fields: Re
       requestId,
     )
     .run();
+}
+
+export function completeRequestAuditBestEffort(
+  env: Env,
+  requestId: string,
+  fields: RequestCompleteFields,
+  inserted: Promise<boolean>,
+): Promise<void> {
+  return inserted.then(
+    (insertSucceeded) => insertSucceeded
+      ? completeRequestRow(env, requestId, fields).catch(() => undefined)
+      : undefined,
+    () => undefined,
+  ).then(() => undefined);
 }
 
 export async function setReservedTokens(env: Env, requestId: string, reservedTokens: number): Promise<void> {

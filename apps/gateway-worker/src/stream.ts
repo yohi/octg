@@ -1,7 +1,8 @@
 import { buildOctgHeaders, type QuotaSnapshot } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
-import { completeRequestRow } from "./db";
+import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
+import type { ResourceStageOutcome } from "./resource-observation";
 
 type Stub = DurableObjectStub<QuotaController>;
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
@@ -13,7 +14,8 @@ export function proxyStream(
   env: Env,
   ctx: ExecutionContext,
   snapshot: QuotaSnapshot,
-  inserted: Promise<void>,
+  inserted: Promise<boolean>,
+  onFinalized?: (outcome: ResourceStageOutcome) => void,
 ): Response {
   let finalized = false;
   let usage: Usage | undefined;
@@ -22,28 +24,37 @@ export function proxyStream(
   const finalize = async () => {
     if (finalized) return;
     finalized = true;
-    if (typeof usage?.total_tokens === "number") {
-      const settled = await stub.settle(requestId, usage.total_tokens);
-      if (!settled.ok && settled.reason === "unknown_request") {
+    try {
+      let outcome: ResourceStageOutcome = "success";
+      if (typeof usage?.total_tokens === "number") {
+        const settled = await stub.settle(requestId, usage.total_tokens);
+        if (!settled.ok && settled.reason === "unknown_request") {
+          outcome = "uncertain";
+          await inserted;
+          await completeRequestAuditBestEffort(env, requestId, { status: "orphaned", billingClass: "none" }, inserted);
+          await stub.releaseInFlight(requestId);
+          onFinalized?.(outcome);
+          return;
+        }
         await inserted;
-        await completeRequestRow(env, requestId, { status: "orphaned", billingClass: "none" });
-        await stub.releaseInFlight(requestId);
-        return;
+        await completeRequestAuditBestEffort(env, requestId, {
+          status: "completed",
+          inputTokens: usage.prompt_tokens,
+          outputTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+          billingClass: "free",
+        }, inserted);
+      } else {
+        outcome = "uncertain";
+        await stub.markUncertain(requestId);
+        await completeRequestAuditBestEffort(env, requestId, { status: "uncertain", billingClass: "none" }, inserted);
       }
-      await inserted;
-      await completeRequestRow(env, requestId, {
-        status: "completed",
-        inputTokens: usage.prompt_tokens,
-        outputTokens: usage.completion_tokens,
-        totalTokens: usage.total_tokens,
-        billingClass: "free",
-      });
-    } else {
-      await stub.markUncertain(requestId);
-      await inserted;
-      await completeRequestRow(env, requestId, { status: "uncertain", billingClass: "none" });
+      await stub.releaseInFlight(requestId);
+      onFinalized?.(outcome);
+    } catch (error) {
+      onFinalized?.("exception");
+      throw error;
     }
-    await stub.releaseInFlight(requestId);
   };
   const parseEvents = (text: string) => {
     for (const event of text.split("\n\n")) {
