@@ -1,7 +1,7 @@
-import { env, SELF } from "cloudflare:test";
+import { createExecutionContext, env, SELF } from "cloudflare:test";
 import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveMaxInputBytes } from "../src/proxy";
+import { handleProxy, resolveMaxInputBytes } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => {
@@ -47,6 +47,22 @@ describe("resolveMaxInputBytes", () => {
 });
 
 describe("proxy failure paths", () => {
+  it("preserves the request ID supplied by the Worker entrypoint", async () => {
+    // Given: a proxy request with a request ID allocated by the Worker entrypoint.
+    const requestId = "req_test_request_id";
+    const request = new Request("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+
+    // When: the proxy rejects the unauthenticated request.
+    const response = await handleProxy(request, env, createExecutionContext(), "chat", requestId);
+
+    // Then: every response representation uses the same request ID.
+    expect(response.headers.get("X-OCTG-Request-Id")).toBe(requestId);
+    expect((await response.json() as { request_id: string }).request_id).toBe(requestId);
+  });
+
   it("rejects a saturated pool before upstream contact without consuming quota", async () => {
     const controller = stub();
     expect(await controller.acquireInFlight("occupied-one", 2)).toEqual({ ok: true });

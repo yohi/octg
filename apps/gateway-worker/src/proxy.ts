@@ -1,4 +1,3 @@
-import { ulid } from "ulid";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -86,8 +85,8 @@ export async function handleProxy(
   env: Env,
   ctx: ExecutionContext,
   endpoint: "chat" | "responses",
+  requestId: string,
 ): Promise<Response> {
-  const requestId = `req_${ulid()}`;
   const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
   const auth = await authenticate(request, env, requestId);
   if (!("id" in auth)) return errorResponse(auth);
