@@ -1,6 +1,7 @@
 export type PoolName = "STANDARD" | "MINI";
 export type PoolNameLower = "standard" | "mini";
 export type RequestState = "reserved" | "settled" | "uncertain" | "reconciled" | "released";
+export type UncertaintyOrigin = "upstream_uncertain" | "reserve_unknown";
 
 export interface PoolState {
   utcDay: string;
@@ -19,6 +20,7 @@ export interface RequestEntry {
   upperBoundTokens: number;
   reservedTokens: number;
   requestedDisposition?: ReconcileDisposition;
+  uncertaintyOrigin?: UncertaintyOrigin;
   actualTokens?: number;
   results: RequestRpcResults;
   createdAt: string;
@@ -46,6 +48,9 @@ export type SettleResult =
 export type MarkUncertainResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "unknown_request" };
+export type MarkReserveOutcomeUnknownResult =
+  | { readonly ok: true; readonly applied: boolean }
+  | { readonly ok: false; readonly reason: "unknown_request" };
 export type ReleaseResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "unknown_request" };
@@ -58,6 +63,8 @@ export type ReconcileResult = { readonly ok: true; readonly applied: boolean };
 export interface UncertainRequest {
   readonly requestId: string;
   readonly reservedTokens: number;
+  readonly state: "reserved" | "uncertain";
+  readonly uncertaintyOrigin?: UncertaintyOrigin;
 }
 export interface ReconcileSnapshot {
   readonly requests: readonly UncertainRequest[];
@@ -67,6 +74,7 @@ export interface RequestRpcResults {
   reserve?: ReserveResult;
   settle?: SettleResult;
   markUncertain?: MarkUncertainResult;
+  markReserveOutcomeUnknown?: MarkReserveOutcomeUnknownResult;
   release?: ReleaseResult;
   reconcile?: ReconcileResult;
 }

@@ -74,6 +74,78 @@ describe("reconciliation", () => {
     fetchMock.mockRestore();
   });
 
+  it("reconciles upstream uncertainty while leaving reserve-unknown usage open", async () => {
+    // Given: one upstream-uncertain and one reserve-unknown reservation in the same pool.
+    const reconciliationNow = new Date("2026-08-24T00:05:00Z");
+    const reconciliationDay = "2026-08-23";
+    Object.assign(env, { OPENAI_USAGE_API_KEY: "test" });
+    await seedClient();
+    const controller = env.QUOTA_CONTROLLER.get(
+      env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${reconciliationDay}`),
+    );
+    await controller.reserve("reconcile-upstream-uncertain", 150, 150);
+    await controller.markUncertain("reconcile-upstream-uncertain");
+    await controller.reserve("reconcile-reserve-unknown", 200, 200);
+    await controller.markReserveOutcomeUnknown("reconcile-reserve-unknown");
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      "reconcile-upstream-uncertain",
+      reconciliationDay,
+      "client_test",
+      "STANDARD",
+      150,
+      0,
+      "uncertain",
+      reconciliationNow.toISOString(),
+      "reconcile-reserve-unknown",
+      reconciliationDay,
+      "client_test",
+      "STANDARD",
+      200,
+      0,
+      "uncertain",
+      reconciliationNow.toISOString(),
+    ).run();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({
+        data: [{ results: [{ model: "gpt-5", input_tokens: 125, output_tokens: 25 }] }],
+        has_more: false,
+      })));
+
+    try {
+      // When: Usage exactly confirms the upstream-uncertain reservation only.
+      const reports = await runReconciliation(env, reconciliationNow);
+
+      // Then: only that reservation is settled; reserve-unknown stays pending and keeps reconciliation open.
+      expect(reports.find((report) => report.pool === "STANDARD")?.status).toBe("open");
+      expect(await controller.getState()).toMatchObject({
+        confirmedTokens: 150,
+        uncertainTokens: 200,
+      });
+      expect(
+        await env.DB.prepare("SELECT status FROM requests WHERE request_id = ?")
+          .bind("reconcile-upstream-uncertain")
+          .first<{ status: string }>(),
+      ).toEqual({ status: "completed" });
+      expect(
+        await env.DB.prepare("SELECT status FROM requests WHERE request_id = ?")
+          .bind("reconcile-reserve-unknown")
+          .first<{ status: string }>(),
+      ).toEqual({ status: "uncertain" });
+      expect((await controller.getReconcileSnapshot()).requests).toEqual([
+        {
+          requestId: "reconcile-reserve-unknown",
+          reservedTokens: 200,
+          state: "uncertain",
+          uncertaintyOrigin: "reserve_unknown",
+        },
+      ]);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("keeps unresolved usage open and records only confirmed local usage", async () => {
     const reconciliationNow = new Date("2026-08-21T00:05:00Z");
     const reconciliationDay = "2026-08-20";
