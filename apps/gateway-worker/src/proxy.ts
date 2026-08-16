@@ -409,7 +409,7 @@ export async function handleProxy(
       }
       return errorResponse(errQuotaExceeded({ ...snapshot, remaining: reserved.remaining, resetAt: reserved.resetAt }, requestId));
     }
-    if (auditInserted) {
+    if (auditInserted !== undefined) {
       ctx.waitUntil(auditInserted.then((insertSucceeded) =>
         insertSucceeded ? setReservedTokens(env, requestId, reservation) : undefined).catch(() => undefined));
     }
