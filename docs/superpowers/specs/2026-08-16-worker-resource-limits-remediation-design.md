@@ -179,9 +179,10 @@ authenticate
 → try {
      exact BPE or conservative byte estimation
      → payload shape safety gate
-     → quota reserve
+     ├─ rejected → best-effort audit completion → 400 `invalid_request`
+     └─ accepted → quota reserve
   }
-  catch (estimation / safety / reserve exception) {
+  catch (estimation / reserve exception) {
      tokenization lease release (matching leaseId)
      → best-effort audit completion
      → 500 `internal_error`

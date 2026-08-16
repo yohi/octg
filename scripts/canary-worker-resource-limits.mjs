@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
+const MAX_CANARY_CONCURRENCY = 64;
+const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
+
 const required = (name) => {
   const value = process.env[name];
   if (!value) throw new TypeError(`${name} is required`);
@@ -11,7 +14,7 @@ const required = (name) => {
 
 const parsePositiveSafeIntegers = (name, raw) => {
   const values = raw.split(",").map((value) => Number(value.trim()));
-  if (values.length === 0 || values.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+  if (values.length === 0 || values.some((value) => !Number.isSafeInteger(value) || value <= 0 || value > MAX_CANARY_CONCURRENCY)) {
     throw new TypeError(`${name} must contain positive safe integers`);
   }
   return values;
@@ -113,7 +116,7 @@ async function main() {
     throw new TypeError("CANARY_CONCURRENCY must include concurrency levels 1 and 2");
   }
   const requestTimeoutMs = Number(required("CANARY_REQUEST_TIMEOUT_MS"));
-  if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
+  if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0 || requestTimeoutMs > MAX_CANARY_REQUEST_TIMEOUT_MS) {
     throw new TypeError("CANARY_REQUEST_TIMEOUT_MS must be a positive safe integer");
   }
 

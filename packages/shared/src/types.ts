@@ -77,6 +77,13 @@ export interface UncertainRequest {
   readonly state: "reserved" | "uncertain";
   readonly uncertaintyOrigin?: UncertaintyOrigin;
 }
+export interface ReconcileRequestView {
+  readonly requestId: string;
+  readonly reservedTokens: number;
+  readonly state: RequestState;
+  readonly requestedDisposition?: ReconcileDisposition;
+  readonly uncertaintyOrigin?: UncertaintyOrigin;
+}
 export interface ReconcileSnapshot {
   readonly requests: readonly UncertainRequest[];
 }

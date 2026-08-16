@@ -317,11 +317,55 @@ describe("QuotaController in-flight leases", () => {
     expect(acquired).toMatchObject({ ok: true, lease: { requestId: "new-request" } });
   });
 
+  it("gives migrated legacy leases a finite grace period and allows renewal", async () => {
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const controller = stub("STANDARD", "2026-09-05");
+    await runInDurableObject(controller, (_instance, state) =>
+      state.storage.put("in_flight", ["legacy-request"]),
+    );
+
+    const migrated = await controller.acquireInFlight("legacy-request", 1, 50);
+    const blocked = await controller.acquireInFlight("new-request", 1, 50);
+    if (!migrated.ok) throw new TypeError("Expected the legacy lease to be visible during its grace period.");
+    const persisted = await runInDurableObject(controller, (_instance, state) => state.storage.get("in_flight"));
+    const renewed = await controller.renewInFlight("legacy-request", migrated.lease.generation, 50);
+    now.mockReturnValue(121_001);
+    const reclaimed = await controller.acquireInFlight("new-request", 1, 50);
+
+    expect(migrated.lease.generation).toBe("legacy:legacy-request");
+    expect(persisted).toEqual({
+      version: 1,
+      leases: [{ requestId: "legacy-request", generation: "legacy:legacy-request", expiresAtMs: 121_000 }],
+    });
+    expect(blocked).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
+    expect(renewed).toMatchObject({ ok: true, lease: { expiresAtMs: 1_050 } });
+    expect(reclaimed).toMatchObject({ ok: true, lease: { requestId: "new-request" } });
+  });
+
+  it("keeps duplicate acquire and release signals from freeing another request", async () => {
+    const controller = stub("STANDARD", "2026-09-10");
+    const first = await controller.acquireInFlight("request-one", 1, 50);
+    if (!first.ok) throw new TypeError("Expected the first lease acquisition to succeed.");
+    const repeated = await controller.acquireInFlight("request-one", 1, 50);
+    const released = await controller.releaseInFlight("request-one", first.lease.generation);
+    const next = await controller.acquireInFlight("request-two", 1, 50);
+    const duplicateRelease = await controller.releaseInFlight("request-one", first.lease.generation);
+    const saturated = await controller.acquireInFlight("request-three", 1, 50);
+
+    expect(repeated).toMatchObject({ ok: true, lease: { generation: first.lease.generation } });
+    expect(released).toEqual({ ok: true, released: true });
+    expect(next).toMatchObject({ ok: true, lease: { requestId: "request-two" } });
+    expect(duplicateRelease).toEqual({ ok: true, released: false });
+    expect(saturated).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
+    if (next.ok) await controller.releaseInFlight("request-two", next.lease.generation);
+  });
+
   it.each([
-    [0, "2026-09-05"],
-    [-1, "2026-09-06"],
-    [1.5, "2026-09-07"],
-    [Number.MAX_SAFE_INTEGER + 1, "2026-09-08"],
+    [0, "2026-09-06"],
+    [-1, "2026-09-07"],
+    [1.5, "2026-09-08"],
+    [Number.MAX_SAFE_INTEGER + 1, "2026-09-09"],
   ] as const)(
     "rejects an invalid lease TTL of %s without acquiring a slot",
     async (ttlMs, day) => {

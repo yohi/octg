@@ -7,24 +7,63 @@ import type { ResourceStageOutcome } from "./resource-observation";
 type Stub = DurableObjectStub<QuotaController>;
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 
+export interface StreamLeaseOptions {
+  readonly lease: InFlightLease;
+  readonly ttlMs: number;
+  readonly renewalMs: number;
+}
+
 export function proxyStream(
   upstream: Response,
   stub: Stub,
-  lease: InFlightLease,
+  options: StreamLeaseOptions,
   env: Env,
   ctx: ExecutionContext,
   snapshot: QuotaSnapshot,
   inserted: Promise<boolean>,
   onFinalized?: (outcome: ResourceStageOutcome) => void,
 ): Response {
+  const { lease, ttlMs, renewalMs } = options;
   const { generation, requestId } = lease;
   let finalized = false;
   let usage: Usage | undefined;
+  let renewalFailed = false;
+  let renewalError: unknown;
+  let renewalInFlight = false;
+  let renewalTimer: ReturnType<typeof setInterval> | undefined;
   const decoder = new TextDecoder();
   let buffer = "";
+  const stopRenewal = () => {
+    if (renewalTimer === undefined) return;
+    clearInterval(renewalTimer);
+    renewalTimer = undefined;
+  };
+  const finalizeUncertain = async (originalError?: unknown) => {
+    await stub.markUncertain(requestId).catch(() => undefined);
+    await completeRequestAuditBestEffort(
+      env,
+      requestId,
+      { status: "uncertain", billingClass: "none" },
+      inserted,
+    ).catch(() => undefined);
+    const releaseError = await stub.releaseInFlight(requestId, generation).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await Promise.resolve()
+      .then(() => onFinalized?.(originalError === undefined ? "uncertain" : "exception"))
+      .catch(() => undefined);
+    if (originalError !== undefined) throw originalError;
+    if (releaseError !== undefined) throw releaseError;
+  };
   const finalize = async () => {
     if (finalized) return;
     finalized = true;
+    stopRenewal();
+    if (renewalFailed) {
+      await finalizeUncertain(renewalError);
+      return;
+    }
     try {
       let outcome: ResourceStageOutcome = "success";
       if (typeof usage?.total_tokens === "number") {
@@ -44,16 +83,13 @@ export function proxyStream(
           billingClass: "free",
         }, inserted);
       } else {
-        outcome = "uncertain";
         await stub.markUncertain(requestId);
         await completeRequestAuditBestEffort(env, requestId, { status: "uncertain", billingClass: "none" }, inserted);
       }
       await stub.releaseInFlight(requestId, generation);
       onFinalized?.(outcome);
     } catch (error) {
-      await stub.releaseInFlight(requestId, generation).catch(() => undefined);
-      await Promise.resolve().then(() => onFinalized?.("exception")).catch(() => undefined);
-      throw error;
+      await finalizeUncertain(error);
     }
   };
   const parseEvents = (text: string) => {
@@ -83,6 +119,26 @@ export function proxyStream(
       },
     });
   }
+  const streamAbort = new AbortController();
+  const failRenewal = (error: unknown) => {
+    if (finalized || renewalFailed) return;
+    renewalFailed = true;
+    renewalError = error;
+    streamAbort.abort();
+    ctx.waitUntil(finalize());
+  };
+  const renewLease = async () => {
+    if (finalized || renewalInFlight) return;
+    renewalInFlight = true;
+    try {
+      const renewed = await stub.renewInFlight(requestId, generation, ttlMs);
+      if (!renewed.ok) throw new Error("In-flight lease renewal failed.");
+    } catch (error) {
+      failRenewal(error);
+    } finally {
+      renewalInFlight = false;
+    }
+  };
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -100,7 +156,10 @@ export function proxyStream(
     cancel() {
       ctx.waitUntil(finalize());
     },
-  }));
+  }), { signal: streamAbort.signal });
+  renewalTimer = setInterval(() => {
+    void renewLease();
+  }, renewalMs);
   return new Response(tapped, {
     status: 200,
     headers: {

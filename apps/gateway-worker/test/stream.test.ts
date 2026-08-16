@@ -19,6 +19,12 @@ async function acquireLease(
   return acquired.lease;
 }
 
+const streamOptions = (lease: InFlightLease, renewalMs = 30_000) => ({
+  lease,
+  ttlMs: 120_000,
+  renewalMs,
+});
+
 const quotaSnapshot = {
   pool: "STANDARD",
   limit: 1_000_000,
@@ -29,6 +35,7 @@ const quotaSnapshot = {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("proxy stream finalization", () => {
@@ -38,13 +45,14 @@ describe("proxy stream finalization", () => {
     const requestId = "stream-settlement-rejection";
     const replacementRequestId = "stream-settlement-replacement";
     const settlementError = new Error("settlement failed");
+    await controller.reserve(requestId, 10, 10);
     const lease = await acquireLease(controller, requestId);
     vi.spyOn(controller, "settle").mockRejectedValue(settlementError);
     const context = createExecutionContext();
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":1}}'),
       controller,
-      lease,
+      streamOptions(lease),
       env,
       context,
       quotaSnapshot,
@@ -57,6 +65,7 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the same failure propagates after the lease becomes available to another request.
       await expect(waitOnExecutionContext(context)).rejects.toBe(settlementError);
+      expect(await controller.getState()).toMatchObject({ uncertainTokens: 10, reservedTokens: 0 });
       const replacement = await controller.acquireInFlight(replacementRequestId, 1);
       expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
       if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
@@ -78,7 +87,7 @@ describe("proxy stream finalization", () => {
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":1}}'),
       controller,
-      lease,
+      streamOptions(lease),
       env,
       context,
       quotaSnapshot,
@@ -114,7 +123,7 @@ describe("proxy stream finalization", () => {
     const response = proxyStream(
       sseResponse('{"id":"usage-absent"}'),
       controller,
-      lease,
+      streamOptions(lease),
       env,
       context,
       quotaSnapshot,
@@ -149,7 +158,7 @@ describe("proxy stream finalization", () => {
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":5}}'),
       controller,
-      lease,
+      streamOptions(lease),
       env,
       context,
       quotaSnapshot,
@@ -168,6 +177,65 @@ describe("proxy stream finalization", () => {
     } finally {
       await controller.releaseInFlight(requestId, lease.generation);
     }
+  });
+
+  it("renews an idle stream without waiting for another chunk", async () => {
+    vi.useFakeTimers();
+    const controller = controllerFor("2026-10-10");
+    const requestId = "stream-idle-renewal";
+    const lease = await acquireLease(controller, requestId);
+    const renewedLease = { ...lease, expiresAtMs: lease.expiresAtMs + 120_000 };
+    const renew = vi.spyOn(controller, "renewInFlight").mockResolvedValue({ ok: true, lease: renewedLease });
+    const context = createExecutionContext();
+    const upstream = new Response(new ReadableStream<Uint8Array>(), { headers: { "content-type": "text/event-stream" } });
+    const response = proxyStream(
+      upstream,
+      controller,
+      streamOptions(lease, 10),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    // When: the stream remains idle for one renewal interval, then is cancelled.
+    await vi.advanceTimersByTimeAsync(10);
+    await response.body?.cancel();
+    await waitOnExecutionContext(context);
+
+    // Then: renewal happened without a body chunk and cancellation released the lease.
+    expect(renew).toHaveBeenCalledWith(requestId, lease.generation, 120_000);
+    const replacement = await controller.acquireInFlight("stream-idle-replacement", 1);
+    expect(replacement).toMatchObject({ ok: true, lease: { requestId: "stream-idle-replacement" } });
+    if (replacement.ok) await controller.releaseInFlight("stream-idle-replacement", replacement.lease.generation);
+  });
+
+  it("aborts and marks a stream uncertain when renewal fails", async () => {
+    vi.useFakeTimers();
+    const controller = controllerFor("2026-10-11");
+    const requestId = "stream-renewal-failure";
+    await controller.reserve(requestId, 10, 10);
+    const lease = await acquireLease(controller, requestId);
+    const renewalError = new Error("renewal failed");
+    vi.spyOn(controller, "renewInFlight").mockRejectedValue(renewalError);
+    const context = createExecutionContext();
+    const response = proxyStream(
+      new Response(new ReadableStream<Uint8Array>(), { headers: { "content-type": "text/event-stream" } }),
+      controller,
+      streamOptions(lease, 10),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    // When: the renewal timer fails while the stream has no new chunk.
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Then: the original renewal error propagates after fail-closed quota cleanup.
+    await expect(waitOnExecutionContext(context)).rejects.toBe(renewalError);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 10, reservedTokens: 0 });
+    await response.body?.cancel().catch(() => undefined);
   });
 
 });

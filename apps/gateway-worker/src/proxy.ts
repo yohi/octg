@@ -541,7 +541,11 @@ export async function handleProxy(
       const response = proxyStream(
         upstream,
         stub,
-        inFlightLease,
+        {
+          lease: inFlightLease,
+          ttlMs: resolveInFlightLeaseTtlMs(env.IN_FLIGHT_LEASE_TTL_MS),
+          renewalMs: resolveInFlightLeaseRenewalMs(env.IN_FLIGHT_LEASE_RENEWAL_MS),
+        },
         env,
         ctx,
         snapshot,

@@ -76,3 +76,39 @@ test("rejects concurrency config without baseline levels before issuing requests
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "octg.canary.config_error\n");
 });
+
+test("rejects concurrency values above the bounded canary fan-out", () => {
+  const result = spawnSync(process.execPath, [canaryScript], {
+    env: {
+      OCTG_CANARY_URL: "https://127.0.0.1:1/v1/chat/completions",
+      OCTG_CANARY_ALLOWED_HOSTS: "127.0.0.1",
+      OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+      CANARY_PAYLOAD_PATH: payloadPath,
+      CANARY_CONCURRENCY: "1,2,65",
+      CANARY_REQUEST_TIMEOUT_MS: "100",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "octg.canary.config_error\n");
+});
+
+test("rejects request timeouts above the Node timer maximum", () => {
+  const result = spawnSync(process.execPath, [canaryScript], {
+    env: {
+      OCTG_CANARY_URL: "https://127.0.0.1:1/v1/chat/completions",
+      OCTG_CANARY_ALLOWED_HOSTS: "127.0.0.1",
+      OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+      CANARY_PAYLOAD_PATH: payloadPath,
+      CANARY_CONCURRENCY: "1,2",
+      CANARY_REQUEST_TIMEOUT_MS: "2147483648",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "octg.canary.config_error\n");
+});

@@ -13,6 +13,7 @@ import type {
   MarkUncertainResult,
   QuotaView,
   ReconcileSnapshot,
+  ReconcileRequestView,
   ReconcileDisposition,
   ReconcileResult,
   ReleaseInFlightResult,
@@ -230,6 +231,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
 
   async getReconcileSnapshot(): Promise<ReconcileSnapshot> {
     return this.lifecycle.getReconcileSnapshot();
+  }
+
+  async getReconcileRequest(requestId: string): Promise<ReconcileRequestView | undefined> {
+    return this.lifecycle.getReconcileRequest(requestId);
   }
 
   async finalizeDay(): Promise<FinalizeResult> {

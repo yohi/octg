@@ -23,6 +23,101 @@ describe("admin API", () => {
     expect((await admin("/admin/quota")).status).toBe(401);
   });
 
+  it("requires evidence before releasing a reserve-unknown request", async () => {
+    const day = "2026-11-01";
+    const requestId = "admin-reserve-unknown-unused";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+
+    const response = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "unused" }),
+    }, "jwt");
+
+    expect(response.status).toBe(400);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 200, confirmedTokens: 0 });
+
+    const accepted = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "unused", evidence: "upstream request was never sent" }),
+    }, "jwt");
+
+    expect(accepted.status).toBe(200);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 0 });
+    expect(await env.DB.prepare("SELECT status, reconciliation_evidence FROM requests WHERE request_id = ?").bind(requestId).first()).toEqual({ status: "failed", reconciliation_evidence: "upstream request was never sent" });
+  });
+
+  it("resolves a reserve-unknown request through its authoritative Durable Object", async () => {
+    const day = "2026-11-02";
+    const requestId = "admin-reserve-unknown-consumed";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 999, 0, "uncertain", new Date().toISOString()).run();
+
+    const response = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+
+    expect(response.status).toBe(200);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 200 });
+    expect(await env.DB.prepare("SELECT status, total_tokens FROM requests WHERE request_id = ?").bind(requestId).first()).toEqual({ status: "completed", total_tokens: 200 });
+  });
+
+  it("rejects malformed and non-reserve-unknown reconciliation targets", async () => {
+    const malformed = await admin("/admin/reconcile/OTHER/2026-11-03/request", {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+    expect(malformed.status).toBe(400);
+    const invalidDay = await admin("/admin/reconcile/STANDARD/2026-13-01/request", {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+    expect(invalidDay.status).toBe(400);
+
+    const day = "2026-11-03";
+    const requestId = "admin-upstream-uncertain";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markUncertain(requestId);
+    const response = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+
+    expect(response.status).toBe(409);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 200, confirmedTokens: 0 });
+  });
+
+  it("replays the saved disposition without changing quota twice", async () => {
+    const day = "2026-11-04";
+    const requestId = "admin-reserve-unknown-retry";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+
+    const init = { method: "POST", body: JSON.stringify({ disposition: "consumed" }), } satisfies RequestInit;
+    const first = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, init, "jwt");
+    const second = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, init, "jwt");
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const conflict = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "unused", evidence: "operator-confirmed" }),
+    }, "jwt");
+    expect(conflict.status).toBe(409);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 200 });
+  });
+
   it("returns not found for unknown admin routes after access is verified", async () => {
     expect((await admin("/admin/nope", undefined, "jwt")).status).toBe(404);
   });

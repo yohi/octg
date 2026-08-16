@@ -1,4 +1,4 @@
-import { POOL_LIMITS } from "@octg/shared";
+import { DEFAULT_IN_FLIGHT_LEASE_TTL_MS, POOL_LIMITS } from "@octg/shared";
 import type {
   AcquireInFlightResult,
   InFlightLease,
@@ -149,21 +149,28 @@ export async function saveInFlight(storage: QuotaStorage, state: InFlightLeaseSt
   await storage.put(IN_FLIGHT_KEY, state);
 }
 
-const LEGACY_IN_FLIGHT_GENERATION = "";
-const LEGACY_IN_FLIGHT_EXPIRY_MS = Number.MAX_SAFE_INTEGER;
+const LEGACY_IN_FLIGHT_GENERATION_PREFIX = "legacy:";
 
 function isLegacyInFlightState(state: InFlightState): state is readonly string[] {
   return Array.isArray(state);
 }
 
-function leasesOf(state: InFlightState): readonly InFlightLease[] {
-  return isLegacyInFlightState(state)
-    ? state.map((requestId) => ({
+function normalizeInFlightState(
+  state: InFlightState,
+  nowMs: number,
+): { readonly state: InFlightLeaseState; readonly migrated: boolean } {
+  if (!isLegacyInFlightState(state)) return { state, migrated: false };
+  return {
+    state: {
+      version: 1,
+      leases: state.map((requestId) => ({
         requestId,
-        generation: LEGACY_IN_FLIGHT_GENERATION,
-        expiresAtMs: LEGACY_IN_FLIGHT_EXPIRY_MS,
-      }))
-    : state.leases;
+        generation: `${LEGACY_IN_FLIGHT_GENERATION_PREFIX}${requestId}`,
+        expiresAtMs: expiresAtMs(DEFAULT_IN_FLIGHT_LEASE_TTL_MS, nowMs),
+      })),
+    },
+    migrated: true,
+  };
 }
 
 function withoutExpiredLeases(leases: readonly InFlightLease[], nowMs: number): readonly InFlightLease[] {
@@ -188,11 +195,13 @@ export async function acquireInFlightLease(
   if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
     throw new TypeError("In-flight limit must be a positive safe integer.");
   }
-  const leases = leasesOf(await loadInFlight(storage));
+  const state = await loadInFlight(storage);
   const nowMs = Date.now();
+  const normalized = normalizeInFlightState(state, nowMs);
+  const leases = normalized.state.leases;
   const leaseExpiresAtMs = expiresAtMs(input.ttlMs, nowMs);
   const activeLeases = withoutExpiredLeases(leases, nowMs);
-  if (activeLeases.length !== leases.length) {
+  if (normalized.migrated || activeLeases.length !== leases.length) {
     await saveInFlight(storage, { version: 1, leases: activeLeases });
   }
   const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
@@ -211,16 +220,18 @@ export async function renewInFlightLease(
   storage: QuotaStorage,
   input: RenewInFlightLeaseInput,
 ): Promise<RenewInFlightResult> {
-  const leases = leasesOf(await loadInFlight(storage));
+  const state = await loadInFlight(storage);
   const nowMs = Date.now();
+  const normalized = normalizeInFlightState(state, nowMs);
+  const leases = normalized.state.leases;
   const leaseExpiresAtMs = expiresAtMs(input.ttlMs, nowMs);
   const activeLeases = withoutExpiredLeases(leases, nowMs);
-  if (activeLeases.length !== leases.length) {
+  if (normalized.migrated || activeLeases.length !== leases.length) {
     await saveInFlight(storage, { version: 1, leases: activeLeases });
   }
   const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
   if (!activeLease) return { ok: false, reason: "lease_not_found" };
-  if (activeLease.generation === LEGACY_IN_FLIGHT_GENERATION || activeLease.generation !== input.generation) {
+  if (activeLease.generation !== input.generation) {
     return { ok: false, reason: "stale_generation" };
   }
   const renewedLease: InFlightLease = { ...activeLease, expiresAtMs: leaseExpiresAtMs };
@@ -235,18 +246,21 @@ export async function releaseInFlightLease(
   storage: QuotaStorage,
   input: ReleaseInFlightLeaseInput,
 ): Promise<ReleaseInFlightResult> {
-  const leases = leasesOf(await loadInFlight(storage));
-  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  const state = await loadInFlight(storage);
+  const nowMs = Date.now();
+  const normalized = normalizeInFlightState(state, nowMs);
+  const leases = normalized.state.leases;
+  const activeLeases = withoutExpiredLeases(leases, nowMs);
   const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
   const canRelease = activeLease !== undefined && (
     input.generation === undefined
-      ? activeLease.generation === LEGACY_IN_FLIGHT_GENERATION
+      ? activeLease.generation.startsWith(LEGACY_IN_FLIGHT_GENERATION_PREFIX)
       : activeLease.generation === input.generation
   );
   const retainedLeases = canRelease
     ? activeLeases.filter((lease) => lease !== activeLease)
     : activeLeases;
-  if (retainedLeases.length !== leases.length) {
+  if (normalized.migrated || retainedLeases.length !== leases.length) {
     await saveInFlight(storage, { version: 1, leases: retainedLeases });
   }
   return { ok: true, released: canRelease };

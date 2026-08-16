@@ -1,4 +1,4 @@
-import { quotaIdOf } from "@octg/shared";
+import { quotaIdOf, type PoolName, type ReconcileDisposition } from "@octg/shared";
 import type { Env } from "./index";
 import { loadRegistry } from "./policy";
 
@@ -7,6 +7,49 @@ export function targetUtcDay(now: Date): string { return new Date(Date.UTC(now.g
 
 type UsageResult = { model?: string; input_tokens?: number; output_tokens?: number };
 type UsagePage = { data?: Array<{ results?: UsageResult[] }>; has_more?: boolean; next_page?: string | null };
+
+export type ReserveUnknownResolution =
+  | { readonly ok: true; readonly applied: boolean; readonly disposition: ReconcileDisposition; readonly reservedTokens: number }
+  | { readonly ok: false; readonly reason: "not_found" | "not_reserve_unknown" | "disposition_conflict" };
+
+export async function reconcileReserveUnknown(
+  env: Env,
+  pool: PoolName,
+  utcDay: string,
+  requestId: string,
+  disposition: ReconcileDisposition,
+  evidence?: string,
+): Promise<ReserveUnknownResolution> {
+  const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, utcDay)));
+  const target = await stub.getReconcileRequest(requestId);
+  if (!target) return { ok: false, reason: "not_found" };
+  const eligible = target.state === "uncertain" && target.uncertaintyOrigin === "reserve_unknown";
+  const replayable = (target.state === "reconciled" || target.state === "released") && target.requestedDisposition !== undefined;
+  if (!eligible && !replayable) {
+    return { ok: false, reason: "not_reserve_unknown" };
+  }
+  if (replayable && target.requestedDisposition !== disposition) {
+    return { ok: false, reason: "disposition_conflict" };
+  }
+  const result = await stub.reconcileRequest(requestId, disposition);
+  if (result.applied) {
+    const completedAt = new Date().toISOString();
+    await env.DB.prepare(
+      "UPDATE requests SET status = ?, total_tokens = ?, billing_class = ?, reconciliation_evidence = ?, completed_at = ? WHERE request_id = ?",
+    )
+      .bind(
+        disposition === "consumed" ? "completed" : "failed",
+        disposition === "consumed" ? target.reservedTokens : 0,
+        disposition === "consumed" ? "free" : "none",
+        evidence ?? null,
+        completedAt,
+        requestId,
+      )
+      .run()
+      .catch(() => undefined);
+  }
+  return { ok: true, applied: result.applied, disposition, reservedTokens: target.reservedTokens };
+}
 
 async function fetchUsage(env: Env, day: string): Promise<ReadonlyMap<string, number>> {
   const url = new URL("https://api.openai.com/v1/organization/usage/completions");

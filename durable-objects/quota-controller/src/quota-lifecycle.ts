@@ -4,6 +4,7 @@ import type {
   MarkReserveOutcomeUnknownResult,
   MarkUncertainResult,
   ReconcileDisposition,
+  ReconcileRequestView,
   ReconcileResult,
   ReconcileSnapshot,
   ReleaseResult,
@@ -44,6 +45,18 @@ export class QuotaLifecycle {
           state: entry.state,
           uncertaintyOrigin: entry.uncertaintyOrigin,
         })),
+    };
+  }
+
+  async getReconcileRequest(requestId: string): Promise<ReconcileRequestView | undefined> {
+    const entry = await getEntry(this.context.storage, requestId);
+    if (!entry) return undefined;
+    return {
+      requestId,
+      reservedTokens: entry.reservedTokens,
+      state: entry.state,
+      requestedDisposition: entry.requestedDisposition,
+      uncertaintyOrigin: entry.uncertaintyOrigin,
     };
   }
 
