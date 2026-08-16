@@ -30,13 +30,11 @@ export function proxyStream(
         const settled = await stub.settle(requestId, usage.total_tokens);
         if (!settled.ok && settled.reason === "unknown_request") {
           outcome = "uncertain";
-          await inserted;
           await completeRequestAuditBestEffort(env, requestId, { status: "orphaned", billingClass: "none" }, inserted);
           await stub.releaseInFlight(requestId);
           onFinalized?.(outcome);
           return;
         }
-        await inserted;
         await completeRequestAuditBestEffort(env, requestId, {
           status: "completed",
           inputTokens: usage.prompt_tokens,
@@ -52,7 +50,8 @@ export function proxyStream(
       await stub.releaseInFlight(requestId);
       onFinalized?.(outcome);
     } catch (error) {
-      onFinalized?.("exception");
+      await stub.releaseInFlight(requestId).catch(() => undefined);
+      await Promise.resolve().then(() => onFinalized?.("exception")).catch(() => undefined);
       throw error;
     }
   };
