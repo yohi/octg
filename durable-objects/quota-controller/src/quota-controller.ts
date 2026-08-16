@@ -3,6 +3,7 @@ import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
 import type {
   AcquireInFlightResult,
   FinalizeResult,
+  MarkReserveOutcomeUnknownResult,
   MarkUncertainResult,
   QuotaView,
   ReconcileSnapshot,
@@ -169,6 +170,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
 
   async markUncertain(requestId: string): Promise<MarkUncertainResult> {
     return this.lifecycle.markUncertain(requestId);
+  }
+
+  async markReserveOutcomeUnknown(requestId: string): Promise<MarkReserveOutcomeUnknownResult> {
+    return this.lifecycle.markReserveOutcomeUnknown(requestId);
   }
 
   async release(requestId: string): Promise<ReleaseResult> {

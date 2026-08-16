@@ -1,11 +1,17 @@
 import { env, SELF } from "cloudflare:test";
 import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { QuotaController } from "@octg/quota-controller";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveMaxInputBytes } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => {
   await seedClient();
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -47,6 +53,58 @@ describe("resolveMaxInputBytes", () => {
 });
 
 describe("proxy failure paths", () => {
+  it("continues quota and upstream flow when the D1 audit insert fails", async () => {
+    const prepare = env.DB.prepare.bind(env.DB);
+    const insertFailure = {
+      bind: vi.fn(() => insertFailure),
+      run: vi.fn().mockRejectedValue(new Error("D1 unavailable")),
+    } as unknown as D1PreparedStatement;
+    vi.spyOn(env.DB, "prepare").mockImplementation((query) =>
+      query.startsWith("INSERT INTO requests") ? insertFailure : prepare(query));
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ usage: { total_tokens: 7 } }), { status: 200 }));
+    const before = await stub().getState();
+
+    const response = await request();
+    const after = await stub().getState();
+
+    expect(response.status).toBe(200);
+    expect(after.confirmedTokens - before.confirmedTokens).toBe(7);
+  });
+
+  it("keeps Durable Object settlement authoritative when D1 completion fails", async () => {
+    const prepare = env.DB.prepare.bind(env.DB);
+    const completionFailure = {
+      bind: vi.fn(() => completionFailure),
+      run: vi.fn().mockRejectedValue(new Error("D1 unavailable")),
+    } as unknown as D1PreparedStatement;
+    vi.spyOn(env.DB, "prepare").mockImplementation((query) =>
+      query.startsWith("UPDATE requests SET status") ? completionFailure : prepare(query));
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ usage: { total_tokens: 11 } }), { status: 200 }));
+    const before = await stub().getState();
+
+    const response = await request();
+    const after = await stub().getState();
+
+    expect(response.status).toBe(200);
+    expect(after.confirmedTokens - before.confirmedTokens).toBe(11);
+    expect(after.reservedTokens).toBe(before.reservedTokens);
+  });
+
+  it("propagates a Worker-generated ULID request ID", async () => {
+    // Given: an unauthenticated request sent through the Worker entrypoint.
+    // When: the Worker rejects the request before proxy processing.
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+
+    // Then: every response representation uses the same Worker-generated ULID request ID.
+    const requestId = response.headers.get("X-OCTG-Request-Id");
+    const body = await response.json() as { request_id: string };
+    expect(requestId).toMatch(/^req_[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(body.request_id).toBe(requestId);
+  });
+
   it("rejects a saturated pool before upstream contact without consuming quota", async () => {
     const controller = stub();
     expect(await controller.acquireInFlight("occupied-one", 2)).toEqual({ ok: true });
@@ -234,5 +292,64 @@ describe("proxy failure paths", () => {
     const row = await env.DB.prepare("SELECT reserved_tokens, status FROM requests ORDER BY started_at DESC LIMIT 1").first<{ reserved_tokens: number; status: string }>();
     expect(row?.reserved_tokens).toBeGreaterThan(0);
     expect(row?.status).toBe("uncertain");
+  });
+
+  it("fails closed on two unknown reserve outcomes without release or upstream contact", async () => {
+    const realController = stub();
+    const before = await realController.getState();
+    const reserve = vi.fn().mockRejectedValue(new TypeError("reserve transport failure"));
+    const release = vi.fn();
+    const markReserveOutcomeUnknown = vi.fn().mockResolvedValue({ ok: false, reason: "unknown_request" });
+    const controller = {
+      getState: vi.fn().mockResolvedValue(before),
+      reserve,
+      release,
+      markReserveOutcomeUnknown,
+    } as unknown as DurableObjectStub<QuotaController>;
+    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    const response = await request();
+    const body = (await response.json()) as { request_id: string };
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("X-OCTG-Request-Id")).toBe(body.request_id);
+    expect(reserve).toHaveBeenCalledTimes(2);
+    expect(markReserveOutcomeUnknown).toHaveBeenCalledWith(expect.stringMatching(/^req_/));
+    expect(release).not.toHaveBeenCalled();
+    expect(upstreamCallCount).toBe(0);
+  });
+
+  it("returns 500 without repeating an unknown-reserve mark when its RPC rejects", async () => {
+    // Given: both reserve attempts have indeterminate transport outcomes and the mark RPC rejects.
+    const before = await stub().getState();
+    const reserve = vi.fn().mockRejectedValue(new TypeError("reserve transport failure"));
+    const release = vi.fn();
+    const markReserveOutcomeUnknown = vi.fn().mockRejectedValue(new TypeError("mark transport failure"));
+    const controller = {
+      getState: vi.fn().mockResolvedValue(before),
+      reserve,
+      release,
+      markReserveOutcomeUnknown,
+    } as unknown as DurableObjectStub<QuotaController>;
+    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    // When: the request crosses the Worker boundary.
+    const response = await request();
+
+    // Then: the original fail-closed response is retained without replaying the failed mark.
+    expect(response.status).toBe(500);
+    expect(markReserveOutcomeUnknown).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(upstreamCallCount).toBe(0);
   });
 });

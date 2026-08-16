@@ -1,6 +1,7 @@
 import { remainingOf } from "@octg/shared";
 import type {
   FinalizeResult,
+  MarkReserveOutcomeUnknownResult,
   MarkUncertainResult,
   ReconcileDisposition,
   ReconcileResult,
@@ -35,10 +36,13 @@ export class QuotaLifecycle {
     const entries = await this.context.storage.list<RequestEntry>({ prefix: ENTRY_PREFIX });
     return {
       requests: [...entries.entries()]
-        .filter(([, entry]) => entry.state === "uncertain")
+        .filter((pair): pair is [string, RequestEntry & { state: "reserved" | "uncertain" }] =>
+          pair[1].state === "reserved" || pair[1].state === "uncertain")
         .map(([requestId, entry]) => ({
           requestId: String(requestId).slice(ENTRY_PREFIX.length),
           reservedTokens: entry.reservedTokens,
+          state: entry.state,
+          uncertaintyOrigin: entry.uncertaintyOrigin,
         })),
     };
   }
@@ -144,10 +148,53 @@ export class QuotaLifecycle {
       const nextEntry: RequestEntry = {
         ...entry,
         state: "uncertain",
+        uncertaintyOrigin: entry.uncertaintyOrigin ?? "upstream_uncertain",
         results: { ...entry.results, markUncertain: result },
       };
 
       await savePool(storage, nextState);
+      await putEntry(storage, requestId, nextEntry);
+      await saveUnresolved(storage, {
+        uncertainCount: unresolved.uncertainCount + 1,
+        reservedCount: Math.max(0, unresolved.reservedCount - 1),
+      });
+      return result;
+    });
+  }
+
+  async markReserveOutcomeUnknown(requestId: string): Promise<MarkReserveOutcomeUnknownResult> {
+    return this.context.storage.transaction(async (storage) => {
+      const entry = await getEntry(storage, requestId);
+      if (!entry) return { ok: false, reason: "unknown_request" };
+
+      const priorResult = entry.results.markReserveOutcomeUnknown;
+      if (priorResult) return priorResult;
+
+      if (entry.state !== "reserved") {
+        const result: MarkReserveOutcomeUnknownResult = { ok: true, applied: false };
+        await putEntry(storage, requestId, {
+          ...entry,
+          results: { ...entry.results, markReserveOutcomeUnknown: result },
+        });
+        return result;
+      }
+
+      const { pool, utcDay } = this.context.identityOf();
+      const poolState = await loadPool(storage, this.context.env, { pool, utcDay });
+      const unresolved = await loadUnresolved(storage);
+      const result: MarkReserveOutcomeUnknownResult = { ok: true, applied: true };
+      const nextEntry: RequestEntry = {
+        ...entry,
+        state: "uncertain",
+        uncertaintyOrigin: "reserve_unknown",
+        results: { ...entry.results, markReserveOutcomeUnknown: result },
+      };
+
+      await savePool(storage, {
+        ...poolState,
+        reservedTokens: Math.max(0, poolState.reservedTokens - entry.reservedTokens),
+        uncertainTokens: poolState.uncertainTokens + entry.reservedTokens,
+      });
       await putEntry(storage, requestId, nextEntry);
       await saveUnresolved(storage, {
         uncertainCount: unresolved.uncertainCount + 1,
