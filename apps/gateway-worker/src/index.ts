@@ -12,6 +12,7 @@ export { QuotaController };
 export interface Env {
   readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
   readonly DB: D1Database;
+  readonly CF_VERSION_METADATA: WorkerVersionMetadata;
   readonly OCTG_KEY_PEPPER: string;
   readonly OCTG_UPSTREAM_BASE_URL: string;
   readonly OCTG_UPSTREAM_API_TOKEN: string;
@@ -31,12 +32,15 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    let requestId: string | undefined;
     try {
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
-        return await handleProxy(request, env, ctx, "chat");
+        requestId = `req_${ulid()}`;
+        return await handleProxy(request, env, ctx, "chat", requestId);
       }
       if (request.method === "POST" && url.pathname === "/v1/responses") {
-        return await handleProxy(request, env, ctx, "responses");
+        requestId = `req_${ulid()}`;
+        return await handleProxy(request, env, ctx, "responses", requestId);
       }
       if (request.method === "GET" && url.pathname === "/v1/models") {
         return await handleModels(request, env);
@@ -47,7 +51,7 @@ export default {
       const admin = await handleAdmin(request, env, `req_${ulid()}`);
       if (admin) return admin;
     } catch {
-      return errorResponse(errInternal(`req_${crypto.randomUUID()}`));
+      return errorResponse(errInternal(requestId ?? `req_${crypto.randomUUID()}`));
     }
     return new Response("Not Found", { status: 404 });
   },
