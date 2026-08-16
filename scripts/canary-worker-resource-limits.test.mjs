@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { requestCanary } from "./canary-worker-resource-limits.mjs";
+
+const canaryScript = fileURLToPath(new URL("./canary-worker-resource-limits.mjs", import.meta.url));
+const payloadPath = fileURLToPath(new URL("../package.json", import.meta.url));
 
 const request = {
   url: new URL("https://example.test/v1/chat/completions"),
@@ -52,4 +57,22 @@ test("classifies non-abort failures as fetch errors", async () => {
   });
 
   assert.equal(result.outcome, "fetch_error");
+});
+
+test("rejects concurrency config without baseline levels before issuing requests", () => {
+  const result = spawnSync(process.execPath, [canaryScript], {
+    env: {
+      OCTG_CANARY_URL: "https://127.0.0.1:1/v1/chat/completions",
+      OCTG_CANARY_ALLOWED_HOSTS: "127.0.0.1",
+      OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+      CANARY_PAYLOAD_PATH: payloadPath,
+      CANARY_CONCURRENCY: "3",
+      CANARY_REQUEST_TIMEOUT_MS: "100",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "octg.canary.config_error\n");
 });

@@ -109,6 +109,9 @@ async function main() {
     "CANARY_CONCURRENCY",
     required("CANARY_CONCURRENCY"),
   );
+  if (!concurrencies.includes(1) || !concurrencies.includes(2)) {
+    throw new TypeError("CANARY_CONCURRENCY must include concurrency levels 1 and 2");
+  }
   const requestTimeoutMs = Number(required("CANARY_REQUEST_TIMEOUT_MS"));
   if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
     throw new TypeError("CANARY_REQUEST_TIMEOUT_MS must be a positive safe integer");
