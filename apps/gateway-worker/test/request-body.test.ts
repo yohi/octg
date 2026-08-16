@@ -132,6 +132,30 @@ describe("readJsonBody", () => {
     expect(canceled).toBe(true);
   });
 
+  it("returns the oversized result when stream cancellation rejects", async () => {
+    const body = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) {
+        controller.enqueue(encoded(jsonWithByteLength(33)));
+      },
+      cancel() {
+        return Promise.reject(new Error("cancel failed"));
+      },
+    });
+
+    const result = await readJsonBody({ headers: new Headers(), body }, 32);
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "too_large",
+      metrics: {
+        rawBodyBytes: 33,
+        rawBodyBytesSource: "measured_partial",
+        measuredRawBodyBytes: 33,
+        truncated: true,
+      },
+    });
+  });
+
   it("returns measured metrics for invalid JSON", async () => {
     const body = "{";
     const result = await readJsonBody(requestWithBody(body), 32);
