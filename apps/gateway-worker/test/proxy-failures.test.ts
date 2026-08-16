@@ -1,12 +1,17 @@
 import { env, SELF } from "cloudflare:test";
 import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveMaxInputBytes } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => {
   await seedClient();
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -315,6 +320,35 @@ describe("proxy failure paths", () => {
     expect(response.headers.get("X-OCTG-Request-Id")).toBe(body.request_id);
     expect(reserve).toHaveBeenCalledTimes(2);
     expect(markReserveOutcomeUnknown).toHaveBeenCalledWith(expect.stringMatching(/^req_/));
+    expect(release).not.toHaveBeenCalled();
+    expect(upstreamCallCount).toBe(0);
+  });
+
+  it("returns 500 without repeating an unknown-reserve mark when its RPC rejects", async () => {
+    // Given: both reserve attempts have indeterminate transport outcomes and the mark RPC rejects.
+    const before = await stub().getState();
+    const reserve = vi.fn().mockRejectedValue(new TypeError("reserve transport failure"));
+    const release = vi.fn();
+    const markReserveOutcomeUnknown = vi.fn().mockRejectedValue(new TypeError("mark transport failure"));
+    const controller = {
+      getState: vi.fn().mockResolvedValue(before),
+      reserve,
+      release,
+      markReserveOutcomeUnknown,
+    } as unknown as DurableObjectStub<QuotaController>;
+    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    // When: the request crosses the Worker boundary.
+    const response = await request();
+
+    // Then: the original fail-closed response is retained without replaying the failed mark.
+    expect(response.status).toBe(500);
+    expect(markReserveOutcomeUnknown).toHaveBeenCalledTimes(1);
     expect(release).not.toHaveBeenCalled();
     expect(upstreamCallCount).toBe(0);
   });

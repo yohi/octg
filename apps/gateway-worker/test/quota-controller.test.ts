@@ -255,6 +255,30 @@ describe("QuotaController reserve uncertainty", () => {
     });
   });
 
+  it("does not mutate a settled entry when its reserve outcome becomes unknown", async () => {
+    const controller = stub("STANDARD", "2026-10-03");
+    await controller.reserve("req-settled-reserve-outcome", 500, 500);
+    await controller.settle("req-settled-reserve-outcome", 300);
+    const before = await controller.getState();
+
+    const result = await controller.markReserveOutcomeUnknown("req-settled-reserve-outcome");
+
+    expect(result).toEqual({ ok: true, applied: false });
+    expect(await controller.getState()).toEqual(before);
+  });
+
+  it("does not mutate an uncertain entry when its reserve outcome becomes unknown", async () => {
+    const controller = stub("STANDARD", "2026-10-04");
+    await controller.reserve("req-uncertain-reserve-outcome", 500, 500);
+    await controller.markUncertain("req-uncertain-reserve-outcome");
+    const before = await controller.getState();
+
+    const result = await controller.markReserveOutcomeUnknown("req-uncertain-reserve-outcome");
+
+    expect(result).toEqual({ ok: true, applied: false });
+    expect(await controller.getState()).toEqual(before);
+  });
+
   it("keeps the reserve-unknown entry until an explicit disposition", async () => {
     const controller = stub("STANDARD", "2026-10-02");
     await controller.reserve("req-explicit-disposition", 500, 500);

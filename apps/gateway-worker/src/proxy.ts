@@ -166,6 +166,33 @@ function routeForReserveFailure(reason: string): ResourceStageRoute {
     : "reject:complimentary_quota";
 }
 
+function upstreamStageResult(upstream: Response): {
+  readonly isUncertain: boolean;
+  readonly outcome: ResourceStageOutcome;
+  readonly fields: ResourceStageFields;
+} {
+  if (upstream.ok) {
+    return {
+      isUncertain: false,
+      outcome: "success",
+      fields: { route: "free_shared", quotaReserved: true, upstreamReached: true },
+    };
+  }
+  const isUncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
+  if (isUncertain) {
+    return {
+      isUncertain: true,
+      outcome: "uncertain",
+      fields: { route: "error:upstream_uncertain", quotaReserved: true, upstreamReached: true },
+    };
+  }
+  return {
+    isUncertain: false,
+    outcome: "rejected",
+    fields: { quotaReserved: true, upstreamReached: true },
+  };
+}
+
 export async function handleProxy(
   request: Request,
   env: Env,
@@ -370,7 +397,7 @@ export async function handleProxy(
         upstreamReached: false,
       });
       reserveStageStartedAt = undefined;
-      await stub.markReserveOutcomeUnknown(requestId);
+      await stub.markReserveOutcomeUnknown(requestId).catch(() => undefined);
       completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
@@ -475,17 +502,10 @@ export async function handleProxy(
       return errorResponse(errInternal(requestId));
     }
     upstreamReached = true;
-    const upstreamUncertain = !upstream.ok && (upstream.status === 408 || upstream.status === 429 || upstream.status >= 500);
-    const upstreamOutcome: ResourceStageOutcome = upstream.ok
-      ? "success"
-      : upstreamUncertain
-        ? "uncertain"
-        : "rejected";
-    const upstreamFields: ResourceStageFields = {
-      route: upstream.ok ? "free_shared" : upstreamUncertain ? "error:upstream_uncertain" : undefined,
-      quotaReserved: true,
-      upstreamReached: true,
-    };
+    const upstreamStage = upstreamStageResult(upstream);
+    const upstreamUncertain = upstreamStage.isUncertain;
+    const upstreamOutcome = upstreamStage.outcome;
+    const upstreamFields = upstreamStage.fields;
     if (requestData.stream && upstream.ok) {
       return proxyStream(
         upstream,
