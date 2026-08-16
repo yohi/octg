@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   completeRequestAuditBestEffort,
   startRequestAuditBestEffort,
@@ -28,11 +28,25 @@ function fakeEnv(run: ReturnType<typeof vi.fn>): Env {
   } as unknown as Env;
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("best-effort request audit", () => {
   it("does not reject the request flow when the insert fails", async () => {
-    const env = fakeEnv(vi.fn().mockRejectedValue(new Error("D1 unavailable")));
+    const failure = new Error('{"authorization":"Bearer secret-token"}');
+    failure.name = '{"token":"secret-name"}';
+    const env = fakeEnv(vi.fn().mockRejectedValue(failure));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(startRequestAuditBestEffort(env, row)).resolves.toBe(false);
+    expect(warn).toHaveBeenCalledWith("request_audit.start_failed", {
+      requestId: row.requestId,
+      error: {
+        name: '{"token":[REDACTED]}',
+        message: '{"authorization":[REDACTED]}',
+      },
+    });
   });
 
   it("skips completion when the insert did not succeed", async () => {
@@ -46,11 +60,16 @@ describe("best-effort request audit", () => {
   });
 
   it("swallows a completion failure", async () => {
-    const env = fakeEnv(vi.fn().mockRejectedValue(new Error("D1 unavailable")));
+    const env = fakeEnv(vi.fn().mockRejectedValue(new Error("api_key=secret-token")));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(
       completeRequestAuditBestEffort(env, row.requestId, { status: "failed" }, Promise.resolve(true)),
     ).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith("request_audit.complete_failed", {
+      requestId: row.requestId,
+      error: { name: "Error", message: "api_key=[REDACTED]" },
+    });
   });
 });
 
@@ -78,7 +97,11 @@ describe("reserveFailClosed", () => {
   });
 
   it("returns unknown after both reservation attempts fail", async () => {
-    const reserve = vi.fn().mockRejectedValue(new TypeError("transport failure"));
+    const reserve = vi.fn()
+      .mockRejectedValueOnce(new TypeError("token=first-secret"))
+      .mockRejectedValueOnce(new TypeError("token=second-secret"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await expect(
       reserveFailClosed(reserve, {
@@ -88,5 +111,13 @@ describe("reserveFailClosed", () => {
       }),
     ).resolves.toEqual({ kind: "unknown" });
     expect(reserve).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith("quota_reservation.retry_failed", {
+      requestId: "req-unknown",
+      error: { name: "TypeError", message: "token=[REDACTED]" },
+    });
+    expect(error).toHaveBeenCalledWith("quota_reservation.unknown", {
+      requestId: "req-unknown",
+      error: { name: "TypeError", message: "token=[REDACTED]" },
+    });
   });
 });

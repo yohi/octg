@@ -1,4 +1,5 @@
 import type { ReserveResult } from "@octg/shared";
+import { safeErrorDetails } from "./error-details";
 
 export type ResolvedReserve = { readonly kind: "resolved"; readonly result: ReserveResult };
 export type UnknownReserve = { readonly kind: "unknown" };
@@ -36,10 +37,12 @@ export async function reserveFailClosed(
 ): Promise<ReserveOutcome> {
   try {
     return { kind: "resolved", result: await callReserve(reserve, args) };
-  } catch {
+  } catch (error) {
+    console.warn("quota_reservation.retry_failed", { requestId: args.requestId, error: safeErrorDetails(error) });
     try {
       return { kind: "resolved", result: await callReserve(reserve, args) };
-    } catch {
+    } catch (error) {
+      console.error("quota_reservation.unknown", { requestId: args.requestId, error: safeErrorDetails(error) });
       return { kind: "unknown" };
     }
   }
