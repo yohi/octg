@@ -301,6 +301,20 @@ describe("QuotaController in-flight leases", () => {
     expect(replacement).toMatchObject({ ok: true, lease: { requestId: "request-two" } });
   });
 
+  it("uses the full lease TTL when renewal TTL is omitted", async () => {
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const controller = stub("STANDARD", "2026-09-11");
+    const acquired = await controller.acquireInFlight("request-one", 1);
+    expect(acquired).toMatchObject({ ok: true, lease: { expiresAtMs: 121_000 } });
+    if (!acquired.ok) throw new TypeError("Expected the lease acquisition to succeed.");
+
+    now.mockReturnValue(2_000);
+    const renewed = await controller.renewInFlight("request-one", acquired.lease.generation);
+
+    expect(renewed).toMatchObject({ ok: true, lease: { expiresAtMs: 122_000 } });
+  });
+
   it("releases legacy string-array entries with the request-ID-only compatibility call", async () => {
     // Given: a durable object persisted by the legacy string-array format.
     const controller = stub("STANDARD", "2026-09-04");

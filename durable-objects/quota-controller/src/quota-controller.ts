@@ -1,6 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   nextUtcMidnight,
   remainingOf,
@@ -203,7 +202,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
   async renewInFlight(
     requestId: string,
     generation: string,
-    ttlMs = DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
+    ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   ): Promise<RenewInFlightResult> {
     return this.ctx.storage.transaction((storage) =>
       renewInFlightLease(storage, { requestId, generation, ttlMs }),
