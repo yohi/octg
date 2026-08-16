@@ -1,6 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import type { QuotaController } from "@octg/quota-controller";
-import type { QuotaSnapshot } from "@octg/shared";
+import type { InFlightLease, QuotaSnapshot } from "@octg/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { proxyStream } from "../src/stream";
 
@@ -9,6 +9,15 @@ const controllerFor = (day: string): DurableObjectStub<QuotaController> =>
 
 const sseResponse = (event: string): Response =>
   new Response(`data: ${event}\n\n`, { headers: { "content-type": "text/event-stream" } });
+
+async function acquireLease(
+  controller: DurableObjectStub<QuotaController>,
+  requestId: string,
+): Promise<InFlightLease> {
+  const acquired = await controller.acquireInFlight(requestId, 1);
+  if (!acquired.ok) throw new TypeError("Expected the in-flight lease acquisition to succeed.");
+  return acquired.lease;
+}
 
 const quotaSnapshot = {
   pool: "STANDARD",
@@ -29,13 +38,13 @@ describe("proxy stream finalization", () => {
     const requestId = "stream-settlement-rejection";
     const replacementRequestId = "stream-settlement-replacement";
     const settlementError = new Error("settlement failed");
-    await controller.acquireInFlight(requestId, 1);
+    const lease = await acquireLease(controller, requestId);
     vi.spyOn(controller, "settle").mockRejectedValue(settlementError);
     const context = createExecutionContext();
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":1}}'),
       controller,
-      requestId,
+      lease,
       env,
       context,
       quotaSnapshot,
@@ -48,10 +57,11 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the same failure propagates after the lease becomes available to another request.
       await expect(waitOnExecutionContext(context)).rejects.toBe(settlementError);
-      expect(await controller.acquireInFlight(replacementRequestId, 1)).toEqual({ ok: true });
+      const replacement = await controller.acquireInFlight(replacementRequestId, 1);
+      expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
+      if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
     } finally {
-      await controller.releaseInFlight(requestId);
-      await controller.releaseInFlight(replacementRequestId);
+      await controller.releaseInFlight(requestId, lease.generation);
     }
   });
 
@@ -62,13 +72,13 @@ describe("proxy stream finalization", () => {
     const replacementRequestId = "stream-callback-replacement";
     const settlementError = new Error("settlement failed");
     const callbackError = new Error("stage callback failed");
-    await controller.acquireInFlight(requestId, 1);
+    const lease = await acquireLease(controller, requestId);
     vi.spyOn(controller, "settle").mockRejectedValue(settlementError);
     const context = createExecutionContext();
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":1}}'),
       controller,
-      requestId,
+      lease,
       env,
       context,
       quotaSnapshot,
@@ -84,10 +94,11 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the settlement failure remains the propagated error and the lease is released.
       await expect(waitOnExecutionContext(context)).rejects.toBe(settlementError);
-      expect(await controller.acquireInFlight(replacementRequestId, 1)).toEqual({ ok: true });
+      const replacement = await controller.acquireInFlight(replacementRequestId, 1);
+      expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
+      if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
     } finally {
-      await controller.releaseInFlight(requestId);
-      await controller.releaseInFlight(replacementRequestId);
+      await controller.releaseInFlight(requestId, lease.generation);
     }
   });
 
@@ -97,13 +108,13 @@ describe("proxy stream finalization", () => {
     const requestId = "stream-uncertainty-rejection";
     const replacementRequestId = "stream-uncertainty-replacement";
     const uncertaintyError = new Error("uncertainty marking failed");
-    await controller.acquireInFlight(requestId, 1);
+    const lease = await acquireLease(controller, requestId);
     vi.spyOn(controller, "markUncertain").mockRejectedValue(uncertaintyError);
     const context = createExecutionContext();
     const response = proxyStream(
       sseResponse('{"id":"usage-absent"}'),
       controller,
-      requestId,
+      lease,
       env,
       context,
       quotaSnapshot,
@@ -116,10 +127,11 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the same failure propagates after the lease becomes available to another request.
       await expect(waitOnExecutionContext(context)).rejects.toBe(uncertaintyError);
-      expect(await controller.acquireInFlight(replacementRequestId, 1)).toEqual({ ok: true });
+      const replacement = await controller.acquireInFlight(replacementRequestId, 1);
+      expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
+      if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
     } finally {
-      await controller.releaseInFlight(requestId);
-      await controller.releaseInFlight(replacementRequestId);
+      await controller.releaseInFlight(requestId, lease.generation);
     }
   });
 
@@ -130,14 +142,14 @@ describe("proxy stream finalization", () => {
     const replacementRequestId = "stream-audit-replacement";
     const auditError = new Error("audit insertion failed");
     await controller.reserve(requestId, 10, 10);
-    await controller.acquireInFlight(requestId, 1);
+    const lease = await acquireLease(controller, requestId);
     const context = createExecutionContext();
     const inserted = Promise.reject(auditError);
     void inserted.catch(() => undefined);
     const response = proxyStream(
       sseResponse('{"usage":{"total_tokens":5}}'),
       controller,
-      requestId,
+      lease,
       env,
       context,
       quotaSnapshot,
@@ -150,10 +162,11 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the audit failure is best effort and the lease becomes available to another request.
       await expect(waitOnExecutionContext(context)).resolves.toBeUndefined();
-      expect(await controller.acquireInFlight(replacementRequestId, 1)).toEqual({ ok: true });
+      const replacement = await controller.acquireInFlight(replacementRequestId, 1);
+      expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
+      if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
     } finally {
-      await controller.releaseInFlight(requestId);
-      await controller.releaseInFlight(replacementRequestId);
+      await controller.releaseInFlight(requestId, lease.generation);
     }
   });
 

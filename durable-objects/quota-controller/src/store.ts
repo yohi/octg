@@ -45,7 +45,7 @@ export interface ReleaseInFlightLeaseInput {
   readonly generation?: string;
 }
 
-interface QuotaStorage {
+export interface QuotaStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   list<T>(options?: { readonly prefix?: string }): Promise<Map<string, T>>;
@@ -170,11 +170,11 @@ function withoutExpiredLeases(leases: readonly InFlightLease[], nowMs: number): 
   return leases.filter((lease) => lease.expiresAtMs > nowMs);
 }
 
-function expiresAtMs(ttlMs: number): number {
+function expiresAtMs(ttlMs: number, nowMs: number): number {
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new TypeError("In-flight lease TTL must be a positive safe integer.");
   }
-  const expiresAt = Date.now() + ttlMs;
+  const expiresAt = nowMs + ttlMs;
   if (!Number.isSafeInteger(expiresAt)) {
     throw new TypeError("In-flight lease expiry must be a safe integer.");
   }
@@ -188,9 +188,10 @@ export async function acquireInFlightLease(
   if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
     throw new TypeError("In-flight limit must be a positive safe integer.");
   }
-  const leaseExpiresAtMs = expiresAtMs(input.ttlMs);
   const leases = leasesOf(await loadInFlight(storage));
-  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  const nowMs = Date.now();
+  const leaseExpiresAtMs = expiresAtMs(input.ttlMs, nowMs);
+  const activeLeases = withoutExpiredLeases(leases, nowMs);
   if (activeLeases.length !== leases.length) {
     await saveInFlight(storage, { version: 1, leases: activeLeases });
   }
@@ -210,9 +211,10 @@ export async function renewInFlightLease(
   storage: QuotaStorage,
   input: RenewInFlightLeaseInput,
 ): Promise<RenewInFlightResult> {
-  const leaseExpiresAtMs = expiresAtMs(input.ttlMs);
   const leases = leasesOf(await loadInFlight(storage));
-  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  const nowMs = Date.now();
+  const leaseExpiresAtMs = expiresAtMs(input.ttlMs, nowMs);
+  const activeLeases = withoutExpiredLeases(leases, nowMs);
   if (activeLeases.length !== leases.length) {
     await saveInFlight(storage, { version: 1, leases: activeLeases });
   }

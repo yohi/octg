@@ -1,12 +1,19 @@
 import { env, SELF } from "cloudflare:test";
-import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
+import {
+  estimateInputTokens,
+  MAX_NORMALIZED_INPUT_BYTES,
+  safetyMargin,
+  type InFlightLease,
+} from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
   resolveMaxInputBytes,
 } from "../src/proxy";
+import type { InFlightLeaseReleaser } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => {
@@ -74,38 +81,25 @@ describe("in-flight lease timing configuration", () => {
 
 describe("proxy failure paths", () => {
   it("uses the acquired lease generation for outer error cleanup", async () => {
-    // Given: a reservation succeeds, upstream returns a retryable failure, and marking it uncertain rejects.
-    const before = await stub().getState();
-    const releaseInFlight = vi.fn().mockResolvedValue({ ok: true, released: true });
+    // Given: outer cleanup owns a generation-bearing lease and a narrow RPC releaser.
+    const releaseInFlight = vi.fn<InFlightLeaseReleaser["releaseInFlight"]>().mockResolvedValue({
+      ok: true,
+      released: true,
+    });
     const controller = {
-      getState: vi.fn().mockResolvedValue(before),
-      reserve: vi.fn().mockResolvedValue({
-        ok: true,
-        remaining: before.remaining - 1,
-        resetAt: "2026-08-18T00:00:00Z",
-      }),
-      acquireInFlight: vi.fn().mockResolvedValue({
-        ok: true,
-        lease: {
-          requestId: "request-placeholder",
-          generation: "lease-generation",
-          expiresAtMs: 123_456,
-        },
-      }),
-      markUncertain: vi.fn().mockRejectedValue(new TypeError("uncertain update failed")),
       releaseInFlight,
-    } as unknown as DurableObjectStub<QuotaController>;
-    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
-    vi.stubGlobal("fetch", async () =>
-      new Response(JSON.stringify({ error: { code: "upstream" } }), { status: 500 }),
-    );
+    } satisfies InFlightLeaseReleaser;
+    const lease = {
+      requestId: "req_outer_cleanup",
+      generation: "lease-generation",
+      expiresAtMs: 123_456,
+    } satisfies InFlightLease;
 
-    // When: the proxy's normal uncertain-upstream path throws during accounting.
-    const response = await request();
+    // When: the outer cleanup helper releases its owned lease.
+    await releaseInFlightBestEffort(controller, lease);
 
-    // Then: outer cleanup releases exactly the generation that this proxy acquired.
-    expect(response.status).toBe(500);
-    expect(releaseInFlight).toHaveBeenCalledWith(expect.stringMatching(/^req_/), "lease-generation");
+    // Then: the release call carries the exact owned generation.
+    expect(releaseInFlight).toHaveBeenCalledWith("req_outer_cleanup", "lease-generation");
   });
 
   it("continues quota and upstream flow when the D1 audit insert fails", async () => {

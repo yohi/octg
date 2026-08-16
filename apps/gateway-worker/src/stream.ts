@@ -1,4 +1,4 @@
-import { buildOctgHeaders, type QuotaSnapshot } from "@octg/shared";
+import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
@@ -10,13 +10,14 @@ type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?
 export function proxyStream(
   upstream: Response,
   stub: Stub,
-  requestId: string,
+  lease: InFlightLease,
   env: Env,
   ctx: ExecutionContext,
   snapshot: QuotaSnapshot,
   inserted: Promise<boolean>,
   onFinalized?: (outcome: ResourceStageOutcome) => void,
 ): Response {
+  const { generation, requestId } = lease;
   let finalized = false;
   let usage: Usage | undefined;
   const decoder = new TextDecoder();
@@ -31,7 +32,7 @@ export function proxyStream(
         if (!settled.ok && settled.reason === "unknown_request") {
           outcome = "uncertain";
           await completeRequestAuditBestEffort(env, requestId, { status: "orphaned", billingClass: "none" }, inserted);
-          await stub.releaseInFlight(requestId);
+          await stub.releaseInFlight(requestId, generation);
           onFinalized?.(outcome);
           return;
         }
@@ -47,10 +48,10 @@ export function proxyStream(
         await stub.markUncertain(requestId);
         await completeRequestAuditBestEffort(env, requestId, { status: "uncertain", billingClass: "none" }, inserted);
       }
-      await stub.releaseInFlight(requestId);
+      await stub.releaseInFlight(requestId, generation);
       onFinalized?.(outcome);
     } catch (error) {
-      await stub.releaseInFlight(requestId).catch(() => undefined);
+      await stub.releaseInFlight(requestId, generation).catch(() => undefined);
       await Promise.resolve().then(() => onFinalized?.("exception")).catch(() => undefined);
       throw error;
     }

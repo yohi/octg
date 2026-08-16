@@ -53,6 +53,15 @@ import { proxyStream } from "./stream";
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 
+export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
+
+export async function releaseInFlightBestEffort(
+  releaser: InFlightLeaseReleaser,
+  lease: InFlightLease,
+): Promise<void> {
+  await releaser.releaseInFlight(lease.requestId, lease.generation).catch(() => undefined);
+}
+
 function completeAudit(
   ctx: ExecutionContext,
   env: Env,
@@ -532,7 +541,7 @@ export async function handleProxy(
       const response = proxyStream(
         upstream,
         stub,
-        requestId,
+        inFlightLease,
         env,
         ctx,
         snapshot,
@@ -639,7 +648,7 @@ export async function handleProxy(
         }
       }
       if (inFlightAcquired && inFlightLease !== undefined) {
-        await quotaStub.releaseInFlight(requestId, inFlightLease.generation).catch(() => undefined);
+        await releaseInFlightBestEffort(quotaStub, inFlightLease);
       }
     }
     completeAudit(ctx, env, requestId, auditInserted, { status: auditStatus, billingClass: "none" });

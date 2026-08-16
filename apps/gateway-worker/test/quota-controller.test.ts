@@ -1,6 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuotaController } from "@octg/quota-controller";
+import {
+  acquireInFlightLease,
+  type QuotaStorage,
+} from "../../../durable-objects/quota-controller/src/store";
 
 const stub = (pool = "STANDARD", day = "2026-08-09") =>
   env.QUOTA_CONTROLLER.get(
@@ -219,6 +223,35 @@ describe("QuotaController in-flight leases", () => {
       ok: true,
       lease: { requestId: "replacement-request", expiresAtMs: 1_052 },
     });
+  });
+
+  it("returns a one-millisecond lease that remains unexpired after asynchronous storage access", async () => {
+    // Given: storage advances the clock while the in-flight lease transaction awaits state.
+    let nowMs = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const storage: QuotaStorage = {
+      get: async <T>(_key: string): Promise<T | undefined> => {
+        nowMs = 1_001;
+        return undefined;
+      },
+      put: async <T>(_key: string, _value: T): Promise<void> => undefined,
+      list: async <T>(): Promise<Map<string, T>> => new Map<string, T>(),
+    };
+
+    // When: a one-millisecond lease is acquired through the storage lifecycle.
+    const acquired = await acquireInFlightLease(storage, {
+      requestId: "async-boundary-request",
+      limit: 1,
+      ttlMs: 1,
+    });
+
+    // Then: the lease expiry is strictly after the transaction's current instant.
+    expect(acquired).toMatchObject({
+      ok: true,
+      lease: { requestId: "async-boundary-request", expiresAtMs: 1_002 },
+    });
+    if (!acquired.ok) throw new TypeError("Expected the boundary lease acquisition to succeed.");
+    expect(acquired.lease.expiresAtMs).toBeGreaterThan(nowMs);
   });
 
   it("fences a replacement lease from the expired generation", async () => {
