@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 const required = (name) => {
   const value = process.env[name];
@@ -14,6 +16,58 @@ const parsePositiveSafeIntegers = (name, raw) => {
   }
   return values;
 };
+
+export async function requestCanary({
+  url,
+  apiKey,
+  payload,
+  concurrency,
+  ordinal,
+  requestTimeoutMs,
+  fetchImpl = fetch,
+  now = () => performance.now(),
+}) {
+  const startedAt = now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: payload,
+      signal: controller.signal,
+      redirect: "error",
+    });
+    await response.arrayBuffer();
+    return {
+      event: "octg.canary.result",
+      concurrency,
+      ordinal,
+      outcome: "response",
+      status: response.status,
+      durationMs: now() - startedAt,
+      requestId: response.headers.get("X-OCTG-Request-Id"),
+    };
+  } catch (error) {
+    const outcome = controller.signal.aborted || error?.name === "AbortError"
+      ? "timeout"
+      : "fetch_error";
+    return {
+      event: "octg.canary.result",
+      concurrency,
+      ordinal,
+      outcome,
+      status: null,
+      durationMs: now() - startedAt,
+      requestId: null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function main() {
   let url;
@@ -62,55 +116,19 @@ async function main() {
 
   for (const concurrency of concurrencies) {
     const results = await Promise.all(
-      Array.from({ length: concurrency }, async (_, ordinal) => {
-        const startedAt = performance.now();
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${apiKey}`,
-              "content-type": "application/json",
-            },
-            body: payload,
-            signal: controller.signal,
-            redirect: "error",
-          });
-          return {
-            event: "octg.canary.result",
-            concurrency,
-            ordinal,
-            outcome: "response",
-            status: response.status,
-            durationMs: performance.now() - startedAt,
-            requestId: response.headers.get("X-OCTG-Request-Id"),
-          };
-        } catch (error) {
-          const outcome = error instanceof DOMException && error.name === "AbortError"
-            ? "timeout"
-            : "fetch_error";
-          return {
-            event: "octg.canary.result",
-            concurrency,
-            ordinal,
-            outcome,
-            status: null,
-            durationMs: performance.now() - startedAt,
-            requestId: null,
-          };
-        } finally {
-          clearTimeout(timeout);
-        }
-      }),
+      Array.from({ length: concurrency }, (_, ordinal) =>
+        requestCanary({ url, apiKey, payload, concurrency, ordinal, requestTimeoutMs }),
+      ),
     );
     for (const result of results) console.log(JSON.stringify(result));
   }
 }
 
-try {
-  await main();
-} catch {
-  console.error("octg.canary.config_error");
-  process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main();
+  } catch {
+    console.error("octg.canary.config_error");
+    process.exitCode = 1;
+  }
 }
