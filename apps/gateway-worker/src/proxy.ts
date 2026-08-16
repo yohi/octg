@@ -2,6 +2,8 @@ import {
   buildOctgHeaders,
   classifyModel,
   decideOutput,
+  DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
+  DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   errInputTooLarge,
   errInternal,
   errInvalidRequest,
@@ -25,6 +27,7 @@ import {
   utcDayOf,
   type QuotaSnapshot,
   type QuotaView,
+  type InFlightLease,
 } from "@octg/shared";
 import { authenticate } from "./auth";
 import {
@@ -86,13 +89,24 @@ export function snapshotOf(view: QuotaView): QuotaSnapshot {
 }
 
 export function resolveMaxInputBytes(configured: string | undefined): number {
-  const parsed = Number(configured);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : MAX_NORMALIZED_INPUT_BYTES;
+  return resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES);
 }
 
 export function resolveMaxInFlightRequests(configured: string | undefined): number {
+  return resolvePositiveSafeInteger(configured, 2);
+}
+
+function resolvePositiveSafeInteger(configured: string | undefined, defaultValue: number): number {
   const parsed = Number(configured);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 2;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
+export function resolveInFlightLeaseTtlMs(configured: string | undefined): number {
+  return resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_TTL_MS);
+}
+
+export function resolveInFlightLeaseRenewalMs(configured: string | undefined): number {
+  return resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS);
 }
 
 type ResourceStageFields = {
@@ -206,6 +220,7 @@ export async function handleProxy(
   let upstreamAttempted = false;
   let upstreamReached = false;
   let inFlightAcquired = false;
+  let inFlightLease: InFlightLease | undefined;
   let reserveStageStartedAt: number | undefined;
   let upstreamStageStartedAt: number | undefined;
 
@@ -441,7 +456,11 @@ export async function handleProxy(
         insertSucceeded ? setReservedTokens(env, requestId, reservation) : undefined).catch(() => undefined));
     }
 
-    const lease = await stub.acquireInFlight(requestId, resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS));
+    const lease = await stub.acquireInFlight(
+      requestId,
+      resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS),
+      resolveInFlightLeaseTtlMs(env.IN_FLIGHT_LEASE_TTL_MS),
+    );
     if (!lease.ok) {
       await stub.release(requestId);
       reservationState = "none";
@@ -449,6 +468,7 @@ export async function handleProxy(
       return errorResponse(errWorkerConcurrencyExceeded(snapshot, requestId));
     }
     inFlightAcquired = true;
+    inFlightLease = lease.lease;
 
     const upstreamStartedAt = startResourceStage(env, requestId, "upstream");
     upstreamStageStartedAt = upstreamStartedAt;
@@ -489,15 +509,17 @@ export async function handleProxy(
       if (error instanceof UpstreamConfigError || !upstreamAttempted) {
         await stub.release(requestId);
         reservationState = "none";
-        await stub.releaseInFlight(requestId);
+        await stub.releaseInFlight(requestId, inFlightLease.generation);
         inFlightAcquired = false;
+        inFlightLease = undefined;
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errInternal(requestId));
       }
       await stub.markUncertain(requestId);
       reservationState = "none";
-      await stub.releaseInFlight(requestId);
+      await stub.releaseInFlight(requestId, inFlightLease.generation);
       inFlightAcquired = false;
+      inFlightLease = undefined;
       completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
@@ -507,7 +529,7 @@ export async function handleProxy(
     const upstreamOutcome = upstreamStage.outcome;
     const upstreamFields = upstreamStage.fields;
     if (requestData.stream && upstream.ok) {
-      return proxyStream(
+      const response = proxyStream(
         upstream,
         stub,
         requestId,
@@ -531,6 +553,8 @@ export async function handleProxy(
           );
         },
       );
+      inFlightAcquired = false;
+      return response;
     }
     upstreamStageStartedAt = undefined;
     finishResourceStage(env, requestId, "upstream", upstreamStartedAt, upstreamOutcome, upstreamFields);
@@ -538,8 +562,9 @@ export async function handleProxy(
       if (upstreamUncertain) await stub.markUncertain(requestId);
       else await stub.release(requestId);
       reservationState = "none";
-      await stub.releaseInFlight(requestId);
+      await stub.releaseInFlight(requestId, inFlightLease.generation);
       inFlightAcquired = false;
+      inFlightLease = undefined;
       completeAudit(ctx, env, requestId, auditInserted, { status: upstreamUncertain ? "uncertain" : "failed", billingClass: "none" });
       return upstreamResponse(upstream, requestId, snapshot);
     }
@@ -550,8 +575,9 @@ export async function handleProxy(
     } catch {
       await stub.markUncertain(requestId);
       reservationState = "none";
-      await stub.releaseInFlight(requestId);
+      await stub.releaseInFlight(requestId, inFlightLease.generation);
       inFlightAcquired = false;
+      inFlightLease = undefined;
       completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
@@ -575,8 +601,9 @@ export async function handleProxy(
       reservationState = "none";
       completeAudit(ctx, env, requestId, auditInserted, { status: "uncertain", billingClass: "none" });
     }
-    await stub.releaseInFlight(requestId);
+    await stub.releaseInFlight(requestId, inFlightLease.generation);
     inFlightAcquired = false;
+    inFlightLease = undefined;
     return new Response(JSON.stringify(data), {
       status: 200,
       headers: {
@@ -611,7 +638,9 @@ export async function handleProxy(
           await quotaStub.release(requestId).catch(() => undefined);
         }
       }
-      if (inFlightAcquired) await quotaStub.releaseInFlight(requestId).catch(() => undefined);
+      if (inFlightAcquired && inFlightLease !== undefined) {
+        await quotaStub.releaseInFlight(requestId, inFlightLease.generation).catch(() => undefined);
+      }
     }
     completeAudit(ctx, env, requestId, auditInserted, { status: auditStatus, billingClass: "none" });
     return errorResponse(errInternal(requestId));

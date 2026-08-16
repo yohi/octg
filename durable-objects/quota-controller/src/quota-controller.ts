@@ -1,5 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
+import {
+  DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
+  DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
+  nextUtcMidnight,
+  remainingOf,
+  tierOf,
+} from "@octg/shared";
 import type {
   AcquireInFlightResult,
   FinalizeResult,
@@ -9,21 +15,24 @@ import type {
   ReconcileSnapshot,
   ReconcileDisposition,
   ReconcileResult,
+  ReleaseInFlightResult,
   ReleaseResult,
   ReserveResult,
+  RenewInFlightResult,
   SettleResult,
 } from "@octg/shared";
 import { QuotaLifecycle } from "./quota-lifecycle";
 import {
+  acquireInFlightLease,
   getEntry,
   getIdempotencyRequestId,
   FINALIZE_KEY,
-  loadInFlight,
   loadPool,
   loadUnresolved,
   putEntry,
   putIdempotencyRequestId,
-  saveInFlight,
+  releaseInFlightLease,
+  renewInFlightLease,
   savePool,
   saveUnresolved,
 } from "./store";
@@ -180,26 +189,33 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     return this.lifecycle.release(requestId);
   }
 
-  async acquireInFlight(requestId: string, limit: number): Promise<AcquireInFlightResult> {
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      throw new TypeError("In-flight limit must be a positive safe integer.");
-    }
-    return this.ctx.storage.transaction(async (storage) => {
-      const active = new Set(await loadInFlight(storage));
-      if (active.has(requestId)) return { ok: true };
-      if (active.size >= limit) return { ok: false, reason: "worker_concurrency_exceeded" };
-      active.add(requestId);
-      await saveInFlight(storage, [...active]);
-      return { ok: true };
-    });
+  async acquireInFlight(
+    requestId: string,
+    limit: number,
+    ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
+  ): Promise<AcquireInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      acquireInFlightLease(storage, { requestId, limit, ttlMs }),
+    );
   }
 
-  async releaseInFlight(requestId: string): Promise<void> {
-    await this.ctx.storage.transaction(async (storage) => {
-      const active = new Set(await loadInFlight(storage));
-      if (!active.delete(requestId)) return;
-      await saveInFlight(storage, [...active]);
-    });
+  async renewInFlight(
+    requestId: string,
+    generation: string,
+    ttlMs = DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
+  ): Promise<RenewInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      renewInFlightLease(storage, { requestId, generation, ttlMs }),
+    );
+  }
+
+  async releaseInFlight(
+    requestId: string,
+    generation?: string,
+  ): Promise<ReleaseInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      releaseInFlightLease(storage, { requestId, generation }),
+    );
   }
 
   async reconcileRequest(

@@ -1,5 +1,13 @@
 import { POOL_LIMITS } from "@octg/shared";
-import type { PoolName, PoolState, RequestEntry } from "@octg/shared";
+import type {
+  AcquireInFlightResult,
+  InFlightLease,
+  PoolName,
+  PoolState,
+  ReleaseInFlightResult,
+  RenewInFlightResult,
+  RequestEntry,
+} from "@octg/shared";
 
 export const POOL_KEY = "pool";
 export const ENTRY_PREFIX = "req:";
@@ -11,6 +19,30 @@ export const IN_FLIGHT_KEY = "in_flight";
 export interface UnresolvedState {
   readonly uncertainCount: number;
   readonly reservedCount: number;
+}
+
+export interface InFlightLeaseState {
+  readonly version: 1;
+  readonly leases: readonly InFlightLease[];
+}
+
+export type InFlightState = InFlightLeaseState | readonly string[];
+
+export interface AcquireInFlightLeaseInput {
+  readonly requestId: string;
+  readonly limit: number;
+  readonly ttlMs: number;
+}
+
+export interface RenewInFlightLeaseInput {
+  readonly requestId: string;
+  readonly generation: string;
+  readonly ttlMs: number;
+}
+
+export interface ReleaseInFlightLeaseInput {
+  readonly requestId: string;
+  readonly generation?: string;
 }
 
 interface QuotaStorage {
@@ -109,10 +141,111 @@ export async function saveUnresolved(
   await storage.put(UNRESOLVED_KEY, state);
 }
 
-export async function loadInFlight(storage: QuotaStorage): Promise<readonly string[]> {
-  return (await storage.get<readonly string[]>(IN_FLIGHT_KEY)) ?? [];
+export async function loadInFlight(storage: QuotaStorage): Promise<InFlightState> {
+  return (await storage.get<InFlightState>(IN_FLIGHT_KEY)) ?? [];
 }
 
-export async function saveInFlight(storage: QuotaStorage, requestIds: readonly string[]): Promise<void> {
-  await storage.put(IN_FLIGHT_KEY, requestIds);
+export async function saveInFlight(storage: QuotaStorage, state: InFlightLeaseState): Promise<void> {
+  await storage.put(IN_FLIGHT_KEY, state);
+}
+
+const LEGACY_IN_FLIGHT_GENERATION = "";
+const LEGACY_IN_FLIGHT_EXPIRY_MS = Number.MAX_SAFE_INTEGER;
+
+function isLegacyInFlightState(state: InFlightState): state is readonly string[] {
+  return Array.isArray(state);
+}
+
+function leasesOf(state: InFlightState): readonly InFlightLease[] {
+  return isLegacyInFlightState(state)
+    ? state.map((requestId) => ({
+        requestId,
+        generation: LEGACY_IN_FLIGHT_GENERATION,
+        expiresAtMs: LEGACY_IN_FLIGHT_EXPIRY_MS,
+      }))
+    : state.leases;
+}
+
+function withoutExpiredLeases(leases: readonly InFlightLease[], nowMs: number): readonly InFlightLease[] {
+  return leases.filter((lease) => lease.expiresAtMs > nowMs);
+}
+
+function expiresAtMs(ttlMs: number): number {
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new TypeError("In-flight lease TTL must be a positive safe integer.");
+  }
+  const expiresAt = Date.now() + ttlMs;
+  if (!Number.isSafeInteger(expiresAt)) {
+    throw new TypeError("In-flight lease expiry must be a safe integer.");
+  }
+  return expiresAt;
+}
+
+export async function acquireInFlightLease(
+  storage: QuotaStorage,
+  input: AcquireInFlightLeaseInput,
+): Promise<AcquireInFlightResult> {
+  if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
+    throw new TypeError("In-flight limit must be a positive safe integer.");
+  }
+  const leaseExpiresAtMs = expiresAtMs(input.ttlMs);
+  const leases = leasesOf(await loadInFlight(storage));
+  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  if (activeLeases.length !== leases.length) {
+    await saveInFlight(storage, { version: 1, leases: activeLeases });
+  }
+  const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
+  if (activeLease) return { ok: true, lease: activeLease };
+  if (activeLeases.length >= input.limit) return { ok: false, reason: "worker_concurrency_exceeded" };
+  const lease: InFlightLease = {
+    requestId: input.requestId,
+    generation: crypto.randomUUID(),
+    expiresAtMs: leaseExpiresAtMs,
+  };
+  await saveInFlight(storage, { version: 1, leases: [...activeLeases, lease] });
+  return { ok: true, lease };
+}
+
+export async function renewInFlightLease(
+  storage: QuotaStorage,
+  input: RenewInFlightLeaseInput,
+): Promise<RenewInFlightResult> {
+  const leaseExpiresAtMs = expiresAtMs(input.ttlMs);
+  const leases = leasesOf(await loadInFlight(storage));
+  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  if (activeLeases.length !== leases.length) {
+    await saveInFlight(storage, { version: 1, leases: activeLeases });
+  }
+  const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
+  if (!activeLease) return { ok: false, reason: "lease_not_found" };
+  if (activeLease.generation === LEGACY_IN_FLIGHT_GENERATION || activeLease.generation !== input.generation) {
+    return { ok: false, reason: "stale_generation" };
+  }
+  const renewedLease: InFlightLease = { ...activeLease, expiresAtMs: leaseExpiresAtMs };
+  await saveInFlight(storage, {
+    version: 1,
+    leases: activeLeases.map((lease) => lease === activeLease ? renewedLease : lease),
+  });
+  return { ok: true, lease: renewedLease };
+}
+
+export async function releaseInFlightLease(
+  storage: QuotaStorage,
+  input: ReleaseInFlightLeaseInput,
+): Promise<ReleaseInFlightResult> {
+  const leases = leasesOf(await loadInFlight(storage));
+  const activeLeases = withoutExpiredLeases(leases, Date.now());
+  const activeLease = activeLeases.find((lease) => lease.requestId === input.requestId);
+  const canRelease = activeLease !== undefined && (
+    input.generation === undefined
+      ? activeLease.generation === LEGACY_IN_FLIGHT_GENERATION
+      : activeLease.generation === input.generation
+  );
+  const retainedLeases = canRelease
+    ? activeLeases.filter((lease) => lease !== activeLease)
+    : activeLeases;
+  if (retainedLeases.length !== leases.length) {
+    await saveInFlight(storage, { version: 1, leases: retainedLeases });
+  }
+  return { ok: true, released: canRelease };
 }

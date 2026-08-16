@@ -20,6 +20,8 @@ export interface Env {
   readonly QUOTA_LIMIT_MINI?: string;
   readonly MAX_INPUT_BYTES?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly IN_FLIGHT_LEASE_TTL_MS?: string;
+  readonly IN_FLIGHT_LEASE_RENEWAL_MS?: string;
   readonly ACCESS_TEAM_DOMAIN: string;
   readonly ACCESS_AUD: string;
   readonly OPENAI_USAGE_API_KEY?: string;

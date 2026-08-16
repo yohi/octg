@@ -2,7 +2,11 @@ import { env, SELF } from "cloudflare:test";
 import { estimateInputTokens, MAX_NORMALIZED_INPUT_BYTES, safetyMargin } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveMaxInputBytes } from "../src/proxy";
+import {
+  resolveInFlightLeaseRenewalMs,
+  resolveInFlightLeaseTtlMs,
+  resolveMaxInputBytes,
+} from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => {
@@ -52,7 +56,58 @@ describe("resolveMaxInputBytes", () => {
   });
 });
 
+describe("in-flight lease timing configuration", () => {
+  it.each([
+    [resolveInFlightLeaseTtlMs, 120_000],
+    [resolveInFlightLeaseRenewalMs, 30_000],
+  ] as const)("falls back to the safe default for invalid binding values", (resolveTiming, defaultMs) => {
+    // Given: unset, non-integer, non-positive, and unsafe environment bindings.
+    const invalidBindings = [undefined, "", "0", "-1", "1.5", "not-a-number", "9007199254740992"];
+
+    // When: each binding crosses the Worker configuration boundary.
+    const resolved = invalidBindings.map(resolveTiming);
+
+    // Then: every invalid value resolves to the documented safe default.
+    expect(resolved).toEqual(invalidBindings.map(() => defaultMs));
+  });
+});
+
 describe("proxy failure paths", () => {
+  it("uses the acquired lease generation for outer error cleanup", async () => {
+    // Given: a reservation succeeds, upstream returns a retryable failure, and marking it uncertain rejects.
+    const before = await stub().getState();
+    const releaseInFlight = vi.fn().mockResolvedValue({ ok: true, released: true });
+    const controller = {
+      getState: vi.fn().mockResolvedValue(before),
+      reserve: vi.fn().mockResolvedValue({
+        ok: true,
+        remaining: before.remaining - 1,
+        resetAt: "2026-08-18T00:00:00Z",
+      }),
+      acquireInFlight: vi.fn().mockResolvedValue({
+        ok: true,
+        lease: {
+          requestId: "request-placeholder",
+          generation: "lease-generation",
+          expiresAtMs: 123_456,
+        },
+      }),
+      markUncertain: vi.fn().mockRejectedValue(new TypeError("uncertain update failed")),
+      releaseInFlight,
+    } as unknown as DurableObjectStub<QuotaController>;
+    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
+    vi.stubGlobal("fetch", async () =>
+      new Response(JSON.stringify({ error: { code: "upstream" } }), { status: 500 }),
+    );
+
+    // When: the proxy's normal uncertain-upstream path throws during accounting.
+    const response = await request();
+
+    // Then: outer cleanup releases exactly the generation that this proxy acquired.
+    expect(response.status).toBe(500);
+    expect(releaseInFlight).toHaveBeenCalledWith(expect.stringMatching(/^req_/), "lease-generation");
+  });
+
   it("continues quota and upstream flow when the D1 audit insert fails", async () => {
     const prepare = env.DB.prepare.bind(env.DB);
     const insertFailure = {
@@ -107,8 +162,13 @@ describe("proxy failure paths", () => {
 
   it("rejects a saturated pool before upstream contact without consuming quota", async () => {
     const controller = stub();
-    expect(await controller.acquireInFlight("occupied-one", 2)).toEqual({ ok: true });
-    expect(await controller.acquireInFlight("occupied-two", 2)).toEqual({ ok: true });
+    const firstLease = await controller.acquireInFlight("occupied-one", 2);
+    const secondLease = await controller.acquireInFlight("occupied-two", 2);
+    expect(firstLease).toMatchObject({ ok: true, lease: { requestId: "occupied-one" } });
+    expect(secondLease).toMatchObject({ ok: true, lease: { requestId: "occupied-two" } });
+    if (!firstLease.ok || !secondLease.ok) {
+      throw new TypeError("Expected both in-flight leases to be acquired.");
+    }
     try {
       const before = await controller.getState();
       let upstreamCallCount = 0;
@@ -129,8 +189,8 @@ describe("proxy failure paths", () => {
         uncertainTokens: before.uncertainTokens,
       });
     } finally {
-      await controller.releaseInFlight("occupied-one");
-      await controller.releaseInFlight("occupied-two");
+      await controller.releaseInFlight("occupied-one", firstLease.lease.generation);
+      await controller.releaseInFlight("occupied-two", secondLease.lease.generation);
     }
   });
 

@@ -54,9 +54,20 @@ export type MarkReserveOutcomeUnknownResult =
 export type ReleaseResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: "unknown_request" };
+export interface InFlightLease {
+  readonly requestId: string;
+  readonly generation: string;
+  readonly expiresAtMs: number;
+}
 export type AcquireInFlightResult =
-  | { readonly ok: true }
+  | { readonly ok: true; readonly lease: InFlightLease }
   | { readonly ok: false; readonly reason: "worker_concurrency_exceeded" };
+export type RenewInFlightResult =
+  | { readonly ok: true; readonly lease: InFlightLease }
+  | { readonly ok: false; readonly reason: "lease_not_found" | "stale_generation" };
+export type ReleaseInFlightResult = { readonly ok: true; readonly released: boolean };
+export const DEFAULT_IN_FLIGHT_LEASE_TTL_MS = 120_000;
+export const DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS = 30_000;
 
 export type ReconcileDisposition = "consumed" | "unused";
 export type ReconcileResult = { readonly ok: true; readonly applied: boolean };

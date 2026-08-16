@@ -14,6 +14,8 @@
     "QUOTA_LIMIT_MINI": "10000000",
     "MAX_INPUT_BYTES": "1048576",
     "MAX_IN_FLIGHT_REQUESTS": "2",
+    "IN_FLIGHT_LEASE_TTL_MS": "120000",
+    "IN_FLIGHT_LEASE_RENEWAL_MS": "30000",
     "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/4bc6b4d26ae21d2b0d5bbb7ce91f1cda/octg-gateway/openai",
     "ACCESS_TEAM_DOMAIN": "https://yohi.cloudflareaccess.com",
     "ACCESS_AUD": "d261bb3efaea8adc0fb32db48b86c855212c9ddde60ab90de13aa7062ed77abf",

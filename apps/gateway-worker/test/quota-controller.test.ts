@@ -1,11 +1,15 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuotaController } from "@octg/quota-controller";
 
 const stub = (pool = "STANDARD", day = "2026-08-09") =>
   env.QUOTA_CONTROLLER.get(
     env.QUOTA_CONTROLLER.idFromName(`quota:${pool}:${day}`),
   );
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 async function useConfirmed(
   controller: DurableObjectStub<QuotaController>,
@@ -36,8 +40,8 @@ const invalidReservations = [
 
 function hasQuotaControllerMethods<T extends object>(
   instance: T,
-): instance is T & Pick<QuotaController, "reserve" | "getState"> {
-  return "reserve" in instance && "getState" in instance;
+): instance is T & Pick<QuotaController, "acquireInFlight" | "getState" | "reserve"> {
+  return "reserve" in instance && "getState" in instance && "acquireInFlight" in instance;
 }
 
 async function assertInvalidReservationDoesNotPersist(
@@ -175,45 +179,135 @@ describe("QuotaController.reserve", () => {
 });
 
 describe("QuotaController in-flight leases", () => {
-  it("reuses a released pool slot without changing quota reservations", async () => {
-    // Given: a pool whose two in-flight slots are occupied.
+  it("returns one lease generation for a repeated active acquire without consuming another slot", async () => {
+    // Given: a pool with capacity for one active request at a fixed instant.
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
     const controller = stub("STANDARD", "2026-08-31");
-    const before = await controller.getState();
-    expect(await controller.acquireInFlight("request-one", 2)).toEqual({ ok: true });
-    expect(await controller.acquireInFlight("request-two", 2)).toEqual({ ok: true });
 
-    // When: a third request is admitted before and after one active request releases its slot.
-    const rejected = await controller.acquireInFlight("request-three", 2);
-    await controller.releaseInFlight("request-one");
-    const admitted = await controller.acquireInFlight("request-three", 2);
+    // When: the same request acquires twice before its lease expires.
+    const first = await controller.acquireInFlight("request-one", 1, 50);
+    expect(first).toMatchObject({
+      ok: true,
+      lease: { requestId: "request-one", expiresAtMs: 1_050 },
+    });
+    if (!first.ok) throw new TypeError("Expected the first lease acquisition to succeed.");
+    const repeated = await controller.acquireInFlight("request-one", 1, 50);
+    const saturated = await controller.acquireInFlight("request-two", 1, 50);
 
-    // Then: only the saturated admission is rejected, and lease bookkeeping does not spend quota.
-    expect(rejected).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
-    expect(admitted).toEqual({ ok: true });
-    expect(await controller.getState()).toMatchObject({
-      reservedTokens: before.reservedTokens,
-      confirmedTokens: before.confirmedTokens,
-      uncertainTokens: before.uncertainTokens,
-      requestCount: before.requestCount,
+    // Then: the retry owns the same generation and the one slot remains occupied.
+    expect(first.lease.generation).toMatch(/^[0-9a-f-]{36}$/);
+    expect(repeated).toMatchObject({
+      ok: true,
+      lease: { generation: first.lease.generation, expiresAtMs: 1_050 },
+    });
+    expect(saturated).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
+  });
+
+  it("prunes expired leases transactionally before reusing capacity", async () => {
+    // Given: a one-slot pool with an expired lease.
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const controller = stub("STANDARD", "2026-09-01");
+    await controller.acquireInFlight("expired-request", 1, 1);
+
+    // When: another request acquires after the prior lease has expired.
+    now.mockReturnValue(1_002);
+    const replacement = await controller.acquireInFlight("replacement-request", 1, 50);
+
+    // Then: expiry is removed within the acquisition transaction and capacity is reusable.
+    expect(replacement).toMatchObject({
+      ok: true,
+      lease: { requestId: "replacement-request", expiresAtMs: 1_052 },
     });
   });
 
-  it("makes repeated acquire and release idempotent for one request", async () => {
-    // Given: one available in-flight slot.
-    const controller = stub("STANDARD", "2026-09-01");
+  it("fences a replacement lease from the expired generation", async () => {
+    // Given: a request whose original one-millisecond lease has expired.
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const controller = stub("STANDARD", "2026-09-02");
+    const original = await controller.acquireInFlight("request-one", 1, 1);
+    expect(original).toMatchObject({ ok: true, lease: { expiresAtMs: 1_001 } });
+    if (!original.ok) throw new TypeError("Expected the original lease acquisition to succeed.");
 
-    // When: one request acquires twice, then releases twice.
-    const first = await controller.acquireInFlight("request-one", 1);
-    const repeated = await controller.acquireInFlight("request-one", 1);
-    await controller.releaseInFlight("request-one");
-    await controller.releaseInFlight("request-one");
-    const next = await controller.acquireInFlight("request-two", 1);
+    // When: the request acquires a replacement lease and the stale owner renews and releases.
+    now.mockReturnValue(1_002);
+    const replacement = await controller.acquireInFlight("request-one", 1, 50);
+    expect(replacement).toMatchObject({ ok: true, lease: { expiresAtMs: 1_052 } });
+    if (!replacement.ok) throw new TypeError("Expected the replacement lease acquisition to succeed.");
+    const staleRenewal = await controller.renewInFlight("request-one", original.lease.generation, 50);
+    const staleRelease = await controller.releaseInFlight("request-one", original.lease.generation);
+    const saturated = await controller.acquireInFlight("request-two", 1, 50);
 
-    // Then: duplicate lifecycle signals neither consume nor release another request's slot.
-    expect(first).toEqual({ ok: true });
-    expect(repeated).toEqual({ ok: true });
-    expect(next).toEqual({ ok: true });
+    // Then: only the replacement generation retains ownership of the slot.
+    expect(replacement.lease.generation).not.toBe(original.lease.generation);
+    expect(staleRenewal).toEqual({ ok: false, reason: "stale_generation" });
+    expect(staleRelease).toEqual({ ok: true, released: false });
+    expect(saturated).toEqual({ ok: false, reason: "worker_concurrency_exceeded" });
   });
+
+  it("renews an active lease but does not revive an expired one", async () => {
+    // Given: an active lease with a generation held by its current owner.
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(1_000);
+    const controller = stub("STANDARD", "2026-09-03");
+    const acquired = await controller.acquireInFlight("request-one", 1, 5);
+    expect(acquired).toMatchObject({ ok: true, lease: { expiresAtMs: 1_005 } });
+    if (!acquired.ok) throw new TypeError("Expected the lease acquisition to succeed.");
+
+    // When: the owner renews before expiry and retries only after the renewed lease expires.
+    now.mockReturnValue(1_001);
+    const renewed = await controller.renewInFlight("request-one", acquired.lease.generation, 5);
+    now.mockReturnValue(1_007);
+    const expiredRenewal = await controller.renewInFlight("request-one", acquired.lease.generation, 5);
+    const replacement = await controller.acquireInFlight("request-two", 1, 5);
+
+    // Then: the active renewal extends expiry, while the expired lease cannot be revived.
+    expect(renewed).toMatchObject({ ok: true, lease: { expiresAtMs: 1_006 } });
+    expect(expiredRenewal).toEqual({ ok: false, reason: "lease_not_found" });
+    expect(replacement).toMatchObject({ ok: true, lease: { requestId: "request-two" } });
+  });
+
+  it("releases legacy string-array entries with the request-ID-only compatibility call", async () => {
+    // Given: a durable object persisted by the legacy string-array format.
+    const controller = stub("STANDARD", "2026-09-04");
+    await runInDurableObject(controller, (_instance, state) =>
+      state.storage.put("in_flight", ["legacy-request"]),
+    );
+
+    // When: the legacy owner releases only by request ID.
+    const released = await controller.releaseInFlight("legacy-request");
+    const acquired = await controller.acquireInFlight("new-request", 1, 50);
+
+    // Then: the old record no longer occupies the one available slot.
+    expect(released).toEqual({ ok: true, released: true });
+    expect(acquired).toMatchObject({ ok: true, lease: { requestId: "new-request" } });
+  });
+
+  it.each([
+    [0, "2026-09-05"],
+    [-1, "2026-09-06"],
+    [1.5, "2026-09-07"],
+    [Number.MAX_SAFE_INTEGER + 1, "2026-09-08"],
+  ] as const)(
+    "rejects an invalid lease TTL of %s without acquiring a slot",
+    async (ttlMs, day) => {
+      // Given: an empty one-slot pool and an invalid caller-provided TTL.
+      const controller = stub("STANDARD", day);
+
+      // When: a direct RPC acquire uses the invalid TTL.
+      // Then: the boundary rejects it before persisting a lease.
+      await expect(
+        runInDurableObject(controller, async (instance) => {
+          if (!hasQuotaControllerMethods(instance)) {
+            throw new TypeError("Expected a QuotaController instance.");
+          }
+          return instance.acquireInFlight("request-one", 1, ttlMs);
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(await controller.acquireInFlight("request-two", 1, 50)).toMatchObject({ ok: true });
+    },
+  );
 });
 
 describe("QuotaController reserve uncertainty", () => {
