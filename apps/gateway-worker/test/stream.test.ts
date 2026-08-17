@@ -144,6 +144,34 @@ describe("proxy stream finalization", () => {
     }
   });
 
+  it("reports uncertain finalization when usage metadata is absent", async () => {
+    const controller = controllerFor("2026-10-12");
+    const requestId = "stream-usage-absent";
+    const lease = await acquireLease(controller, requestId);
+    const finalized = vi.fn();
+    const context = createExecutionContext();
+    const response = proxyStream(
+      sseResponse('{"id":"usage-absent"}'),
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+      finalized,
+    );
+
+    await response.text();
+
+    try {
+      await expect(waitOnExecutionContext(context)).resolves.toBeUndefined();
+      expect(finalized).toHaveBeenCalledTimes(1);
+      expect(finalized).toHaveBeenCalledWith("uncertain");
+    } finally {
+      await controller.releaseInFlight(requestId, lease.generation);
+    }
+  });
+
   it("treats audit insertion rejection as best effort while releasing the in-flight lease", async () => {
     // Given: settlement succeeds but the audit insertion promise rejects after a lease was acquired.
     const controller = controllerFor("2026-10-07");

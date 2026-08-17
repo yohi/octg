@@ -83,6 +83,7 @@ export function proxyStream(
           billingClass: "free",
         }, inserted);
       } else {
+        outcome = "uncertain";
         await stub.markUncertain(requestId);
         await completeRequestAuditBestEffort(env, requestId, { status: "uncertain", billingClass: "none" }, inserted);
       }
