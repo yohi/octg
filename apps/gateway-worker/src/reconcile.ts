@@ -50,8 +50,7 @@ export async function reconcileReserveUnknown(
       completedAt,
       requestId,
     )
-    .run()
-    .catch(() => undefined);
+    .run();
   return { ok: true, applied: result.applied, disposition, reservedTokens: canonicalTarget.reservedTokens };
 }
 

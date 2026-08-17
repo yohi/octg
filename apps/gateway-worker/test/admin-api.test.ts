@@ -185,7 +185,7 @@ describe("admin API", () => {
     ).toEqual({ status: "completed", total_tokens: 200, billing_class: "free" });
   });
 
-  it("keeps manual reconciliation successful when its D1 projection fails", async () => {
+  it("returns a non-success response when its D1 projection fails and repairs on retry", async () => {
     // Given: a reserve-unknown request and a database trigger that rejects its projection update.
     const day = "2026-11-06";
     const requestId = "admin-reserve-unknown-db-failure";
@@ -206,12 +206,29 @@ describe("admin API", () => {
         body: JSON.stringify({ disposition: "consumed" }),
       }, "jwt");
 
-      // Then: the DO remains authoritative and the best-effort projection failure does not alter success.
-      expect(response.status).toBe(200);
+      // Then: the DO remains authoritative, but the failed projection is reported for retry.
+      expect(response.status).toBe(500);
       expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 200 });
+      expect(
+        await env.DB.prepare("SELECT status, total_tokens, billing_class FROM requests WHERE request_id = ?")
+          .bind(requestId)
+          .first<{ status: string; total_tokens: number; billing_class: string | null }>(),
+      ).toEqual({ status: "uncertain", total_tokens: 0, billing_class: null });
     } finally {
       await env.DB.prepare("DROP TRIGGER IF EXISTS admin_reserve_unknown_projection_failure").run();
     }
+
+    const retry = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+
+    expect(retry.status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT status, total_tokens, billing_class FROM requests WHERE request_id = ?")
+        .bind(requestId)
+        .first<{ status: string; total_tokens: number; billing_class: string }>(),
+    ).toEqual({ status: "completed", total_tokens: 200, billing_class: "free" });
   });
 
   it("returns not found for unknown admin routes after access is verified", async () => {
