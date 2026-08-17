@@ -1,18 +1,29 @@
 import { DurableObject } from "cloudflare:workers";
-import { nextUtcMidnight, remainingOf, tierOf } from "@octg/shared";
+import {
+  DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
+  nextUtcMidnight,
+  remainingOf,
+  tierOf,
+} from "@octg/shared";
 import type {
+  AcquireInFlightResult,
   FinalizeResult,
+  MarkReserveOutcomeUnknownResult,
   MarkUncertainResult,
   QuotaView,
   ReconcileSnapshot,
+  ReconcileRequestView,
   ReconcileDisposition,
   ReconcileResult,
+  ReleaseInFlightResult,
   ReleaseResult,
   ReserveResult,
+  RenewInFlightResult,
   SettleResult,
 } from "@octg/shared";
 import { QuotaLifecycle } from "./quota-lifecycle";
 import {
+  acquireInFlightLease,
   getEntry,
   getIdempotencyRequestId,
   FINALIZE_KEY,
@@ -20,6 +31,8 @@ import {
   loadUnresolved,
   putEntry,
   putIdempotencyRequestId,
+  releaseInFlightLease,
+  renewInFlightLease,
   savePool,
   saveUnresolved,
 } from "./store";
@@ -168,8 +181,41 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     return this.lifecycle.markUncertain(requestId);
   }
 
+  async markReserveOutcomeUnknown(requestId: string): Promise<MarkReserveOutcomeUnknownResult> {
+    return this.lifecycle.markReserveOutcomeUnknown(requestId);
+  }
+
   async release(requestId: string): Promise<ReleaseResult> {
     return this.lifecycle.release(requestId);
+  }
+
+  async acquireInFlight(
+    requestId: string,
+    limit: number,
+    ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
+  ): Promise<AcquireInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      acquireInFlightLease(storage, { requestId, limit, ttlMs }),
+    );
+  }
+
+  async renewInFlight(
+    requestId: string,
+    generation: string,
+    ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
+  ): Promise<RenewInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      renewInFlightLease(storage, { requestId, generation, ttlMs }),
+    );
+  }
+
+  async releaseInFlight(
+    requestId: string,
+    generation?: string,
+  ): Promise<ReleaseInFlightResult> {
+    return this.ctx.storage.transaction((storage) =>
+      releaseInFlightLease(storage, { requestId, generation }),
+    );
   }
 
   async reconcileRequest(
@@ -184,6 +230,10 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
 
   async getReconcileSnapshot(): Promise<ReconcileSnapshot> {
     return this.lifecycle.getReconcileSnapshot();
+  }
+
+  async getReconcileRequest(requestId: string): Promise<ReconcileRequestView | undefined> {
+    return this.lifecycle.getReconcileRequest(requestId);
   }
 
   async finalizeDay(): Promise<FinalizeResult> {

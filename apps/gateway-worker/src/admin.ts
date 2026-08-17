@@ -1,13 +1,14 @@
-import { errorResponse, quotaIdOf, utcDayOf, type OctgHttpError } from "@octg/shared";
+import { errorResponse, quotaIdOf, utcDayOf, type OctgHttpError, type ReconcileDisposition } from "@octg/shared";
 import { snapshotOf } from "./proxy";
 import { verifyAccessJwt } from "./access";
 import { invalidateConfigCaches, loadRegistry } from "./policy";
-import { runReconciliation, targetUtcDay } from "./reconcile";
+import { reconcileReserveUnknown, runReconciliation, targetUtcDay } from "./reconcile";
 import type { Env } from "./index";
 
 const json = (body: unknown, init?: ResponseInit) => new Response(JSON.stringify(body), { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
 const notFound = (requestId: string): OctgHttpError => ({ status: 404, requestId, body: { error: { message: "Not found.", type: "invalid_request_error", param: null, code: "not_found" }, request_id: requestId } });
 const badRequest = (requestId: string, message: string): OctgHttpError => ({ status: 400, requestId, body: { error: { message, type: "invalid_request_error", param: null, code: "invalid_request" }, request_id: requestId } });
+const conflict = (requestId: string, message: string): OctgHttpError => ({ status: 409, requestId, body: { error: { message, type: "invalid_request_error", param: null, code: "reconciliation_conflict" }, request_id: requestId } });
 
 type ClientPolicyInput = { overflow_mode: "REJECT" | "PAID_SHARED"; output_limit_mode: "REJECT" | "CLAMP"; max_paid_usd_day: number; cache_enabled: boolean; tools_mode: "REJECT" | "ALLOW" };
 type ModelInput = { complimentary_pool: "STANDARD" | "MINI" | "NONE"; enabled: boolean; fallback_model: string | null };
@@ -44,6 +45,23 @@ function parseModel(value: Record<string, unknown> | undefined): ModelInput | un
   return { complimentary_pool: value.complimentary_pool, enabled: value.enabled, fallback_model: value.fallback_model };
 }
 
+function parseReserveUnknownDisposition(value: Record<string, unknown> | undefined): { disposition: ReconcileDisposition; evidence?: string } | undefined {
+  if (!value || (value.disposition !== "consumed" && value.disposition !== "unused")) return undefined;
+  if (value.evidence !== undefined && (typeof value.evidence !== "string" || value.evidence.trim().length === 0 || value.evidence.length > 512)) return undefined;
+  if (value.disposition === "unused" && typeof value.evidence !== "string") return undefined;
+  return {
+    disposition: value.disposition,
+    ...(typeof value.evidence === "string" ? { evidence: value.evidence } : {}),
+  };
+}
+
+function validUtcDay(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.toISOString().slice(0, 10) === value;
+}
+
 export async function handleAdmin(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
   const url = new URL(request.url); if (!url.pathname.startsWith("/admin/")) return undefined;
   const verified = await verifyAccessJwt(request, env, requestId); if (verified !== true) return errorResponse(verified);
@@ -76,6 +94,32 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
     if (!body) return errorResponse(badRequest(requestId, "Invalid model configuration."));
     const result = await env.DB.prepare("UPDATE model_registry SET complimentary_pool = ?, enabled = ?, fallback_model = ?, updated_at = ? WHERE model = ?").bind(body.complimentary_pool, body.enabled ? 1 : 0, body.fallback_model, new Date().toISOString(), model).run();
     if (!result.meta.changes) return errorResponse(notFound(requestId)); invalidateConfigCaches(); return json({ request_id: requestId, model, complimentary_pool: body.complimentary_pool });
+  }
+  const reserveUnknownMatch = url.pathname.match(/^\/admin\/reconcile\/([^/]+)\/([^/]+)\/([^/]+)$/);
+  if (request.method === "POST" && reserveUnknownMatch) {
+    const pool = decodeURIComponent(reserveUnknownMatch[1] ?? "");
+    const utcDay = decodeURIComponent(reserveUnknownMatch[2] ?? "");
+    const targetRequestId = decodeURIComponent(reserveUnknownMatch[3] ?? "");
+    if ((pool !== "STANDARD" && pool !== "MINI") || !validUtcDay(utcDay) || targetRequestId.length === 0) {
+      return errorResponse(badRequest(requestId, "Invalid reconciliation target."));
+    }
+    const body = parseReserveUnknownDisposition(await parseJson(request));
+    if (!body) return errorResponse(badRequest(requestId, "Invalid reserve-unknown disposition."));
+    const result = await reconcileReserveUnknown(env, pool, utcDay, targetRequestId, body.disposition, body.evidence);
+    if (!result.ok) {
+      if (result.reason === "not_found") return errorResponse(notFound(requestId));
+      if (result.reason === "disposition_conflict") return errorResponse(conflict(requestId, "The request was already reconciled with a different disposition."));
+      return errorResponse(conflict(requestId, "The request is not an unresolved reserve-unknown reservation."));
+    }
+    return json({
+      request_id: requestId,
+      target_request_id: targetRequestId,
+      pool,
+      utc_day: utcDay,
+      disposition: result.disposition,
+      applied: result.applied,
+      reserved_tokens: result.reservedTokens,
+    });
   }
   if (request.method === "POST" && url.pathname === "/admin/reconcile") {
     try { return json({ request_id: requestId, utc_day: targetUtcDay(new Date()), reports: await runReconciliation(env, new Date()) }); }

@@ -1,11 +1,45 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_NORMALIZED_INPUT_BYTES,
   normalizeChatCompletions,
   normalizeResponses,
 } from "../src/index";
 
+describe("MAX_NORMALIZED_INPUT_BYTES", () => {
+  it("defaults to one mebibyte for OpenCode-compatible request histories", () => {
+    expect(MAX_NORMALIZED_INPUT_BYTES).toBe(1_048_576);
+  });
+});
+
 describe("normalizeChatCompletions", () => {
+  it.each([
+    ["abc", 3],
+    ["あ", 3],
+  ])("reports normalized Chat input %s as %i UTF-8 bytes", (content, expectedBytes) => {
+    // Given: Chat input with a hand-checked UTF-8 byte length.
+    // When: the request is normalized at the exact byte boundary.
+    const result = normalizeChatCompletions(
+      { model: "gpt-5", messages: [{ role: "user", content }] },
+      expectedBytes,
+    );
+
+    // Then: its byte count is exposed without rejecting the request.
+    expect(result).toMatchObject({ ok: true, value: { inputBytes: expectedBytes } });
+  });
+
+  it("rejects multi-byte Chat input above the configured byte limit", () => {
+    // Given: one Japanese character encoded as three UTF-8 bytes.
+    // When: the configured input limit is only two bytes.
+    const result = normalizeChatCompletions(
+      { model: "gpt-5", messages: [{ role: "user", content: "あ" }] },
+      2,
+    );
+
+    // Then: normalization rejects it before token estimation.
+    expect(result).toEqual({ ok: false, error: "input_too_large" });
+  });
+
   it("flattens text content and prefers matching max_completion_tokens", () => {
     // Given: a multi-message text request with both compatible output limits.
     // When: it is normalized.
@@ -33,6 +67,8 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "You are helpful.\nHello  world",
+        inputTextBytes: 29,
+        inputBytes: 29,
         messageCount: 2,
         maxOutputTokens: 100,
         stream: true,
@@ -57,6 +93,8 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "hi",
+        inputTextBytes: 2,
+        inputBytes: 2,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -123,6 +161,8 @@ describe("normalizeChatCompletions", () => {
         endpoint: "chat",
         model: "gpt-5",
         inputText: "hi",
+        inputTextBytes: 2,
+        inputBytes: 2,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -144,6 +184,51 @@ describe("normalizeChatCompletions", () => {
 });
 
 describe("normalizeResponses", () => {
+  it("separates visible text bytes from opaque reasoning bytes", () => {
+    // Given: visible summary text and opaque encrypted reasoning state.
+    const body = {
+      model: "gpt-5",
+      input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "x" }], encrypted_content: "秘密" }],
+    };
+
+    // When: the Responses request is normalized.
+    const result = normalizeResponses(body);
+
+    // Then: total input bytes are the text bytes plus opaque bytes, exposed separately.
+    expect(result).toMatchObject({
+      ok: true,
+      value: { inputTextBytes: 1, inputBytes: 7, opaqueInputBytes: 6 },
+    });
+  });
+
+  it("includes opaque Responses bytes in the normalized input byte count", () => {
+    // Given: one UTF-8 text byte plus six opaque UTF-8 bytes for encrypted content.
+    const body = {
+      model: "gpt-5",
+      input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "x" }], encrypted_content: "秘密" }],
+    };
+
+    // When: the request is normalized at the seven-byte total boundary.
+    const result = normalizeResponses(body, 7);
+
+    // Then: the text and opaque bytes are both reported.
+    expect(result).toMatchObject({ ok: true, value: { inputBytes: 7, opaqueInputBytes: 6 } });
+  });
+
+  it("rejects Responses input when text and opaque bytes exceed the configured limit", () => {
+    // Given: one UTF-8 text byte plus six opaque UTF-8 bytes for encrypted content.
+    const body = {
+      model: "gpt-5",
+      input: [{ type: "reasoning", summary: [{ type: "summary_text", text: "x" }], encrypted_content: "秘密" }],
+    };
+
+    // When: the seven-byte total is normalized with a six-byte limit.
+    const result = normalizeResponses(body, 6);
+
+    // Then: normalization rejects it before token estimation.
+    expect(result).toEqual({ ok: false, error: "input_too_large" });
+  });
+
   it("accepts string input and max_output_tokens", () => {
     // Given: a text responses request with an explicit output limit.
     // When: it is normalized.
@@ -156,6 +241,8 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hello",
+        inputTextBytes: 5,
+        inputBytes: 5,
         messageCount: 1,
         maxOutputTokens: 50,
         stream: false,
@@ -172,6 +259,8 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "function_call",
+        inputTextBytes: 13,
+        inputBytes: 13,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -188,6 +277,8 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hi\n[]",
+        inputTextBytes: 5,
+        inputBytes: 5,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -268,6 +359,8 @@ describe("normalizeResponses", () => {
         endpoint: "responses",
         model: "gpt-5",
         inputText: "hi\ncall_id-with-a-long-unique-value-1234567890\nlookup\n{}",
+        inputTextBytes: 56,
+        inputBytes: 56,
         messageCount: 2,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -333,6 +426,42 @@ describe("normalizeResponses", () => {
         expect(result.value.inputText).toContain(marker);
       }
     }
+  });
+
+  it("accepts SDK text parts for every supported message role", () => {
+    const result = normalizeResponses({
+      model: "gpt-5.6-luna",
+      input: [
+        { role: "user", content: [{ type: "text", text: "user-text" }] },
+        { role: "developer", content: [{ type: "text", text: "developer-text" }] },
+        { role: "system", content: [{ type: "text", text: "system-text" }] },
+        { role: "assistant", content: [{ type: "text", text: "assistant-text" }] },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        inputText: "user-text\ndeveloper-text\nsystem-text\nassistant-text",
+        messageCount: 4,
+      },
+    });
+  });
+
+  it("accepts top-level reasoning configuration without changing input accounting", () => {
+    const result = normalizeResponses({
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "medium" },
+      input: "reasoning-config-marker",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        inputText: "reasoning-config-marker",
+        opaqueInputBytes: 0,
+      },
+    });
   });
 
   it("rejects output_text for non-assistant messages", () => {

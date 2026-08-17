@@ -61,7 +61,7 @@ describe("proxy pipeline", () => {
     expect(upstreamHeaders?.get("cf-aig-metadata")).toContain("client_test");
     expect(upstreamHeaders?.get("cf-aig-cache-key")).toBeNull();
     expect(upstreamHeaders?.get("cf-aig-authorization")).toBe("Bearer test-upstream-token");
-    expect(upstreamHeaders?.get("cf-aig-collect-log-payload")).toBe("true");
+    expect(upstreamHeaders?.get("cf-aig-collect-log-payload")).toBe("false");
     expect(upstreamHeaders?.get("authorization")).toBeNull();
     expect(upstreamHeaders?.get("Idempotency-Key")).toBeNull();
   });

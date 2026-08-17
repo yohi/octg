@@ -1,4 +1,5 @@
 import type { RegistryEntry } from "@octg/shared";
+import { safeErrorDetails } from "./error-details";
 import type { Env } from "./index";
 
 export interface RequestLogRow {
@@ -31,6 +32,16 @@ export async function insertRequestRow(env: Env, row: RequestLogRow): Promise<vo
     .run();
 }
 
+export function startRequestAuditBestEffort(env: Env, row: RequestLogRow): Promise<boolean> {
+  return insertRequestRow(env, row).then(
+    () => true,
+    (error) => {
+      console.warn("request_audit.start_failed", { requestId: row.requestId, error: safeErrorDetails(error) });
+      return false;
+    },
+  );
+}
+
 export interface RequestCompleteFields {
   status: "completed" | "failed" | "uncertain" | "orphaned";
   inputTokens?: number;
@@ -42,7 +53,7 @@ export interface RequestCompleteFields {
 
 export async function completeRequestRow(env: Env, requestId: string, fields: RequestCompleteFields): Promise<void> {
   await env.DB.prepare(
-    "UPDATE requests SET status = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?, billing_class = ?, openai_request_id = ?, completed_at = ? WHERE request_id = ?",
+    "UPDATE requests SET status = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?, billing_class = ?, openai_request_id = ?, completed_at = ? WHERE request_id = ? AND status NOT IN ('completed', 'failed', 'orphaned')",
   )
     .bind(
       fields.status,
@@ -55,6 +66,22 @@ export async function completeRequestRow(env: Env, requestId: string, fields: Re
       requestId,
     )
     .run();
+}
+
+export function completeRequestAuditBestEffort(
+  env: Env,
+  requestId: string,
+  fields: RequestCompleteFields,
+  inserted: Promise<boolean>,
+): Promise<void> {
+  return inserted.then(
+    (insertSucceeded) => insertSucceeded
+      ? completeRequestRow(env, requestId, fields).catch((error) => {
+        console.warn("request_audit.complete_failed", { requestId, error: safeErrorDetails(error) });
+      })
+      : undefined,
+    () => undefined,
+  ).then(() => undefined);
 }
 
 export async function setReservedTokens(env: Env, requestId: string, reservedTokens: number): Promise<void> {
