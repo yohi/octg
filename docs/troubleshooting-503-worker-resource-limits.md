@@ -136,8 +136,9 @@ settle / markUncertain / release 契約は変更しません。
 
 `scripts/canary-worker-resource-limits.mjs` は、`CANARY_PAYLOAD_PATH` の JSON payload を
 concurrency `1`、`2`、および operator が指定した想定ピークで送ります。入力は payload を
-出力せず、結果 JSON Lines に outcome、status、duration、request ID、concurrency だけを
-記録します。
+出力せず、結果 JSON Lines に outcome、status、duration、request ID、concurrency を記録します。
+`fetch_error` の `errorName` / `errorCode` は allowlist 済みの値だけを記録し、timeout では両値を
+`null` にします。
 
 必要な環境変数は次のとおりです。
 

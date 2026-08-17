@@ -77,6 +77,23 @@ describe("in-flight lease timing configuration", () => {
     // Then: every invalid value resolves to the documented safe default.
     expect(resolved).toEqual(invalidBindings.map(() => defaultMs));
   });
+
+  it("floors low TTL values at the headroom-protected minimum", () => {
+    // Given: a TTL one millisecond below the 120-second safe minimum.
+    // When: the Worker resolves the lease TTL configuration.
+    const resolved = resolveInFlightLeaseTtlMs("119999");
+
+    // Then: the lease retains scheduling and RPC headroom above upstream processing.
+    expect(resolved).toBe(120_000);
+  });
+
+  it("caps oversized renewal intervals at the documented default", () => {
+    // Given: a renewal interval larger than the safe default.
+    const renewalMs = resolveInFlightLeaseRenewalMs("60000");
+
+    // Then: streaming renews on the documented 30-second cadence.
+    expect(renewalMs).toBe(30_000);
+  });
 });
 
 describe("proxy failure paths", () => {

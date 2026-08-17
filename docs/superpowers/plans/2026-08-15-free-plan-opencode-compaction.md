@@ -1,6 +1,14 @@
 # Free Plan OpenCode Compaction Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Superseded:** This historical plan is superseded by
+> `docs/superpowers/plans/2026-08-17-review-remediation.md` for current review
+> remediation. In particular, Task 3's request-ID-only in-flight lease
+> contract is obsolete; use Task 1 of the review-remediation plan for the
+> generation- and expiry-aware contract.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development (recommended) or
+> superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** OpenCode の通常リクエストと Compaction リクエストを OCTG 経由で許可しつつ、Cloudflare Workers Free プランの負荷を pool 単位の同時実行制御で保護する。
 

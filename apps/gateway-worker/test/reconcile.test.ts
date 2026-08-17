@@ -62,14 +62,18 @@ describe("reconciliation", () => {
     expect(reports[0]).toEqual({
       utcDay: reconciliationDay,
       pool: "STANDARD",
-      localTokens: 0,
+      localTokens: 150,
       openaiTokens: 150,
-      difference: 150,
+      difference: 0,
       status: "done",
     });
     expect((await controller.getState()).uncertainTokens).toBe(0);
     expect((await controller.getState()).confirmedTokens).toBe(150);
-    expect((await env.DB.prepare("SELECT status FROM requests WHERE request_id = ?").bind("reconcile-uncertain-2026-08-19").first<{ status: string }>())?.status).toBe("completed");
+    expect(
+      await env.DB.prepare("SELECT status, total_tokens, billing_class FROM requests WHERE request_id = ?")
+        .bind("reconcile-uncertain-2026-08-19")
+        .first<{ status: string; total_tokens: number; billing_class: string }>(),
+    ).toEqual({ status: "completed", total_tokens: 150, billing_class: "free" });
     expect((await env.DB.prepare("SELECT confirmed_tokens FROM daily_usage WHERE utc_day = ? AND pool = 'STANDARD'").bind(reconciliationDay).first<{ confirmed_tokens: number }>())?.confirmed_tokens).toBe(150);
     fetchMock.mockRestore();
   });

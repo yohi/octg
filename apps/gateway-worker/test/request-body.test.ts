@@ -85,10 +85,15 @@ describe("readJsonBody", () => {
 
   it("rejects a declared body over the limit before reading it", async () => {
     let readCalled = false;
+    let canceled = false;
     const body = {
       getReader() {
         readCalled = true;
         throw new Error("body must not be read");
+      },
+      cancel() {
+        canceled = true;
+        return Promise.resolve();
       },
     } as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
     const result = await readJsonBody({ headers: new Headers({ "content-length": "33" }), body }, 32);
@@ -105,6 +110,7 @@ describe("readJsonBody", () => {
       }),
     });
     expect(readCalled).toBe(false);
+    expect(canceled).toBe(true);
   });
 
   it("cancels and reports a partial measurement for streamed overflow", async () => {

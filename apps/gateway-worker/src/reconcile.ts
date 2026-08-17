@@ -23,8 +23,9 @@ export async function reconcileReserveUnknown(
   const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, utcDay)));
   const target = await stub.getReconcileRequest(requestId);
   if (!target) return { ok: false, reason: "not_found" };
-  const eligible = target.state === "uncertain" && target.uncertaintyOrigin === "reserve_unknown";
-  const replayable = (target.state === "reconciled" || target.state === "released") && target.requestedDisposition !== undefined;
+  const isReserveUnknown = target.uncertaintyOrigin === "reserve_unknown";
+  const eligible = target.state === "uncertain" && isReserveUnknown;
+  const replayable = isReserveUnknown && (target.state === "reconciled" || target.state === "released") && target.requestedDisposition !== undefined;
   if (!eligible && !replayable) {
     return { ok: false, reason: "not_reserve_unknown" };
   }
@@ -32,23 +33,26 @@ export async function reconcileReserveUnknown(
     return { ok: false, reason: "disposition_conflict" };
   }
   const result = await stub.reconcileRequest(requestId, disposition);
-  if (result.applied) {
-    const completedAt = new Date().toISOString();
-    await env.DB.prepare(
-      "UPDATE requests SET status = ?, total_tokens = ?, billing_class = ?, reconciliation_evidence = ?, completed_at = ? WHERE request_id = ?",
-    )
-      .bind(
-        disposition === "consumed" ? "completed" : "failed",
-        disposition === "consumed" ? target.reservedTokens : 0,
-        disposition === "consumed" ? "free" : "none",
-        evidence ?? null,
-        completedAt,
-        requestId,
-      )
-      .run()
-      .catch(() => undefined);
+  const canonicalTarget = await stub.getReconcileRequest(requestId);
+  const expectedState = disposition === "consumed" ? "reconciled" : "released";
+  if (canonicalTarget?.state !== expectedState || canonicalTarget.requestedDisposition !== disposition) {
+    return { ok: false, reason: "disposition_conflict" };
   }
-  return { ok: true, applied: result.applied, disposition, reservedTokens: target.reservedTokens };
+  const completedAt = new Date().toISOString();
+  await env.DB.prepare(
+    "UPDATE requests SET status = ?, total_tokens = ?, billing_class = ?, reconciliation_evidence = COALESCE(?, reconciliation_evidence), completed_at = ? WHERE request_id = ?",
+  )
+    .bind(
+      disposition === "consumed" ? "completed" : "failed",
+      disposition === "consumed" ? canonicalTarget.reservedTokens : 0,
+      disposition === "consumed" ? "free" : "none",
+      evidence ?? null,
+      completedAt,
+      requestId,
+    )
+    .run()
+    .catch(() => undefined);
+  return { ok: true, applied: result.applied, disposition, reservedTokens: canonicalTarget.reservedTokens };
 }
 
 async function fetchUsage(env: Env, day: string): Promise<ReadonlyMap<string, number>> {
@@ -83,6 +87,13 @@ async function fetchUsageWithRetry(env: Env, day: string): Promise<ReadonlyMap<s
   throw lastError instanceof Error ? lastError : new Error("Usage API failed after three attempts");
 }
 
+async function repairConsumedProjection(env: Env, requestId: string, totalTokens: number): Promise<void> {
+  await env.DB.prepare("UPDATE requests SET status = 'completed', total_tokens = ?, billing_class = 'free', completed_at = ? WHERE request_id = ?")
+    .bind(totalTokens, new Date().toISOString(), requestId)
+    .run()
+    .catch(() => undefined);
+}
+
 export async function runReconciliation(env: Env, now: Date): Promise<ReconciliationReport[]> {
   const day = targetUtcDay(now); const reports: ReconciliationReport[] = [];
   for (const pool of ["STANDARD", "MINI"] as const) {
@@ -97,21 +108,48 @@ export async function runReconciliation(env: Env, now: Date): Promise<Reconcilia
     const local = await env.DB.prepare("SELECT COALESCE(SUM(total_tokens), 0) AS total FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'completed'").bind(day, lower).first<{ total: number }>();
     const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day)));
     const pending = await stub.getReconcileSnapshot();
-    const localTokens = local?.total ?? 0; const usage = await fetchUsageWithRetry(env, day); const registry = await loadRegistry(env); const openaiTokens = [...registry.entries()].filter(([, entry]) => entry.complimentary_pool === pool).reduce((sum, [model]) => sum + (usage.get(model) ?? 0), 0); const difference = openaiTokens - localTokens;
+    const initialLocalTokens = local?.total ?? 0; const usage = await fetchUsageWithRetry(env, day); const registry = await loadRegistry(env); const openaiTokens = [...registry.entries()].filter(([, entry]) => entry.complimentary_pool === pool).reduce((sum, [model]) => sum + (usage.get(model) ?? 0), 0); const difference = openaiTokens - initialLocalTokens;
     const uncertainRequests = pending.requests.filter((row) => row.state === "uncertain");
     const reconcilableUncertainRequests = uncertainRequests.filter((row) => row.uncertaintyOrigin !== "reserve_unknown");
     const uncertainTotal = reconcilableUncertainRequests.reduce((sum, row) => sum + row.reservedTokens, 0);
-    let matchedUncertainUsage = false;
     if (reconcilableUncertainRequests.length > 0 && difference === uncertainTotal) {
-      for (const row of reconcilableUncertainRequests) { const result = await stub.reconcileRequest(row.requestId, "consumed"); if (result.applied) await env.DB.prepare("UPDATE requests SET status = 'completed', completed_at = ? WHERE request_id = ?").bind(new Date().toISOString(), row.requestId).run(); }
-      matchedUncertainUsage = true;
+      for (const row of reconcilableUncertainRequests) {
+        const result = await stub.reconcileRequest(row.requestId, "consumed");
+        const reconciledRequest = result.applied
+          ? undefined
+          : await stub.getReconcileRequest(row.requestId);
+        const shouldRepairProjection = result.applied || (
+          reconciledRequest?.state === "reconciled" && reconciledRequest.requestedDisposition === "consumed"
+        );
+        if (shouldRepairProjection) {
+          await repairConsumedProjection(env, row.requestId, row.reservedTokens);
+        }
+      }
+    }
+    const snapshotRequestIds = new Set(pending.requests.map((row) => row.requestId));
+    const candidates = await env.DB.prepare(
+      "SELECT request_id AS requestId FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'uncertain'",
+    ).bind(day, lower).all<{ requestId: string }>();
+    for (const candidate of candidates.results) {
+      if (snapshotRequestIds.has(candidate.requestId)) continue;
+      const canonicalRequest = await stub.getReconcileRequest(candidate.requestId);
+      if (
+        canonicalRequest?.state === "reconciled" &&
+        canonicalRequest.requestedDisposition === "consumed" &&
+        canonicalRequest.uncertaintyOrigin !== "reserve_unknown"
+      ) {
+        await repairConsumedProjection(env, candidate.requestId, canonicalRequest.reservedTokens);
+      }
     }
     const remainingPending = (await stub.getReconcileSnapshot()).requests;
-    const status: "done" | "open" = remainingPending.length === 0 && (difference === 0 || matchedUncertainUsage) ? "done" : "open";
-    await env.DB.prepare("INSERT INTO reconciliations (utc_day, pool, local_tokens, openai_tokens, difference, status, attempts, executed_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(utc_day, pool) DO UPDATE SET local_tokens=excluded.local_tokens, openai_tokens=excluded.openai_tokens, difference=excluded.difference, status=excluded.status, attempts=reconciliations.attempts + 1, executed_at=excluded.executed_at").bind(day, pool, localTokens, openaiTokens, difference, status, new Date().toISOString()).run();
+    const recomputedLocal = await env.DB.prepare("SELECT COALESCE(SUM(total_tokens), 0) AS total FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'completed'").bind(day, lower).first<{ total: number }>();
+    const localTokens = recomputedLocal?.total ?? 0;
+    const recomputedDifference = openaiTokens - localTokens;
+    const status: "done" | "open" = remainingPending.length === 0 && recomputedDifference === 0 ? "done" : "open";
+    await env.DB.prepare("INSERT INTO reconciliations (utc_day, pool, local_tokens, openai_tokens, difference, status, attempts, executed_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(utc_day, pool) DO UPDATE SET local_tokens=excluded.local_tokens, openai_tokens=excluded.openai_tokens, difference=excluded.difference, status=excluded.status, attempts=reconciliations.attempts + 1, executed_at=excluded.executed_at").bind(day, pool, localTokens, openaiTokens, recomputedDifference, status, new Date().toISOString()).run();
     const completedCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM requests WHERE utc_day = ? AND LOWER(pool) = ? AND status = 'completed'").bind(day, lower).first<{ count: number }>();
-    await env.DB.prepare("INSERT INTO daily_usage (utc_day, pool, confirmed_tokens, paid_tokens, request_count) VALUES (?, ?, ?, 0, ?) ON CONFLICT(utc_day, pool) DO UPDATE SET confirmed_tokens = excluded.confirmed_tokens, request_count = excluded.request_count").bind(day, pool, status === "done" ? openaiTokens : localTokens, completedCount?.count ?? 0).run();
-    reports.push({ utcDay: day, pool, localTokens, openaiTokens, difference, status });
+    await env.DB.prepare("INSERT INTO daily_usage (utc_day, pool, confirmed_tokens, paid_tokens, request_count) VALUES (?, ?, ?, 0, ?) ON CONFLICT(utc_day, pool) DO UPDATE SET confirmed_tokens = excluded.confirmed_tokens, request_count = excluded.request_count").bind(day, pool, localTokens, completedCount?.count ?? 0).run();
+    reports.push({ utcDay: day, pool, localTokens, openaiTokens, difference: recomputedDifference, status });
   }
   return reports;
 }

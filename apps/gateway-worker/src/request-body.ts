@@ -33,6 +33,7 @@ export async function readJsonBody(
 ): Promise<ReadJsonBodyResult> {
   const declaredContentLength = declaredContentLengthOf(request);
   if (declaredContentLength !== null && declaredContentLength > maxBytes) {
+    await request.body?.cancel().catch(() => undefined);
     return {
       ok: false,
       reason: "too_large",

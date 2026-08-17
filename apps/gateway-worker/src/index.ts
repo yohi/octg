@@ -12,7 +12,7 @@ export { QuotaController };
 export interface Env {
   readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
   readonly DB: D1Database;
-  readonly CF_VERSION_METADATA: WorkerVersionMetadata;
+  readonly CF_VERSION_METADATA?: WorkerVersionMetadata;
   readonly OCTG_KEY_PEPPER: string;
   readonly OCTG_UPSTREAM_BASE_URL: string;
   readonly OCTG_UPSTREAM_API_TOKEN: string;

@@ -52,6 +52,7 @@ import { proxyStream } from "./stream";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
+const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 
@@ -111,11 +112,17 @@ function resolvePositiveSafeInteger(configured: string | undefined, defaultValue
 }
 
 export function resolveInFlightLeaseTtlMs(configured: string | undefined): number {
-  return resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_TTL_MS);
+  return Math.max(
+    resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_TTL_MS),
+    MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS,
+  );
 }
 
 export function resolveInFlightLeaseRenewalMs(configured: string | undefined): number {
-  return resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS);
+  return Math.min(
+    resolvePositiveSafeInteger(configured, DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS),
+    DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
+  );
 }
 
 type ResourceStageFields = {

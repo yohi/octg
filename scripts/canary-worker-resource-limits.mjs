@@ -5,6 +5,20 @@ import { resolve } from "node:path";
 
 const MAX_CANARY_CONCURRENCY = 64;
 const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
+const OCTG_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+const SAFE_ERROR_NAMES = new Set(["AbortError", "Error", "TypeError"]);
+const SAFE_ERROR_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "ERR_NETWORK",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 
 const required = (name) => {
   const value = process.env[name];
@@ -18,6 +32,24 @@ const parsePositiveSafeIntegers = (name, raw) => {
     throw new TypeError(`${name} must contain positive safe integers`);
   }
   return values;
+};
+
+const sanitizeErrorValue = (value, allowlist) => (
+  typeof value === "string" && allowlist.has(value) ? value : null
+);
+
+const safeErrorMetadata = (error) => {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) {
+    return { errorName: null, errorCode: null };
+  }
+  try {
+    return {
+      errorName: sanitizeErrorValue(error.name, SAFE_ERROR_NAMES),
+      errorCode: sanitizeErrorValue(error.code, SAFE_ERROR_CODES),
+    };
+  } catch {
+    return { errorName: null, errorCode: null };
+  }
 };
 
 export async function requestCanary({
@@ -52,10 +84,11 @@ export async function requestCanary({
       outcome: "response",
       status: response.status,
       durationMs: now() - startedAt,
-      requestId: response.headers.get("X-OCTG-Request-Id"),
+      requestId: response.headers.get("X-OCTG-Request-Id")?.match(OCTG_REQUEST_ID)?.[0] ?? null,
     };
   } catch (error) {
-    const outcome = controller.signal.aborted || error?.name === "AbortError"
+    const metadata = safeErrorMetadata(error);
+    const outcome = controller.signal.aborted || metadata.errorName === "AbortError"
       ? "timeout"
       : "fetch_error";
     return {
@@ -66,6 +99,8 @@ export async function requestCanary({
       status: null,
       durationMs: now() - startedAt,
       requestId: null,
+      errorName: outcome === "fetch_error" ? metadata.errorName : null,
+      errorCode: outcome === "fetch_error" ? metadata.errorCode : null,
     };
   } finally {
     clearTimeout(timeout);

@@ -1,6 +1,7 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import type { RequestEntry } from "@octg/shared";
 import { seedClient, TEST_CLIENT_ID } from "./seed";
 
 let privateKey: CryptoKey;
@@ -116,6 +117,101 @@ describe("admin API", () => {
     }, "jwt");
     expect(conflict.status).toBe(409);
     expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 200 });
+  });
+
+  it("preserves reconciliation evidence when an identical replay omits it", async () => {
+    // Given: a consumed reserve-unknown projection with operator-provided evidence.
+    const day = "2026-11-07";
+    const requestId = "admin-reserve-unknown-evidence-replay";
+    const evidence = "operator-confirmed upstream request";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+    await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed", evidence }),
+    }, "jwt");
+
+    // When: the operator repeats the disposition without supplying evidence.
+    const replay = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+
+    // Then: projection repair retains the prior audit context.
+    expect(replay.status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT reconciliation_evidence FROM requests WHERE request_id = ?")
+        .bind(requestId)
+        .first<{ reconciliation_evidence: string }>(),
+    ).toEqual({ reconciliation_evidence: evidence });
+  });
+
+  it("repairs a missing requests projection during an identical reserve-unknown replay", async () => {
+    // Given: a consumed DO entry whose legacy terminal state has no saved reconcile result.
+    const day = "2026-11-05";
+    const requestId = "admin-reserve-unknown-projection-repair";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await controller.reconcileRequest(requestId, "consumed");
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+    await runInDurableObject(controller, async (_instance, state) => {
+      const entry = await state.storage.get<RequestEntry>(`req:${requestId}`);
+      if (entry === undefined) throw new TypeError("Expected a stored reconciliation entry.");
+      const results = { ...entry.results };
+      delete results.reconcile;
+      await state.storage.put(`req:${requestId}`, { ...entry, results });
+    });
+
+    // When: the operator repeats the identical consumed disposition.
+    const response = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed" }),
+    }, "jwt");
+
+    // Then: the replay reports no new DO transition but restores the canonical D1 projection.
+    expect(response.status).toBe(200);
+    expect(await response.json<{ applied: boolean }>()).toMatchObject({ applied: false });
+    expect(
+      await env.DB.prepare("SELECT status, total_tokens, billing_class FROM requests WHERE request_id = ?")
+        .bind(requestId)
+        .first<{ status: string; total_tokens: number; billing_class: string }>(),
+    ).toEqual({ status: "completed", total_tokens: 200, billing_class: "free" });
+  });
+
+  it("keeps manual reconciliation successful when its D1 projection fails", async () => {
+    // Given: a reserve-unknown request and a database trigger that rejects its projection update.
+    const day = "2026-11-06";
+    const requestId = "admin-reserve-unknown-db-failure";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+    await env.DB.prepare(
+      "CREATE TRIGGER admin_reserve_unknown_projection_failure BEFORE UPDATE ON requests WHEN NEW.request_id = 'admin-reserve-unknown-db-failure' BEGIN SELECT RAISE(ABORT, 'forced projection failure'); END",
+    ).run();
+
+    try {
+      // When: the operator consumes the reservation through the Admin API.
+      const response = await admin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+        method: "POST",
+        body: JSON.stringify({ disposition: "consumed" }),
+      }, "jwt");
+
+      // Then: the DO remains authoritative and the best-effort projection failure does not alter success.
+      expect(response.status).toBe(200);
+      expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, confirmedTokens: 200 });
+    } finally {
+      await env.DB.prepare("DROP TRIGGER IF EXISTS admin_reserve_unknown_projection_failure").run();
+    }
   });
 
   it("returns not found for unknown admin routes after access is verified", async () => {

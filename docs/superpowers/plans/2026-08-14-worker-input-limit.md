@@ -1,7 +1,6 @@
 # Worker 入力サイズ上限 Implementation Plan
 
 > **Superseded:** This historical plan is replaced by `docs/superpowers/plans/2026-08-15-free-plan-opencode-compaction.md`, which defines the current 1 MiB input limit. Do not reintroduce the historical 131072-byte value when implementing new changes.
-
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 巨大な入力が tokenizer と upstream に到達する前に拒否し、Cloudflare Worker の resource limit エラーを防ぐ。

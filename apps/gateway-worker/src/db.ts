@@ -53,7 +53,7 @@ export interface RequestCompleteFields {
 
 export async function completeRequestRow(env: Env, requestId: string, fields: RequestCompleteFields): Promise<void> {
   await env.DB.prepare(
-    "UPDATE requests SET status = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?, billing_class = ?, openai_request_id = ?, completed_at = ? WHERE request_id = ?",
+    "UPDATE requests SET status = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?, billing_class = ?, openai_request_id = ?, completed_at = ? WHERE request_id = ? AND status NOT IN ('completed', 'failed', 'orphaned')",
   )
     .bind(
       fields.status,

@@ -29,7 +29,7 @@ describe("estimateInputTokens", () => {
     const alphabet = Array.from({ length: 95 }, (_, index) => String.fromCharCode(32 + index)).join("");
     let state = 0x12345678;
     let input = "";
-    while (new TextEncoder().encode(input).byteLength < 20_000) {
+    while (input.length < 20_000) {
       state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
       input += alphabet[state % alphabet.length];
     }
