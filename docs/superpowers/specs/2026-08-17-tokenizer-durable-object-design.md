@@ -167,20 +167,23 @@ request validation failure は conservative fallback の対象にしない。
 > before tokenizer RPC by the existing body size limit; allowing larger inputs
 > requires a stream or chunk protocol to be defined.
 >
-> The 65,536-byte reservation is calculated as follows. A serialized
-> `TokenizeRequest` contains the four field names (`requestId`, `inputText`,
-> `messageCount`, `opaqueInputBytes`), JSON structural characters, and values.
-> The worst-case overhead for a request at the ceiling is: 52 bytes for field
-> names, ~12 bytes for JSON punctuation, a 29-character `requestId` serialized
-> as a JSON string, and up to 16 decimal digits each for `messageCount` and
-> `opaqueInputBytes`. This totals well under 200 bytes. The 65,536-byte margin
-> therefore reserves two orders of magnitude more headroom than the actual
-> serialization overhead, guaranteeing that the serialized request stays strictly
-> below 32 MiB whenever `inputTextBytes + opaqueInputBytes <= resolveMaxInputBytes()`.
+> Durable Object RPC uses V8 serialization carried over Cap'n Proto, not JSON.
+> Strings are length-prefixed byte sequences and do not undergo JSON escaping.
+> However, V8 may encode strings as UTF-16 (2 bytes per code unit) when they
+> contain non-Latin-1 characters, so the worst-case wire size for a string is
+> roughly twice its UTF-8 byte length for pure ASCII input. To stay safely below
+> the 32 MiB RPC limit in all cases, `resolveMaxInputBytes()` caps the UTF-8 byte
+> length at 16 MiB minus 65,536 bytes of headroom. The Gateway also checks the
+> estimated V8-serialized payload size immediately before issuing the RPC and fails
+> closed if the estimate reaches 32 MiB.
 >
-> Because normalization rejects any request where `inputTextBytes + opaqueInputBytes`
-> exceeds `resolveMaxInputBytes()`, the Gateway never emits a
-> `TokenizeRequest` whose payload would approach the 32 MiB RPC limit.
+> The 65,536-byte reservation covers the Cap'n Proto/V8 framing, the four
+> property-name strings, the 29-character `requestId`, the two safe-integer
+> numbers, and a safety margin. Worst-case framing is well under 200 bytes, so
+> The 65,536-byte reservation covers the Cap'n Proto/V8 framing, the four
+> property-name strings, the 29-character `requestId`, the two safe-integer
+> numbers, and a safety margin. Worst-case framing is well under 200 bytes, so
+> the reservation is conservative.
 
 ### 5.2 Result
 
