@@ -40,7 +40,7 @@ gateway-worker
   ├─ tokenizer:primary の解決
   ├─ 単発 RPC
   ├─ response runtime validation
-  ├─ 503 fail-closed
+  ├─ 500 fail-closed
   └─ tokenize resource stage
 
 @octg/shared
@@ -117,7 +117,7 @@ type TokenizerOutcome =
   | { readonly kind: "unavailable" };
 ```
 
-`proxy.ts` は Tokenizer client の内部例外を扱わず、outcome に応じて quota 計算または 503 応答へ分岐する。
+`proxy.ts` は Tokenizer client の内部例外を扱わず、outcome に応じて quota 計算または 500 応答へ分岐する。
 
 ### 4.3 Shared package
 
@@ -156,6 +156,11 @@ DO の public method 入口で次を検証する。
 契約違反は補正、丸め、既定値代入をせず RPC failure とする。
 request validation failure は conservative fallback の対象にしない。
 
+> `resolveMaxInputBytes()` never returns a value that, combined with RPC
+> serialization overhead, exceeds 32 MiB. Inputs above this ceiling are rejected
+> before tokenizer RPC by the existing body size limit; allowing larger inputs
+> requires a stream or chunk protocol to be defined.
+
 ### 5.2 Result
 
 ```ts
@@ -189,7 +194,8 @@ encoding は Durable Object instance field に保持する。初回、eviction �
 
 ### 6.2 Conservative fallback
 
-`getEncoding()` または `encode()` が DO 内で捕捉可能な通常の JavaScript 例外を投げた場合だけ、当該リクエストを次で計算する。
+`getEncoding()` または `encode()` が DO 内で捕捉可能な通常の JavaScript
+例外を投げた場合だけ、当該リクエストを次で計算する。
 
 ```text
 base = UTF-8 byte length(inputText)
@@ -216,9 +222,22 @@ ID 解決は Gateway tokenizer client の 1 か所に置く。
 
 sharding、result cache、prompt hash cache は実装しない。
 
-Gateway は Tokenizer RPC を再試行しない。独自の wall-clock timeout も設けない。
+Gateway は Tokenizer RPC を再試行しない。canary 実行時も RPC retry と独自の wall-clock timeout
+を追加しない。
 Cloudflare の Durable Object 既定 CPU 上限と overload / queue 制御に従い、
-発生した例外を 503 へ変換する。
+発生した例外を 500 応答へ変換する。
+
+canary は単一 `tokenizer:primary` Durable Object を想定したピーク同時実行数で実行し、
+次の指標を計測して上限を定める。いずれかの上限を超えた場合、canary は即座に失敗（halt）する。
+
+- max queue length: 上限（例: 128 リクエスト、または Durable Object 入力キュー制限の 50%）
+- p95 tokenization latency: 上限（例: 250 ms）
+- p99 tokenization latency: 上限（例: 500 ms）
+- 503 overload rate: 全リクエストに対する割合上限（例: 0.1%）
+- Tokenizer CPU utilization: 監視可能な場合の上限（例: 80%）
+- total completion time: 想定ピーク同時実行数分の全リクエストが完了するまでの上限（例: 60 s）
+
+canary 失敗時は超過した指標と閾値を結果に記録し、以降の負荷は中止する。
 
 ## 8. Fail-Closed とエラー契約
 
@@ -236,21 +255,28 @@ Gateway 内での BPE fallback、byte fallback、upstream fallback、RPC retry �
 
 ### 8.1 HTTP response
 
+Tokenizer unavailable として扱われた失敗は、外部 API 契約として
+`packages/shared/src/errors.ts` の `errInternal()` を流用する。
+
 ```json
 {
   "error": {
-    "message": "Token estimation service unavailable.",
-    "type": "server_error",
+    "message": "An internal error occurred.",
+    "type": "api_error",
     "param": null,
-    "code": "tokenizer_unavailable"
+    "code": "internal_error"
   },
   "request_id": "req_..."
 }
 ```
 
-- HTTP status: `503 Service Unavailable`
-- route: `error:tokenizer_unavailable`
-- `Retry-After`: 付与しない
+- HTTP status: `500 Internal Server Error`
+- route: `error:internal_error`
+
+`Retry-After` は付与しない。
+
+内部の failure category および `octg.resource_stage` 上の route は
+引き続き `tokenizer_unavailable` とする。
 
 `quota_get_state` で取得済みの snapshot から次の header を付与する。
 
@@ -306,8 +332,8 @@ Tokenizer DO は構造化 `console.log` event `octg.tokenizer_stage` を出力�
 
 stage:
 
-- `init`: `getEncoding()` を実際に呼ぶ場合だけ start / finish
-- `encode`: exact BPE を試すたびに start / finish
+- `tokenizer_init`: `getEncoding()` を実際に呼ぶ場合だけ start / finish
+- `tokenizer_encode`: exact BPE を試すたびに start / finish
 
 outcome:
 
@@ -413,8 +439,8 @@ parity は移行前の `estimateInputTokens()` から取得した数値を golde
 各ケースで次を検証する。
 
 - Tokenizer RPC call は 1 回
-- HTTP 503 と `tokenizer_unavailable`
-- `Retry-After` がない
+- HTTP 500 と `internal_error`
+- `Retry-After` は付与しない
 - reserve calls は 0
 - upstream calls は 0
 - failure stage に未予約・未到達が明記される
@@ -446,7 +472,7 @@ canary を実行する。`expected peak` は `MAX_IN_FLIGHT_REQUESTS` から導�
 - Workers Free Plan のまま実行できる
 - Gateway invocation に `exceededCpu` がない
 - 同一 request ID に Gateway `tokenize` start / finish がある
-- Tokenizer DO に `init` または `encode` の該当 event がある
+- Tokenizer DO に `tokenizer_init` または `tokenizer_encode` の該当 event がある
 - tokenization 成功後にのみ `quota_reserve` が始まる
 - reservation 成功後にのみ upstream が始まる
 - OpenAI success 時に actual usage で settle される
@@ -458,7 +484,8 @@ canary を実行する。`expected peak` は `MAX_IN_FLIGHT_REQUESTS` から導�
 問題発生時は deployment revision 単位で前の revision へ rollback する。
 Gateway 内の local BPE へ自動 fallback しない。
 
-`v2` migration は削除または書き換えない。rollback 後の旧 revision には大規模入力の CPU 超過問題が残るため、運用上、大規模入力を制限する。
+`v2` migration は削除または書き換えない。rollback 後の旧 revision には大規模入力の CPU
+超過問題が残るため、運用上、大規模入力を制限する。
 
 ## 14. 対象外
 
