@@ -1,4 +1,4 @@
-import type { TokenizerController, TokenizeResult } from "@octg/tokenizer-controller";
+import type { TokenizeResult } from "@octg/tokenizer-controller";
 import type { Env } from "./index";
 
 export interface TokenizeClientRequest {

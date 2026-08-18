@@ -55,8 +55,7 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
 
     const encodeStartedAt = performance.now();
     const encodeStage = this.startStage(validated.requestId, "tokenizer_encode");
-    let encodingReady = false;
-    let byteCount: number | undefined;
+
     try {
       if (this.encoding === undefined) {
         const initStartedAt = performance.now();
@@ -68,84 +67,71 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
           this.finishStage(initStage, "fallback", performance.now() - initStartedAt, {
             failureCategory: "encoding_init_failure",
           });
-          // byteCount is needed for the fallback path below
-          byteCount = byteCountFor(validated.inputText);
-          const base = byteCount;
-          const estimated =
-            base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
-          if (!isNonNegativeSafeInteger(estimated)) {
-            this.finishStage(encodeStage, "exception", performance.now() - encodeStartedAt, {
-              byteCount,
-              failureCategory: "unsafe_integer",
-            });
-            return { kind: "unavailable" };
-          }
-          this.finishStage(encodeStage, "fallback", performance.now() - encodeStartedAt, {
-            byteCount,
-            tokenCount: base,
-            estimationPath: "conservative_bytes",
-          });
-          return {
-            kind: "resolved",
-            result: {
-              estimatedInputTokens: estimated,
-              estimationPath: "conservative_bytes",
-            },
-          };
+          return this.finishEstimate(
+            validated,
+            encodeStage,
+            encodeStartedAt,
+            byteCountFor(validated.inputText),
+            "conservative_bytes",
+          );
         }
       }
-
-      encodingReady = true;
       const encoding = this.encoding;
       const base = encoding.encode(validated.inputText).length;
-      byteCount = byteCount ?? byteCountFor(validated.inputText);
-      const estimated =
-        base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
-      if (!isNonNegativeSafeInteger(estimated)) {
-        this.finishStage(encodeStage, "exception", performance.now() - encodeStartedAt, {
-          byteCount,
-          failureCategory: "unsafe_integer",
-        });
-        return { kind: "unavailable" };
-      }
-      this.finishStage(encodeStage, "success", performance.now() - encodeStartedAt, {
-        byteCount,
-        tokenCount: base,
-        estimationPath: "exact_bpe",
-      });
-      return {
-        kind: "resolved",
-        result: {
-          estimatedInputTokens: estimated,
-          estimationPath: "exact_bpe",
-        },
-      };
+      return this.finishEstimate(
+        validated,
+        encodeStage,
+        encodeStartedAt,
+        base,
+        "exact_bpe",
+      );
     } catch {
-      byteCount = byteCount ?? byteCountFor(validated.inputText);
-      const base = byteCount;
-      const estimated =
-        base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
-      if (!isNonNegativeSafeInteger(estimated)) {
-        this.finishStage(encodeStage, "exception", performance.now() - encodeStartedAt, {
-          byteCount,
-          failureCategory: "unsafe_integer",
-        });
-        return { kind: "unavailable" };
-      }
-      this.finishStage(encodeStage, "fallback", performance.now() - encodeStartedAt, {
+      return this.finishEstimate(
+        validated,
+        encodeStage,
+        encodeStartedAt,
+        byteCountFor(validated.inputText),
+        "conservative_bytes",
+        "encoding_encode_failure",
+      );
+    }
+  }
+
+  private finishEstimate(
+    request: TokenizeRequest,
+    encodeStage: TokenizerStageEvent,
+    startedAt: number,
+    base: number,
+    estimationPath: TokenizeResult["estimationPath"],
+    failureCategory?: string,
+  ): TokenizerOutcome {
+    const byteCount = estimationPath === "conservative_bytes"
+      ? base
+      : byteCountFor(request.inputText);
+    const estimated = base + request.opaqueInputBytes + 4 * request.messageCount + 3;
+    if (!isNonNegativeSafeInteger(estimated)) {
+      this.finishStage(encodeStage, "exception", performance.now() - startedAt, {
+        byteCount,
+        failureCategory: "unsafe_integer",
+      });
+      return { kind: "unavailable" };
+    }
+
+    this.finishStage(
+      encodeStage,
+      estimationPath === "exact_bpe" ? "success" : "fallback",
+      performance.now() - startedAt,
+      {
         byteCount,
         tokenCount: base,
-        estimationPath: "conservative_bytes",
-        failureCategory: "encoding_encode_failure",
-      });
-      return {
-        kind: "resolved",
-        result: {
-          estimatedInputTokens: estimated,
-          estimationPath: "conservative_bytes",
-        },
-      };
-    }
+        estimationPath,
+        ...(failureCategory === undefined ? {} : { failureCategory }),
+      },
+    );
+    return {
+      kind: "resolved",
+      result: { estimatedInputTokens: estimated, estimationPath },
+    };
   }
 
   private startStage(requestId: string, stage: TokenizerStage): TokenizerStageEvent {
