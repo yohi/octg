@@ -21,9 +21,15 @@
     "ACCESS_AUD": "d261bb3efaea8adc0fb32db48b86c855212c9ddde60ab90de13aa7062ed77abf",
   },
   "durable_objects": {
-    "bindings": [{ "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" }]
+    "bindings": [
+      { "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" },
+      { "name": "TOKENIZER_CONTROLLER", "class_name": "TokenizerController" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["QuotaController"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["QuotaController"] },
+    { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] }
+  ],
   "d1_databases": [
     {
       "binding": "DB",

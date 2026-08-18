@@ -1,4 +1,7 @@
-import { estimateInputTokens } from "@octg/tokenizer-controller";
+import {
+  tokenize,
+  type TokenizeOutcome,
+} from "./tokenizer";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -53,10 +56,12 @@ import { proxyStream } from "./stream";
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
-// Durable Object RPC serialization is limited to 32 MiB. This ceiling accounts for
-// the UTF-8 input text, opaqueInputBytes, and JSON serialization overhead so that the
-// total serialized RPC request stays safely below that limit. Never increase this
-// without also defining a stream or chunk protocol.
+// Durable Object RPC serialization is limited to 32 MiB. This ceiling reserves
+// 65,536 bytes for JSON framing, field names, and the requestId string so that the
+// serialized TokenizeRequest { requestId, inputText, messageCount, opaqueInputBytes }
+// stays strictly below 32 MiB even when inputText and opaqueInputBytes are each
+// at the resolved maximum. Never increase this ceiling without also defining a
+// stream or chunk protocol.
 const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
@@ -370,22 +375,37 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    let estimatedInput: number;
+    let tokenizeOutcome: TokenizeOutcome;
     try {
-      estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
+      tokenizeOutcome = await tokenize(env, {
+        requestId,
+        inputText: requestData.inputText,
+        messageCount: requestData.messageCount,
         opaqueInputBytes: requestData.opaqueInputBytes,
       });
-    } catch (error) {
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-      });
-      throw error;
+    } catch {
+      tokenizeOutcome = { kind: "unavailable" };
     }
+
+    if (tokenizeOutcome.kind === "unavailable") {
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+        route: "error:tokenizer_unavailable",
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+        quotaReserved: false,
+        upstreamReached: false,
+      });
+      return errorResponse(errInternal(requestId));
+    }
+
+    const estimatedInput = tokenizeOutcome.result.estimatedInputTokens;
+    finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
+      inputBytes: requestData.inputBytes,
+      inputTextBytes: requestData.inputTextBytes,
+      opaqueInputBytes: requestData.opaqueInputBytes,
+      estimationPath: tokenizeOutcome.result.estimationPath,
+    });
 
     const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
     const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
