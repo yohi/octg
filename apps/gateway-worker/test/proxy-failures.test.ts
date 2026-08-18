@@ -7,6 +7,7 @@ import {
 import type { QuotaController } from "@octg/quota-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  estimateRpcPayloadSize,
   releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
@@ -36,8 +37,7 @@ const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 }),
 });
 
-const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
-
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
 describe("resolveMaxInputBytes", () => {
   it("defaults to one mebibyte", () => {
     expect(resolveMaxInputBytes(undefined)).toBe(1_048_576);
@@ -127,6 +127,79 @@ describe("resolveMaxInputBytes", () => {
 
     // Then: the serialized request stays strictly below 32 MiB.
     expect(size).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  it("guarantees a ceiling TokenizeRequest stays below 32 MiB under V8 UTF-16 worst case", () => {
+    // Given: the largest ASCII input normalization can emit. In V8 serialization an
+    // all-ASCII string may be encoded as UTF-16 (2 bytes/code unit), doubling the
+    // wire size compared to its UTF-8 byte length.
+    const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+    const requestId = "req_0123456789ABCDEFGHJKMNPQRS";
+    const messageCount = Number.MAX_SAFE_INTEGER;
+    const inputText = "a".repeat(maxInputBytes);
+    const opaqueInputBytes = 0;
+
+    // When: the V8 worst-case payload size is estimated.
+    const size = estimateRpcPayloadSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+
+    // Then: the estimated RPC payload stays strictly below 32 MiB.
+    expect(size).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  it("guarantees JSON-escaped input still serializes below 32 MiB", () => {
+    // Given: a ceiling input where every character requires JSON escaping. Even
+    // though actual DO RPC uses V8/Cap'n Proto (no escaping), this ensures the
+    // JSON.stringify approximation used in earlier checks remains an upper bound.
+    const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+    const requestId = "req_0123456789ABCDEFGHJKMNPQRS";
+    const messageCount = Number.MAX_SAFE_INTEGER;
+    const inputText = '\\"'.repeat(Math.floor(maxInputBytes / 2));
+    const opaqueInputBytes = 0;
+
+    // When: the request is serialized as JSON.
+    const size = tokenizeRequestByteSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+
+    // Then: the JSON representation stays strictly below 32 MiB.
+    expect(size).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  it("guarantees a ceiling TokenizeRequest with multibyte UTF-8 serializes below 32 MiB", () => {
+    // Given: a ceiling input consisting of non-ASCII characters. UTF-8 byte length
+    // differs from UTF-16 code unit count, so this checks the combined size bound.
+    const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+    const requestId = "req_0123456789ABCDEFGHJKMNPQRS";
+    const messageCount = Number.MAX_SAFE_INTEGER;
+    // "あ" is 3 bytes in UTF-8 and 1 UTF-16 code unit.
+    const inputText = "あ".repeat(Math.floor(maxInputBytes / 3));
+    const opaqueInputBytes = 0;
+
+    // When: the request is serialized as JSON and as V8 worst-case.
+    const jsonSize = tokenizeRequestByteSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+    const v8Size = estimateRpcPayloadSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+
+    // Then: both estimates stay strictly below 32 MiB.
+    expect(jsonSize).toBeLessThan(32 * 1024 * 1024);
+    expect(v8Size).toBeLessThan(32 * 1024 * 1024);
   });
 
 });
