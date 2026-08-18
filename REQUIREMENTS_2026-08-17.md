@@ -1,10 +1,12 @@
 # OCTG Tokenizer Durable Object 導入 要件定義書
 
-## 1. 文書概要
+# 1. 文書概要
 
 ### 1.1 目的
 
-本要件定義は、OCTG（OpenAI Complimentary Token Gateway）において確認された Cloudflare Workers Error 1102 を解消するため、現在 Gateway Worker 内で実行している BPE tokenization を専用 Durable Object（以下 `TokenizerController`）へ移管するための要件を定義する。
+本要件定義は、OCTG（OpenAI Complimentary Token Gateway）において確認された Cloudflare Workers
+Error 1102 を解消するため、現在 Gateway Worker 内で実行している BPE tokenization を専用 Durable
+Object（以下 `TokenizerController`）へ移管するための要件を定義する。
 
 本変更では以下を同時に満たすことを必須とする。
 
@@ -21,7 +23,8 @@
 
 ## 2.1 確認された障害
 
-約74,000 token級の `/v1/responses` リクエストにおいて、Cloudflare Worker が以下のエラーで終了する事象が確認された。
+約74,000 token級の `/v1/responses` リクエストにおいて、Cloudflare Worker
+が以下のエラーで終了する事象が確認された。
 
 ```text
 Worker exceeded CPU time limit.
@@ -64,9 +67,11 @@ upstream
 
 ことを原因として確定する。
 
-現行実装では `tokenize` stage 内で `estimateInputTokens()` を実行しており、その中で `js-tiktoken` の `o200k_base` encoding を用いている。
+現行実装では `tokenize` stage 内で `estimateInputTokens()` を実行しており、その中で `js-tiktoken` の
+`o200k_base` encoding を用いている。
 
-現行 Gateway は token estimation 後に safety margin、output upper bound を算出し、その後初めて QuotaController の `reserve()` を呼び出す。
+現行 Gateway は token estimation 後に safety margin、output upper bound を算出し、その後初めて
+QuotaController の `reserve()` を呼び出す。
 
 したがって tokenization を別実行環境へ移しても、
 
@@ -83,9 +88,11 @@ estimate
 
 # 3. 技術的前提
 
-Cloudflare の現行仕様では SQLite-backed Durable Objects の CPU time は **1 request あたりデフォルト30秒**であり、Workers Free Plan でも SQLite-backed Durable Objects を利用できる。
+Cloudflare の現行仕様では SQLite-backed Durable Objects の CPU time は **1 request
+あたりデフォルト30秒**であり、Workers Free Plan でも SQLite-backed Durable Objects を利用できる。
 
-また、compatibility date `2024-04-03` 以降では Durable Object の public method を Worker から RPC として直接呼び出せる。OCTG の compatibility date は既に `2026-08-01` であるため、本方式を利用可能である。
+また、compatibility date `2024-04-03` 以降では Durable Object の public method を Worker
+から RPC として直接呼び出せる。OCTG の compatibility date は既に `2026-08-01` であるため、本方式を利用可能である。
 
 Workers Free Plan における Durable Objects の無料枠は現時点で以下である。
 
@@ -266,7 +273,8 @@ durable-objects/
     └── test/
 ```
 
-ルートリポジトリは既に `durable-objects/*` を npm workspace として認識する構成になっているため、新規workspaceとして追加可能である。
+ルートリポジトリは既に `durable-objects/*` を npm workspace
+として認識する構成になっているため、新規workspaceとして追加可能である。
 
 既存 `quota-controller` workspace の構成を基本形として踏襲する。
 
@@ -343,7 +351,8 @@ DO eviction 後の再初期化は許容する。
 
 ## FR-05. Conservative fallback
 
-`getEncoding()` または `encode()` が通常のJavaScript例外を返した場合、現行実装との安全性互換を維持するため、明示的な conservative fallback を利用可能とする。
+`getEncoding()` または `encode()` が通常のJavaScript例外を返した場合、現行実装との安全性互換を維持するため、明示的な
+conservative fallback を利用可能とする。
 
 結果には必ず、
 
@@ -378,7 +387,8 @@ readonly TOKENIZER_CONTROLLER:
   DurableObjectNamespace<TokenizerController>;
 ```
 
-現在の Gateway Worker は `QuotaController` を同一Workerからexportし、Durable Object bindingとして利用している。
+現在の Gateway Worker は `QuotaController` を同一Workerからexportし、Durable Object
+bindingとして利用している。
 
 同じパターンで `TokenizerController` をexportする。
 
@@ -568,7 +578,8 @@ Tokenizer failure は必ず upstream 未到達で終了する。
 
 ## FR-14. Gateway stage
 
-既存 `octg.resource_stage` を維持する。現在のstage型には既に `tokenize` および `estimationPath` が定義されている。
+既存 `octg.resource_stage` を維持する。現在のstage型には既に `tokenize` および `estimationPath`
+が定義されている。
 
 変更後は、
 
@@ -614,7 +625,7 @@ tokenizer_encode finish
 {
   "event": "octg.tokenizer_stage",
   "requestId": "...",
-  "stage": "encode",
+  "stage": "tokenizer_encode",
   "phase": "finish",
   "durationMs": 123
 }
@@ -689,10 +700,12 @@ encoding.encode
 ```text
 @octg/shared
     └─ types / normalize / quota arithmetic
+    └─ (js-tiktoken を依存から除去する)
 
 @octg/tokenizer-controller
-    ├─ @octg/shared
     └─ js-tiktoken
+    └─ @octg/shared には依存しない
+        (必要な型のみを含む contracts-only package を新設する場合は別途検討)
 
 gateway-worker
     ├─ @octg/shared
@@ -700,7 +713,8 @@ gateway-worker
     └─ @octg/tokenizer-controller
 ```
 
-`packages/shared/src/index.ts` は現在 `estimate.ts` をre-exportしているため、BPE処理とquota arithmeticを分離する。
+`packages/shared/src/index.ts` は現在 `estimate.ts` をre-exportしているため、BPE処理とquota
+arithmeticを分離する。
 
 例えば、
 
@@ -961,7 +975,8 @@ reserve failure
 
 production deploy 後、既存の worker resource limits canary を利用して検証する。
 
-現在のトラブルシュート文書では、74k-token級payloadについて concurrency 1、2、operator指定peakでのcanary検証を要求している。
+現在のトラブルシュート文書では、74k-token級payloadについて concurrency
+1、2、operator指定peakでのcanary検証を要求している。
 
 今回も同じ基準を使用する。
 
@@ -1176,22 +1191,35 @@ package-lock.json                    MODIFY
 
 # 24. Rollback
 
-問題発生時に旧local BPEへ自動fallbackしてはならない。
+問題発生時に旧 local BPE へ自動 fallback してはならない。
 
-rollbackは **deployment単位** で行う。
+rollback は **deployment 単位** で行う。v2 Durable Object 移行と TokenizerDO 機能の有効化は分離する。
 
-```text
-new revision
-TokenizerDO enabled
-        │
-        ├─ OK → continue
-        │
-        └─ NG
-             ↓
-previous revisionへrollback
-```
+1. まず、TokenizerController クラス・migration・binding を含むが TokenizerDO 呼び出しを無効化した **v2
+互換 revision** をデプロイする。
+2. 検証後、TokenizerDO 呼び出しを有効化した **v2 機能有効 revision** をデプロイする。
 
-ただし旧revisionには今回確認済みの1102問題が存在するため、rollback後は大規模入力を運用上制限する必要がある。
+TokenizerDO 有効化後に問題が発生した場合の rollback 先は、同じ v2 互換 revision である。pre-v2 の旧 revision
+へ rollback すると今回確認済みの 1102 問題が再発するため、それは最後の手段（emergency measure）に限る。
+
+v2 デプロイそのものが失敗した場合（例: `v2` migration の適用失敗、`TokenizerController`
+クラスの登録失敗、または v2 互換 revision 自体が正常にデプロイできない場合）、
+rollback 先が存在しないため **forward-fix** を行う。
+
+forward-fix の手順:
+
+1. 影響を受けた Worker / Durable Object のエラーログを収集し、失敗カテゴリーを特定する。
+2. 既存の `v1` revision（TokenizerDO 未搭載）が稼働中であることを確認し、
+   既存トラフィックへの影響を監視する。必要に応じて `v1` revision への緊急 rollback を検討する。
+3. `v2` migration または `TokenizerController` 実装の修正を行い、
+   ローカルおよびステージング環境で `npm test` と `npm run typecheck` が成功することを確認する。
+4. 修正版を **新しい deployment** として再デプロイする。同じ `v2` migration tag を
+   書き換えず、必要に応じて `v3` 以降の migration tag として追加修正を適用する。
+5. デプロイ後、canary トラフィックで `TokenizerController` の RPC 呼び出しと
+   quota lifecycle が正常であることを検証する。
+
+詳細な対応フロー、連絡先、escalation 条件は
+`docs/runbooks/incident-v2-deployment-failure.md` を参照する。
 
 ---
 
@@ -1220,7 +1248,8 @@ previous revisionへrollback
 
 本変更の目的は、
 
-> **既存token estimation semanticsを維持したまま、そのCPU-intensive部分をGateway Workerから隔離すること**
+> **既存token estimation semanticsを維持したまま、そのCPU-intensive部分をGateway
+Workerから隔離すること**
 
 である。
 
