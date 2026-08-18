@@ -62,7 +62,25 @@ const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
 // stays strictly below 32 MiB even when inputText and opaqueInputBytes are each
 // at the resolved maximum. Never increase this ceiling without also defining a
 // stream or chunk protocol.
+//
+// Worst-case overhead at the ceiling is under 200 bytes: 52 bytes for the four
+// field names, ~12 bytes of JSON punctuation, a 29-character requestId (req_ +
+// 26-character ULID) serialized as a JSON string, and up to 16 decimal digits
+// each for messageCount and opaqueInputBytes. The 65,536-byte margin therefore
+// reserves more than two orders of magnitude more headroom than the actual
+// overhead. Normalization guarantees inputTextBytes + opaqueInputBytes <=
+// resolveMaxInputBytes(), so the Gateway never emits a TokenizeRequest whose
+// serialized JSON can reach 32 MiB.
 const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
+
+export function tokenizeRequestByteSize(request: {
+  requestId: string;
+  inputText: string;
+  messageCount: number;
+  opaqueInputBytes: number;
+}): number {
+  return new TextEncoder().encode(JSON.stringify(request)).byteLength;
+}
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 

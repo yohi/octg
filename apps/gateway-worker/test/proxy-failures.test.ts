@@ -11,6 +11,7 @@ import {
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
   resolveMaxInputBytes,
+  tokenizeRequestByteSize,
 } from "../src/proxy";
 import type { InFlightLeaseReleaser } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
@@ -87,6 +88,47 @@ describe("resolveMaxInputBytes", () => {
     // Then: it is clamped to the ceiling.
     expect(resolved).toBe(MAX_TOKENIZATION_RPC_INPUT_BYTES);
   });
+
+  it("guarantees a ceiling TokenizeRequest serializes below 32 MiB", () => {
+    // Given: the largest inputs normalization can emit.
+    const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+    const requestId = "req_0123456789ABCDEFGHJKMNPQRS"; // 29 characters, matching ULID format
+    const messageCount = Number.MAX_SAFE_INTEGER; // worst-case decimal length
+    const inputText = "a".repeat(maxInputBytes); // inputText occupies the entire ceiling
+    const opaqueInputBytes = 0; // chat-style: all bytes are in inputText
+
+    // When: the helper serializes the request.
+    const size = tokenizeRequestByteSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+
+    // Then: the serialized request stays strictly below 32 MiB.
+    expect(size).toBeLessThan(32 * 1024 * 1024);
+  });
+
+  it("guarantees a ceiling TokenizeRequest with split inputText and opaque bytes serializes below 32 MiB", () => {
+    // Given: the largest inputs normalization can emit, split between text and opaque bytes.
+    const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+    const requestId = "req_0123456789ABCDEFGHJKMNPQRS";
+    const messageCount = Number.MAX_SAFE_INTEGER;
+    const inputText = "a".repeat(Math.floor(maxInputBytes / 2));
+    const opaqueInputBytes = maxInputBytes - Math.floor(maxInputBytes / 2);
+
+    // When: the helper serializes the request.
+    const size = tokenizeRequestByteSize({
+      requestId,
+      inputText,
+      messageCount,
+      opaqueInputBytes,
+    });
+
+    // Then: the serialized request stays strictly below 32 MiB.
+    expect(size).toBeLessThan(32 * 1024 * 1024);
+  });
+
 });
 
 describe("in-flight lease timing configuration", () => {

@@ -166,6 +166,21 @@ request validation failure は conservative fallback の対象にしない。
 > serialization overhead, exceeds 32 MiB. Inputs above this ceiling are rejected
 > before tokenizer RPC by the existing body size limit; allowing larger inputs
 > requires a stream or chunk protocol to be defined.
+>
+> The 65,536-byte reservation is calculated as follows. A serialized
+> `TokenizeRequest` contains the four field names (`requestId`, `inputText`,
+> `messageCount`, `opaqueInputBytes`), JSON structural characters, and values.
+> The worst-case overhead for a request at the ceiling is: 52 bytes for field
+> names, ~12 bytes for JSON punctuation, a 29-character `requestId` serialized
+> as a JSON string, and up to 16 decimal digits each for `messageCount` and
+> `opaqueInputBytes`. This totals well under 200 bytes. The 65,536-byte margin
+> therefore reserves two orders of magnitude more headroom than the actual
+> serialization overhead, guaranteeing that the serialized request stays strictly
+> below 32 MiB whenever `inputTextBytes + opaqueInputBytes <= resolveMaxInputBytes()`.
+>
+> Because normalization rejects any request where `inputTextBytes + opaqueInputBytes`
+> exceeds `resolveMaxInputBytes()`, the Gateway never emits a
+> `TokenizeRequest` whose payload would approach the 32 MiB RPC limit.
 
 ### 5.2 Result
 
