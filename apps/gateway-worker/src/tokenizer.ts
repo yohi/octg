@@ -16,10 +16,10 @@ export async function tokenize(
   env: Env,
   request: TokenizeClientRequest,
 ): Promise<TokenizeOutcome> {
-  const stub = env.TOKENIZER_CONTROLLER.get(
-    env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
-  );
   try {
+    const stub = env.TOKENIZER_CONTROLLER.get(
+      env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
+    );
     const outcome = await stub.estimate(request);
     if (
       typeof outcome !== "object" ||

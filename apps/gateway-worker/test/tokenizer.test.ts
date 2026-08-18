@@ -34,6 +34,15 @@ function envWithRejectedEstimate(error: Error): Env {
   } as unknown as Env;
 }
 
+function envWithStubResolutionError(error: Error): Env {
+  return {
+    TOKENIZER_CONTROLLER: {
+      idFromName: () => { throw error; },
+      get: () => ({} as unknown as DurableObjectStub<TokenizerController>),
+    },
+  } as unknown as Env;
+}
+
 describe("tokenize", () => {
   it("returns resolved result on successful RPC", async () => {
     const env = envWithEstimate({
@@ -81,6 +90,12 @@ describe("tokenize", () => {
         estimationPath: "unknown_path",
       },
     });
+    const outcome = await tokenize(env, baseRequest);
+    expect(outcome).toEqual({ kind: "unavailable" });
+  });
+
+  it("returns unavailable when stub resolution throws", async () => {
+    const env = envWithStubResolutionError(new Error("binding missing"));
     const outcome = await tokenize(env, baseRequest);
     expect(outcome).toEqual({ kind: "unavailable" });
   });
