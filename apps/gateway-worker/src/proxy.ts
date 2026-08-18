@@ -1,3 +1,4 @@
+import { estimateInputTokens } from "@octg/tokenizer-controller";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -15,7 +16,6 @@ import {
   errRequestTooLarge,
   errWorkerConcurrencyExceeded,
   errorResponse,
-  estimateInputTokens,
   MAX_NORMALIZED_INPUT_BYTES,
   nextUtcMidnight,
   normalizeChatCompletions,
@@ -53,6 +53,11 @@ import { proxyStream } from "./stream";
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
+// Durable Object RPC serialization is limited to 32 MiB. This ceiling accounts for
+// the UTF-8 input text, opaqueInputBytes, and JSON serialization overhead so that the
+// total serialized RPC request stays safely below that limit. Never increase this
+// without also defining a stream or chunk protocol.
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 
@@ -99,7 +104,10 @@ export function snapshotOf(view: QuotaView): QuotaSnapshot {
 }
 
 export function resolveMaxInputBytes(configured: string | undefined): number {
-  return resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES);
+  return Math.min(
+    resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES),
+    MAX_TOKENIZATION_RPC_INPUT_BYTES,
+  );
 }
 
 export function resolveMaxInFlightRequests(configured: string | undefined): number {

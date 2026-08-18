@@ -12,6 +12,7 @@
   "dependencies": {
     "@octg/quota-controller": "*",
     "@octg/shared": "*",
+    "@octg/tokenizer-controller": "*",
     "jose": "^5.6.0",
     "ulid": "^2.3.0"
   },
