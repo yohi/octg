@@ -53,29 +53,52 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
       return { kind: "unavailable" };
     }
 
-    const byteCount = new TextEncoder().encode(validated.inputText).length;
-    const initStartedAt = performance.now();
-    const initStage = this.startStage(validated.requestId, "tokenizer_init");
-    let encodingReady = false;
-    try {
-      if (this.encoding === undefined) {
-        this.encoding = getEncoding("o200k_base");
-      }
-      encodingReady = true;
-      this.finishStage(initStage, "success", performance.now() - initStartedAt, {});
-    } catch {
-      this.finishStage(initStage, "fallback", performance.now() - initStartedAt, {
-        failureCategory: "encoding_init_failure",
-      });
-    }
-
     const encodeStartedAt = performance.now();
     const encodeStage = this.startStage(validated.requestId, "tokenizer_encode");
+    let encodingReady = false;
+    let byteCount: number | undefined;
     try {
+      if (this.encoding === undefined) {
+        const initStartedAt = performance.now();
+        const initStage = this.startStage(validated.requestId, "tokenizer_init");
+        try {
+          this.encoding = getEncoding("o200k_base");
+          this.finishStage(initStage, "success", performance.now() - initStartedAt, {});
+        } catch {
+          this.finishStage(initStage, "fallback", performance.now() - initStartedAt, {
+            failureCategory: "encoding_init_failure",
+          });
+          // byteCount is needed for the fallback path below
+          byteCount = byteCountFor(validated.inputText);
+          const base = byteCount;
+          const estimated =
+            base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
+          if (!isNonNegativeSafeInteger(estimated)) {
+            this.finishStage(encodeStage, "exception", performance.now() - encodeStartedAt, {
+              byteCount,
+              failureCategory: "unsafe_integer",
+            });
+            return { kind: "unavailable" };
+          }
+          this.finishStage(encodeStage, "fallback", performance.now() - encodeStartedAt, {
+            byteCount,
+            tokenCount: base,
+            estimationPath: "conservative_bytes",
+          });
+          return {
+            kind: "resolved",
+            result: {
+              estimatedInputTokens: estimated,
+              estimationPath: "conservative_bytes",
+            },
+          };
+        }
+      }
+
+      encodingReady = true;
       const encoding = this.encoding;
-      const base = encodingReady && encoding !== undefined
-        ? encoding.encode(validated.inputText).length
-        : byteCount;
+      const base = encoding.encode(validated.inputText).length;
+      byteCount = byteCount ?? byteCountFor(validated.inputText);
       const estimated =
         base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
       if (!isNonNegativeSafeInteger(estimated)) {
@@ -85,19 +108,20 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
         });
         return { kind: "unavailable" };
       }
-      this.finishStage(encodeStage, encodingReady ? "success" : "fallback", performance.now() - encodeStartedAt, {
+      this.finishStage(encodeStage, "success", performance.now() - encodeStartedAt, {
         byteCount,
         tokenCount: base,
-        estimationPath: encodingReady ? "exact_bpe" : "conservative_bytes",
+        estimationPath: "exact_bpe",
       });
       return {
         kind: "resolved",
         result: {
           estimatedInputTokens: estimated,
-          estimationPath: encodingReady ? "exact_bpe" : "conservative_bytes",
+          estimationPath: "exact_bpe",
         },
       };
     } catch {
+      byteCount = byteCount ?? byteCountFor(validated.inputText);
       const base = byteCount;
       const estimated =
         base + validated.opaqueInputBytes + 4 * validated.messageCount + 3;
@@ -112,6 +136,7 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
         byteCount,
         tokenCount: base,
         estimationPath: "conservative_bytes",
+        failureCategory: "encoding_encode_failure",
       });
       return {
         kind: "resolved",
@@ -177,6 +202,10 @@ function validateTokenizeRequest(request: unknown): TokenizeRequest | null {
     messageCount: candidate.messageCount,
     opaqueInputBytes: candidate.opaqueInputBytes,
   };
+}
+
+function byteCountFor(inputText: string): number {
+  return new TextEncoder().encode(inputText).length;
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
