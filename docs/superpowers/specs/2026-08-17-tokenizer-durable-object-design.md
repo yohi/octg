@@ -131,6 +131,12 @@ type TokenizerOutcome =
 `packages/shared/src/index.ts` から旧関数の export を除去し、
 `packages/shared/package.json` から `js-tiktoken` を削除する。
 
+実装計画では、既存 `packages/shared/test/estimate.test.ts` から
+`estimateInputTokens()` および `js-tiktoken` に依存するテストを
+`durable-objects/tokenizer-controller` workspace へ移行する手順を明記する。
+移行後、`packages/shared/test/estimate.test.ts` には
+`safetyMargin()`、`upperBoundOf()`、`decideOutput()` の算術テストのみを残す。
+
 ## 5. RPC 契約
 
 ### 5.1 Request
@@ -412,8 +418,9 @@ CPU limit の引き上げ設定は追加せず、Workers Free Plan の既定範�
 - Storage / D1 非使用
 - 入力内容をログへ含めないこと
 
-parity は移行前の `estimateInputTokens()` から取得した数値を golden case として
-保存する。旧 BPE 実装を shared または test helper に残さない。
+parity は移行前の `estimateInputTokens()` から取得した数値を golden case として、
+`durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json` に保存する。
+旧 BPE 実装を shared または test helper に残さない。
 
 ### 11.2 74k-token regression
 

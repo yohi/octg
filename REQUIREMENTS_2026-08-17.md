@@ -1202,7 +1202,24 @@ rollback は **deployment 単位** で行う。v2 Durable Object 移行と Token
 TokenizerDO 有効化後に問題が発生した場合の rollback 先は、同じ v2 互換 revision である。pre-v2 の旧 revision
 へ rollback すると今回確認済みの 1102 問題が再発するため、それは最後の手段（emergency measure）に限る。
 
-v2 デプロイそのものが失敗した場合は forward-fix を行う。手順は別途 incident runbook に記載する。
+v2 デプロイそのものが失敗した場合（例: `v2` migration の適用失敗、`TokenizerController`
+クラスの登録失敗、または v2 互換 revision 自体が正常にデプロイできない場合）、
+rollback 先が存在しないため **forward-fix** を行う。
+
+forward-fix の手順:
+
+1. 影響を受けた Worker / Durable Object のエラーログを収集し、失敗カテゴリーを特定する。
+2. 既存の `v1` revision（TokenizerDO 未搭載）が稼働中であることを確認し、
+   既存トラフィックへの影響を監視する。必要に応じて `v1` revision への緊急 rollback を検討する。
+3. `v2` migration または `TokenizerController` 実装の修正を行い、
+   ローカルおよびステージング環境で `npm test` と `npm run typecheck` が成功することを確認する。
+4. 修正版を **新しい deployment** として再デプロイする。同じ `v2` migration tag を
+   書き換えず、必要に応じて `v3` 以降の migration tag として追加修正を適用する。
+5. デプロイ後、canary トラフィックで `TokenizerController` の RPC 呼び出しと
+   quota lifecycle が正常であることを検証する。
+
+詳細な対応フロー、連絡先、escalation 条件は
+`docs/runbooks/incident-v2-deployment-failure.md` を参照する。
 
 ---
 
