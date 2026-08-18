@@ -1,0 +1,33 @@
+{
+  "description": "Golden token counts produced by the pre-migration estimateInputTokens() implementation using o200k_base.",
+  "cases": [
+    {
+      "inputText": "Hello world",
+      "messageCount": 1,
+      "opaqueInputBytes": 0,
+      "expectedTokens": 9,
+      "estimationPath": "exact_bpe"
+    },
+    {
+      "inputText": "abcabcabc",
+      "messageCount": 3,
+      "opaqueInputBytes": 0,
+      "expectedTokens": 18,
+      "estimationPath": "exact_bpe"
+    },
+    {
+      "inputText": "visible",
+      "messageCount": 1,
+      "opaqueInputBytes": 28,
+      "expectedTokens": 36,
+      "estimationPath": "exact_bpe"
+    },
+    {
+      "inputText": "こんにちは",
+      "messageCount": 1,
+      "opaqueInputBytes": 0,
+      "expectedTokens": 8,
+      "estimationPath": "exact_bpe"
+    }
+  ]
+}
