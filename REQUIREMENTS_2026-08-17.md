@@ -1,6 +1,6 @@
 # OCTG Tokenizer Durable Object 導入 要件定義書
 
-## 1. 文書概要
+# 1. 文書概要
 
 ### 1.1 目的
 
@@ -994,11 +994,11 @@ concurrency = expected peak
 
 以下を**すべて**満たした場合に本変更を完了とする。
 
-## AC-01
+### AC-01
 
 74k-token級fixtureが Gateway Worker で Error 1102 を発生させない。
 
-## AC-02
+### AC-02
 
 Gateway invocation に、
 
