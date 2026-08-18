@@ -1,6 +1,6 @@
 import { env, SELF } from "cloudflare:test";
+import { estimateInputTokens } from "@octg/tokenizer-controller";
 import {
-  estimateInputTokens,
   MAX_NORMALIZED_INPUT_BYTES,
   safetyMargin,
   type InFlightLease,
@@ -36,6 +36,8 @@ const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 }),
 });
 
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
+
 describe("resolveMaxInputBytes", () => {
   it("defaults to one mebibyte", () => {
     expect(resolveMaxInputBytes(undefined)).toBe(1_048_576);
@@ -48,8 +50,8 @@ describe("resolveMaxInputBytes", () => {
       // When: the Worker configuration boundary resolves it.
       const resolved = resolveMaxInputBytes(configuredLimit);
 
-      // Then: the approved default is used.
-      expect(resolved).toBe(MAX_NORMALIZED_INPUT_BYTES);
+      // Then: the approved default is used, capped by the RPC ceiling.
+      expect(resolved).toBe(Math.min(MAX_NORMALIZED_INPUT_BYTES, MAX_TOKENIZATION_RPC_INPUT_BYTES));
     },
   );
 
@@ -58,8 +60,33 @@ describe("resolveMaxInputBytes", () => {
     // When: the Worker configuration boundary resolves it.
     const resolved = resolveMaxInputBytes("2");
 
-    // Then: the configured limit is preserved.
+    // Then: The configured limit is preserved.
     expect(resolved).toBe(2);
+  });
+
+  it("caps resolved limit at the RPC serialization ceiling", () => {
+    // Given: a configured limit larger than the 32 MiB RPC ceiling.
+    // When: the Worker configuration boundary resolves it.
+    const resolved = resolveMaxInputBytes(String(40 * 1024 * 1024));
+
+    // Then: the value is clamped to the serialization-aware ceiling.
+    expect(resolved).toBe(MAX_TOKENIZATION_RPC_INPUT_BYTES);
+  });
+
+  it("uses the configured limit exactly at the RPC ceiling", () => {
+    // Given: a configured limit equal to the RPC ceiling.
+    const resolved = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
+
+    // Then: the configured value is preserved.
+    expect(resolved).toBe(MAX_TOKENIZATION_RPC_INPUT_BYTES);
+  });
+
+  it("rejects one byte over the RPC ceiling", () => {
+    // Given: a configured limit one byte above the RPC ceiling.
+    const resolved = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES + 1));
+
+    // Then: it is clamped to the ceiling.
+    expect(resolved).toBe(MAX_TOKENIZATION_RPC_INPUT_BYTES);
   });
 });
 
