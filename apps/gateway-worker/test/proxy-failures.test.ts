@@ -1,5 +1,4 @@
 import { env, SELF } from "cloudflare:test";
-import { estimateInputTokens } from "@octg/tokenizer-controller";
 import {
   MAX_NORMALIZED_INPUT_BYTES,
   safetyMargin,
@@ -308,7 +307,8 @@ describe("proxy failure paths", () => {
     const inputText = "visible-summary";
     const opaqueInputBytes = new TextEncoder().encode("秘密状態").byteLength;
     const maxOutputTokens = 10;
-    const estimatedInput = estimateInputTokens(inputText, 1, opaqueInputBytes);
+    // exact BPE for "visible-summary" via o200k_base is 2 tokens; add 4 per message + 3 overhead.
+    const estimatedInput = 2 + opaqueInputBytes + 4 + 3;
     const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
     const expectedReservation = estimatedInput + maxOutputTokens + margin;
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: { code: "upstream" } }), { status: 500 }));
