@@ -436,6 +436,7 @@ export async function handleProxy(
         quotaReserved: false,
         upstreamReached: false,
       });
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
     let tokenizeOutcome: TokenizeOutcome;
@@ -459,6 +460,7 @@ export async function handleProxy(
         quotaReserved: false,
         upstreamReached: false,
       });
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
       return errorResponse(errInternal(requestId));
     }
 
