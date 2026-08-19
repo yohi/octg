@@ -862,7 +862,14 @@ const controller = () => env.TOKENIZER_CONTROLLER.get(
 ```
 
 Test a valid exact request, each invalid request contract over RPC, and two requests
-to the same object. After tokenization, use `runInDurableObject` to assert
+to the same object. Also add byte-size boundary cases over RPC: `inputText` at exactly
+`MAX_INPUT_TEXT_BYTES` UTF-8 bytes is accepted, `inputText` one byte over
+`MAX_INPUT_TEXT_BYTES` is rejected, `requestId` at exactly `MAX_REQUEST_ID_BYTES` UTF-8
+bytes is accepted, and `requestId` one byte over `MAX_REQUEST_ID_BYTES` is rejected. For
+each over-limit rejection, assert `TokenizerEstimator.estimate()` is never called by
+instrumenting the estimator with a fail-fast spy (or by verifying no
+`octg.tokenizer_stage` event is emitted) so that oversized input is rejected before any
+BPE work begins. After tokenization, use `runInDurableObject` to assert
 `state.storage.list()` has size zero. To catch transient writes that are later deleted,
 instrument `state.storage.put`, `state.storage.delete`, and `state.storage.deleteAll`
 with a fail-fast guard or operation-counting spy inside `runInDurableObject`, and assert
@@ -1127,9 +1134,12 @@ export function errInternal(
 }
 ```
 
-Add only `"error:tokenizer_unavailable"` to `ResourceStageRoute`; do not add a new
-stage or `Retry-After` behavior. This is the internal resource-stage route, distinct
-from the external HTTP response route `error:internal_error`.
+Add `"error:tokenizer_unavailable"` and `"error:arithmetic_error"` to
+`ResourceStageRoute`; do not add a new stage or `Retry-After` behavior. These are the
+internal resource-stage routes, distinct from the external HTTP response route
+`error:internal_error`. `error:tokenizer_unavailable` records Tokenizer RPC failures and
+`error:arithmetic_error` records arithmetic overflow in `resolveTokenBudget()`, so the
+two failure categories are distinguishable in `octg.resource_stage` logs.
 
 - [ ] **Step 4: Implement typed budget calculation**
 
@@ -1156,12 +1166,13 @@ Validate all inputs before division. Call existing `safetyMargin`, `upperBoundOf
 invalid arithmetic result. Never clamp an invalid number.
 `resolveTokenBudget()` does not return `tokenizer_unavailable`; Tokenizer RPC failures
 are handled by `tokenizeInput()` or proxy orchestration before `resolveTokenBudget()` is
-called. Both `tokenizer_unavailable` and `arithmetic_error` map to HTTP 500
-`internal_error` with `X-OCTG-Route: error:internal_error`, internal resource-stage route
-`error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false`, and
-audit best-effort as failed. Proxy must record `tokenizer_unavailable` and
-`arithmetic_error` distinctly so arithmetic bugs are not misclassified as external
-dependency failures in `octg.resource_stage` logs.
+called. Both `tokenizer_unavailable` and `arithmetic_error` map to the same HTTP 500
+`internal_error` response with `X-OCTG-Route: error:internal_error`,
+`quotaReserved: false`, `upstreamReached: false`, and audit best-effort as failed.
+However, they use distinct internal resource-stage routes so arithmetic bugs are not
+misclassified as external dependency failures: `tokenizer_unavailable` records the
+tokenize stage with internal route `error:tokenizer_unavailable`, while `arithmetic_error`
+records the tokenize stage with internal route `error:arithmetic_error`.
 
 - [ ] **Step 5: Run focused tests and typechecks**
 
@@ -1279,8 +1290,9 @@ before reserve starts.
 
 For a resolved result, call `resolveTokenBudget`. Map `request_too_large` to the
 existing 413 and `quota_exceeded` to the existing 429. Map `arithmetic_error` to the
-same 500 `internal_error` response as `tokenizer_unavailable`: finish the `tokenize`
-stage as `exception` with internal route `error:tokenizer_unavailable`, return
+same 500 `internal_error` response as `tokenizer_unavailable`, but with a distinct
+internal resource-stage route: finish the `tokenize` stage as `exception` with internal
+route `error:arithmetic_error`, return
 `errInternal(requestId, { quota: snapshot, route: "error:internal_error" })` with
 `quotaReserved: false` and `upstreamReached: false`, and complete audit best-effort as
 failed. For `resolved`, use only returned `reservation`, `upperBound`, and
@@ -1588,7 +1600,7 @@ and evidence pass.
 | AC-03 / AC-04 | observation and integration tests | matching Gateway and Tokenizer events by request ID |
 | AC-05 / AC-06 | ordered integration call trace | stage timestamps show tokenizer -> reserve -> upstream |
 | AC-07 | proxy/quota settle tests | actual usage settlement record |
-| AC-08 | injected RPC/malformed/overflow tests covering `tokenizer_unavailable` (via `tokenizeInput()`) and `arithmetic_error` (via `resolveTokenBudget()`) with reserve=0/upstream=0, HTTP 500 `internal_error`, route `error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false` | correlate any canary unavailable or arithmetic event without adding a production fault hook |
+| AC-08 | injected RPC/malformed/overflow tests covering `tokenizer_unavailable` (via `tokenizeInput()`, internal route `error:tokenizer_unavailable`) and `arithmetic_error` (via `resolveTokenBudget()`, internal route `error:arithmetic_error`) with reserve=0/upstream=0, HTTP 500 `internal_error`, `quotaReserved: false`, `upstreamReached: false` | correlate any canary unavailable or arithmetic event without adding a production fault hook |
 | AC-09 | existing settle/uncertain/release suites | upstream uncertain remains reconcilable |
 | AC-10 | allowlist/redaction/Storage tests | Worker/DO/AI Gateway log inspection |
 | AC-11 / AC-13 | canary driver validation with 6 halt thresholds | concurrency 1/2/expected peak on Free Plan, all thresholds within limits |
