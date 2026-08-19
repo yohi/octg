@@ -180,9 +180,6 @@ request validation failure は conservative fallback の対象にしない。
 > The 65,536-byte reservation covers the Cap'n Proto/V8 framing, the four
 > property-name strings, the 29-character `requestId`, the two safe-integer
 > numbers, and a safety margin. Worst-case framing is well under 200 bytes, so
-> The 65,536-byte reservation covers the Cap'n Proto/V8 framing, the four
-> property-name strings, the 29-character `requestId`, the two safe-integer
-> numbers, and a safety margin. Worst-case framing is well under 200 bytes, so
 > the reservation is conservative.
 
 ### 5.2 Result

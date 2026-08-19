@@ -1,6 +1,6 @@
 # OCTG Tokenizer Durable Object 導入 要件定義書
 
-## 1. 文書概要
+# 1. 文書概要
 
 ### 1.1 目的
 
