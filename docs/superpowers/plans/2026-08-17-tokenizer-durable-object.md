@@ -35,9 +35,12 @@ Objects, D1, npm workspaces, Vitest, `@cloudflare/vitest-pool-workers`,
 - 初期化失敗を instance に保存せず、次 request で `getEncoding("o200k_base")` を再試行する。
 - Gateway は Tokenizer RPC を再試行せず、独自 timeout を追加しない。
 - Gateway 内の BPE、byte fallback、upstream fallback、paid fallback を禁止する。
-- Tokenizer failure または malformed result では HTTP 503、code `tokenizer_unavailable`、route `error:tokenizer_unavailable` を返し、`Retry-After` を付与しない。
+- Tokenizer failure または malformed result では外部 API 契約として HTTP 500、code `internal_error`、route `error:internal_error` を返し、`Retry-After` を付与しない。外部 response には既存 `errInternal()` を流用し、quota snapshot header と `X-OCTG-Route: error:internal_error` を付与する。
+- 内部 `octg.resource_stage` の失敗 route は `error:tokenizer_unavailable` とし、HTTP response の `X-OCTG-Route: error:internal_error` と混同しない。
 - Tokenizer failure 時は `quotaReserved = false`、`upstreamReached = false` とし、reserve、release、markUncertain、upstream を呼ばない。
 - fixed logical object ID は `tokenizer:primary` とし、sharding、result cache、prompt hash cache を実装しない。
+- `resolveMaxInputBytes()` の有効上限を UTF-8 `16 MiB - 65,536 bytes` に cap する。既存 body-size validation が Tokenizer RPC より前にこの ceiling を適用する。
+- RPC 発行直前に `TokenizeRequest` の V8 serialized payload worst-case size を保守的に推定し、`>= 32 MiB` なら RPC を呼ばず fail-closed とする。stream/chunk protocol は本変更の対象外。
 - Tokenizer package は `@octg/shared` に依存しない。`REQUIREMENTS_2026-08-17.md:687-700` の依存図より、設計書 `docs/superpowers/specs/2026-08-17-tokenizer-durable-object-design.md:50-53` の明示的な依存禁止を優先する。
 - Tokenizer は Durable Object Storage、D1、QuotaController、外部 HTTP endpoint を使用しない。
 - prompt、input text、message content、request body、Authorization、API key、raw token array、生の例外 message/stack を保存またはログ出力しない。
@@ -60,21 +63,22 @@ Objects, D1, npm workspaces, Vitest, `@cloudflare/vitest-pool-workers`,
 - Create `durable-objects/tokenizer-controller/src/estimator.ts`: lazy encoding、exact/fallback、safe arithmetic。
 - Create `durable-objects/tokenizer-controller/src/tokenizer-controller.ts`: public Durable Object RPC boundary。
 - Create `durable-objects/tokenizer-controller/src/index.ts`: package public exports。
+- Create `durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json`: 移行前 `estimateInputTokens()` から取得した golden case 期待値。
 - Create `durable-objects/tokenizer-controller/test/contracts.test.ts`: request runtime validation。
-- Create `durable-objects/tokenizer-controller/test/estimator.test.ts`: parity、fallback、retry、reuse、overflow。
+- Create `durable-objects/tokenizer-controller/test/estimator.test.ts`: golden fixture parity、fallback、retry、reuse、overflow。
 - Create `durable-objects/tokenizer-controller/test/observation.test.ts`: safe logging contract。
 - Create `durable-objects/tokenizer-controller/test/tokenizer-controller.test.ts`: real DO RPC と Storage 非使用。
 
 ### Gateway integration
 
-- Create `apps/gateway-worker/src/tokenizer.ts`: fixed ID resolution、single RPC、response validation、outcome union。
+- Create `apps/gateway-worker/src/tokenizer.ts`: fixed ID resolution、single RPC、RPC preflight size check、response validation、outcome union。
 - Create `apps/gateway-worker/src/token-budget.ts`: Gateway-side safe quota arithmetic と typed outcomes。
-- Create `apps/gateway-worker/test/tokenizer-client.test.ts`: client call count、fixed ID、malformed result。
+- Create `apps/gateway-worker/test/tokenizer-client.test.ts`: client call count、fixed ID、malformed result、RPC preflight。
 - Create `apps/gateway-worker/test/token-budget.test.ts`: overflow、413、429、resolved budget。
-- Create `apps/gateway-worker/test/tokenizer-integration.test.ts`: HTTP 503 fail-closed と quota lifecycle regression。
+- Create `apps/gateway-worker/test/tokenizer-integration.test.ts`: HTTP 500 fail-closed と quota lifecycle regression。
 - Create `apps/gateway-worker/test/tokenizer-74k-regression.test.ts`: generated 74k exact BPE と Gateway path。
 - Modify `apps/gateway-worker/src/index.ts`: Tokenizer class export と Env binding。
-- Modify `apps/gateway-worker/src/proxy.ts`: local estimator block を tokenizer outcome と token budget orchestration に置換。
+- Modify `apps/gateway-worker/src/proxy.ts`: local estimator block を tokenizer outcome と token budget orchestration に置換。`resolveMaxInputBytes()` の ceiling を `16 MiB - 65,536 bytes` に変更。
 - Modify `apps/gateway-worker/src/resource-observation.ts`: `error:tokenizer_unavailable` route。
 - Modify `apps/gateway-worker/wrangler.jsonc`: binding と immutable `v2` migration。
 - Modify `apps/gateway-worker/vitest.config.ts`: Tokenizer workspace tests を Worker pool へ追加。
@@ -83,8 +87,9 @@ Objects, D1, npm workspaces, Vitest, `@cloudflare/vitest-pool-workers`,
 ### Shared cleanup and guards
 
 - Modify `packages/shared/src/estimate.ts`: `estimateInputTokens`、encoding cache、`js-tiktoken` import を削除し、quota arithmetic だけを残す。
-- Modify `packages/shared/src/errors.ts`: 503 error contract を追加する。
+- Modify `packages/shared/src/errors.ts`: `errInternal()` を拡張し、optional `quota` と `route` を付与できるようにする。
 - Modify `packages/shared/test/estimate.test.ts`: BPE tests を削除し、quota arithmetic tests を維持する。
+- Modify `packages/shared/test/errors.test.ts`: `errInternal()` の拡張に対する test を追加する。
 - Create `packages/shared/test/tokenizer-dependency-isolation.test.ts`: Gateway/shared production source の BPE isolation guard。
 - Modify `packages/shared/package.json`: `js-tiktoken` dependency を削除する。
 - Modify `package-lock.json`: workspace link と direct dependency ownership を npm で再生成する。
@@ -114,9 +119,9 @@ Objects, D1, npm workspaces, Vitest, `@cloudflare/vitest-pool-workers`,
 
 | PR | Branch | Base | Scope | Merge gate |
 | --- | --- | --- | --- | --- |
-| 1 | `tokenizer-do/controller` | `main` | RPC contracts、estimator、safe logging、unit tests | Tokenizer focused tests と workspace typecheck |
-| 2 | `tokenizer-do/wiring` | `tokenizer-do/controller` | Worker export、Env、Wrangler binding/v2、real DO test、Gateway client | Wrangler-backed DO/client tests と gateway typecheck |
-| 3 | `tokenizer-do/cutover` | `tokenizer-do/wiring` | token budget、503 contract、proxy cutover、74k Gateway regression、quota lifecycle regression | Gateway success/failure tests、reserve/upstream ordering |
+| 1 | `tokenizer-do/controller` | `main` | RPC contracts、golden fixture、estimator、safe logging、unit tests | Tokenizer focused tests と workspace typecheck |
+| 2 | `tokenizer-do/wiring` | `tokenizer-do/controller` | Worker export、Env、Wrangler binding/v2、real DO test、Gateway client、RPC preflight | Wrangler-backed DO/client tests と gateway typecheck |
+| 3 | `tokenizer-do/cutover` | `tokenizer-do/wiring` | token budget、500 internal_error contract、proxy cutover、74k Gateway regression、quota lifecycle regression | Gateway success/failure tests、reserve/upstream ordering |
 | 4 | `tokenizer-do/verification` | `tokenizer-do/cutover` | shared cleanup、dependency guard、runbook、canary evidence | full test/typecheck、manual HTTP QA、production canary |
 
 実装開始時に最下層を作成する。
@@ -297,10 +302,11 @@ git add durable-objects/tokenizer-controller/package.json \
 git commit -m "feat: Tokenizer RPC契約を追加"
 ```
 
-### Task 2: Lazy exact BPE と conservative fallback を実装する
+### Task 2: Golden fixture を作成し Lazy exact BPE と conservative fallback を実装する
 
 **Files:**
 
+- Create: `durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json`
 - Create: `durable-objects/tokenizer-controller/src/estimator.ts`
 - Create: `durable-objects/tokenizer-controller/src/observation.ts`
 - Create: `durable-objects/tokenizer-controller/test/estimator.test.ts`
@@ -312,50 +318,64 @@ git commit -m "feat: Tokenizer RPC契約を追加"
 - Produces: `TokenizerEstimator.estimate(request, context): TokenizeResult`。
 - Produces: `TokenizerEstimatorContext` with request/revision IDs and typed emitter。
 - Produces: the typed `TokenizerStageEvent` contract consumed by the estimator。
-- Invariant: only `Error` from encoding initialization/encode becomes conservative fallback。
+- Produces: `durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json` with pre-migration expected token counts。
+- Invariant: only `Error` from encoding initialization/encode becomes conservative fallback.
 
-- [ ] **Step 1: Write RED golden, fallback, retry, reuse, and overflow tests**
+- [ ] **Step 1: Generate golden fixture from pre-migration `estimateInputTokens()`**
 
-Use fixed values captured from the pre-migration `o200k_base` implementation:
+Before removing any shared BPE code, capture expected token counts from the current
+`master` implementation. Create
+`durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json` with
+the exact expected `estimatedInputTokens` for each case:
 
-```ts
-it.each([
-  ["", 0, 0, 3],
-  ["Hello, world!", 1, 0, 11],
-  ["こんにちは、世界！", 1, 0, 11],
-  ["Hello 👋🌍", 1, 0, 12],
-  ["const answer: number = 42;\nconsole.log(answer);", 2, 0, 23],
-  [JSON.stringify({ model: "gpt-5.6-luna", input: "hello" }), 1, 7, 30],
-  ["OCTG は exact BPE を Durable Object で実行します 🚀", 3, 11, 43],
-])("preserves exact BPE parity", (inputText, messageCount, opaqueInputBytes, expected) => {
-  expect(estimator.estimate({ requestId: "req_golden", inputText, messageCount, opaqueInputBytes }, context))
-    .toEqual({ estimatedInputTokens: expected, estimationPath: "exact_bpe" });
-});
+```json
+{
+  "cases": [
+    { "name": "empty", "inputText": "", "messageCount": 0, "opaqueInputBytes": 0, "expected": 3 },
+    { "name": "ascii_hello", "inputText": "Hello, world!", "messageCount": 1, "opaqueInputBytes": 0, "expected": 11 },
+    { "name": "japanese", "inputText": "こんにちは、世界！", "messageCount": 1, "opaqueInputBytes": 0, "expected": 11 },
+    { "name": "emoji", "inputText": "Hello 👋🌍", "messageCount": 1, "opaqueInputBytes": 0, "expected": 12 },
+    { "name": "source_code", "inputText": "const answer: number = 42;\nconsole.log(answer);", "messageCount": 2, "opaqueInputBytes": 0, "expected": 23 },
+    { "name": "json", "inputText": "{\"model\":\"gpt-5.6-luna\",\"input\":\"hello\"}", "messageCount": 1, "opaqueInputBytes": 7, "expected": 30 },
+    { "name": "mixed_unicode", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀", "messageCount": 3, "opaqueInputBytes": 11, "expected": 43 },
+    { "name": "long_english_100x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 100, "opaqueInputBytes": 0, "repeat": 100, "expected": 1007 },
+    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": 3007 },
+    { "name": "long_mixed_500x", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀\n", "messageCount": 500, "opaqueInputBytes": 0, "repeat": 500, "expected": 9007 },
+    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 7400, "opaqueInputBytes": 0, "repeat": 7400, "expected": 74007 }
+  ]
+}
 ```
 
-Add long cases with fixed expected values:
+These values must be verified against the current `estimateInputTokens()` on `master`
+before any BPE code is removed. If any value differs, update the fixture to match the
+pre-migration implementation — the fixture is the parity source of truth.
 
-```ts
-const estimate = (inputText: string): number => estimator.estimate({
-  requestId: "req_long_golden",
-  inputText,
-  messageCount: 1,
-  opaqueInputBytes: 0,
-}, context).estimatedInputTokens;
+- [ ] **Step 2: Write RED estimator tests using the golden fixture**
 
-expect(estimate("The quick brown fox jumps over the lazy dog.\n".repeat(100))).toBe(1_007);
-expect(estimate("こんにちは世界。\n".repeat(1_000))).toBe(3_007);
-expect(estimate("OCTG は exact BPE を Durable Object で実行します 🚀\n".repeat(500))).toBe(9_007);
-expect(estimate("The quick brown fox jumps over the lazy dog.\n".repeat(7_400))).toBe(74_007);
-```
-
-Inject a counting encoding factory and verify: one factory call across two successful
+Load the golden fixture and test every case for exact BPE parity. Also inject a
+counting encoding factory and verify: one factory call across two successful
 requests; initialization failure falls back and calls the factory again on the next
 request; encode failure falls back without discarding the initialized encoding;
 opaque bytes are added once; `Number.MAX_SAFE_INTEGER` arithmetic throws; a thrown
 string is propagated rather than converted to fallback.
 
-- [ ] **Step 2: Run estimator tests and verify RED**
+```ts
+import goldenFixture from "./fixtures/tokenization-golden.json";
+
+it.each(goldenFixture.cases)("golden parity: %s", (c) => {
+  const inputText = c.repeat ? c.inputText.repeat(c.repeat) : c.inputText;
+  const result = estimator.estimate({
+    requestId: "req_golden",
+    inputText,
+    messageCount: c.messageCount,
+    opaqueInputBytes: c.opaqueInputBytes,
+  }, context);
+  expect(result.estimatedInputTokens).toBe(c.expected);
+  expect(result.estimationPath).toBe("exact_bpe");
+});
+```
+
+- [ ] **Step 3: Run estimator tests and verify RED**
 
 ```bash
 npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
@@ -364,13 +384,13 @@ npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
 
 Expected: FAIL because `TokenizerEstimator` does not exist.
 
-- [ ] **Step 3: Implement lazy encoding and safe estimation**
+- [ ] **Step 4: Implement lazy encoding and safe estimation**
 
 Create `observation.ts` with the event contract before importing it from the
-estimator:
+estimator. Stage names are `tokenizer_init` and `tokenizer_encode`:
 
 ```ts
-export type TokenizerStage = "init" | "encode";
+export type TokenizerStage = "tokenizer_init" | "tokenizer_encode";
 export type TokenizerStageOutcome = "success" | "fallback" | "exception";
 export type TokenizerFailureCategory = "encoding_init" | "encoding_encode" | "arithmetic";
 
@@ -436,7 +456,7 @@ export class TokenizerEstimator {
       event: "octg.tokenizer_stage",
       requestId: request.requestId,
       revisionId: context.revisionId,
-      stage: "init",
+      stage: "tokenizer_init",
       phase: "start",
     });
     let initialized: Encoding;
@@ -450,7 +470,7 @@ export class TokenizerEstimator {
             event: "octg.tokenizer_stage",
             requestId: request.requestId,
             revisionId: context.revisionId,
-            stage: "init",
+            stage: "tokenizer_init",
             phase: "finish",
             durationMs: Math.max(0, performance.now() - startedAt),
             outcome: "fallback",
@@ -465,7 +485,7 @@ export class TokenizerEstimator {
             event: "octg.tokenizer_stage",
             requestId: request.requestId,
             revisionId: context.revisionId,
-            stage: "init",
+            stage: "tokenizer_init",
             phase: "finish",
             durationMs: Math.max(0, performance.now() - startedAt),
             outcome: "exception",
@@ -478,7 +498,7 @@ export class TokenizerEstimator {
         event: "octg.tokenizer_stage",
         requestId: request.requestId,
         revisionId: context.revisionId,
-        stage: "init",
+        stage: "tokenizer_init",
         phase: "finish",
         durationMs: Math.max(0, performance.now() - startedAt),
         outcome: "exception",
@@ -491,7 +511,7 @@ export class TokenizerEstimator {
       event: "octg.tokenizer_stage",
       requestId: request.requestId,
       revisionId: context.revisionId,
-      stage: "init",
+      stage: "tokenizer_init",
       phase: "finish",
       durationMs: Math.max(0, performance.now() - startedAt),
       outcome: "success",
@@ -509,7 +529,7 @@ export class TokenizerEstimator {
       event: "octg.tokenizer_stage",
       requestId: request.requestId,
       revisionId: context.revisionId,
-      stage: "encode",
+      stage: "tokenizer_encode",
       phase: "start",
     });
     let base: number;
@@ -523,7 +543,7 @@ export class TokenizerEstimator {
             event: "octg.tokenizer_stage",
             requestId: request.requestId,
             revisionId: context.revisionId,
-            stage: "encode",
+            stage: "tokenizer_encode",
             phase: "finish",
             durationMs: Math.max(0, performance.now() - startedAt),
             outcome: "fallback",
@@ -538,7 +558,7 @@ export class TokenizerEstimator {
             event: "octg.tokenizer_stage",
             requestId: request.requestId,
             revisionId: context.revisionId,
-            stage: "encode",
+            stage: "tokenizer_encode",
             phase: "finish",
             durationMs: Math.max(0, performance.now() - startedAt),
             outcome: "exception",
@@ -551,7 +571,7 @@ export class TokenizerEstimator {
         event: "octg.tokenizer_stage",
         requestId: request.requestId,
         revisionId: context.revisionId,
-        stage: "encode",
+        stage: "tokenizer_encode",
         phase: "finish",
         durationMs: Math.max(0, performance.now() - startedAt),
         outcome: "exception",
@@ -568,7 +588,7 @@ export class TokenizerEstimator {
         event: "octg.tokenizer_stage",
         requestId: request.requestId,
         revisionId: context.revisionId,
-        stage: "encode",
+        stage: "tokenizer_encode",
         phase: "finish",
         durationMs: Math.max(0, performance.now() - startedAt),
         outcome: "success",
@@ -581,7 +601,7 @@ export class TokenizerEstimator {
         event: "octg.tokenizer_stage",
         requestId: request.requestId,
         revisionId: context.revisionId,
-        stage: "encode",
+        stage: "tokenizer_encode",
         phase: "finish",
         durationMs: Math.max(0, performance.now() - startedAt),
         outcome: "exception",
@@ -627,7 +647,7 @@ function estimatedTokensOf(base: number, request: TokenizeRequest): number {
 Calculate the safe result before emitting `success` or `fallback`; if arithmetic
 fails, emit `exception` and throw. Never retain an initialization failure.
 
-- [ ] **Step 4: Run estimator tests and typecheck**
+- [ ] **Step 5: Run estimator tests and typecheck**
 
 ```bash
 npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
@@ -635,16 +655,17 @@ npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
 npm run typecheck -w durable-objects/tokenizer-controller
 ```
 
-Expected: exact and fallback cases pass and typecheck exits 0.
+Expected: all golden fixture cases and fallback cases pass; typecheck exits 0.
 
-- [ ] **Step 5: Commit Task 2**
+- [ ] **Step 6: Commit Task 2**
 
 ```bash
 git add durable-objects/tokenizer-controller/src/estimator.ts \
   durable-objects/tokenizer-controller/src/observation.ts \
   durable-objects/tokenizer-controller/src/index.ts \
-  durable-objects/tokenizer-controller/test/estimator.test.ts
-git commit -m "feat: exact BPEと保守的fallbackを実装"
+  durable-objects/tokenizer-controller/test/estimator.test.ts \
+  durable-objects/tokenizer-controller/test/fixtures/tokenization-golden.json
+git commit -m "feat: golden fixtureとexact BPE・保守的fallbackを実装"
 ```
 
 ### Task 3: Safe Tokenizer stage logging と Durable Object class を追加する
@@ -659,7 +680,7 @@ git commit -m "feat: exact BPEと保守的fallbackを実装"
 
 **Interfaces:**
 
-- Produces: `TokenizerStageEvent` with stages `init | encode` and outcomes `success | fallback | exception`。
+- Produces: `TokenizerStageEvent` with stages `tokenizer_init | tokenizer_encode` and outcomes `success | fallback | exception`。
 - Produces: `emitTokenizerStage(event): void` which cannot throw into estimation。
 - Produces: `TokenizerController.tokenize(request: TokenizeRequest): Promise<TokenizeResult>` with runtime parsing。
 
@@ -670,7 +691,8 @@ that `console.log` receives only request ID, revision ID, stage, phase, duration
 outcome, byte/token counts, estimation path, and bounded failure category. Use the
 secret strings `secret prompt`, `Bearer secret`, and `raw encoder failure` and assert
 that none appears in serialized log arguments. Also make `console.log` throw and
-assert `emitTokenizerStage()` does not throw.
+assert `emitTokenizerStage()` does not throw. Assert that stage values are only
+`tokenizer_init` or `tokenizer_encode`.
 
 - [ ] **Step 2: Run observation tests and verify RED**
 
@@ -684,7 +706,7 @@ Expected: FAIL because the event boundary does not exist.
 - [ ] **Step 3: Implement allowlisted best-effort logging**
 
 ```ts
-export type TokenizerStage = "init" | "encode";
+export type TokenizerStage = "tokenizer_init" | "tokenizer_encode";
 export type TokenizerStageOutcome = "success" | "fallback" | "exception";
 export type TokenizerFailureCategory = "encoding_init" | "encoding_encode" | "arithmetic";
 
@@ -753,7 +775,8 @@ npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
 npm run typecheck -w durable-objects/tokenizer-controller
 ```
 
-Expected: all commands exit 0; logging tests contain no secret-bearing output.
+Expected: all commands exit 0; logging tests contain no secret-bearing output; stage
+values are only `tokenizer_init` or `tokenizer_encode`.
 
 - [ ] **Step 6: Commit Task 3 and create the next stack layer**
 
@@ -873,7 +896,7 @@ git add apps/gateway-worker/package.json apps/gateway-worker/src/index.ts \
 git commit -m "feat: Tokenizer DOをWorkerへ登録"
 ```
 
-### Task 5: Gateway tokenizer client と response validation を追加する
+### Task 5: Gateway tokenizer client、RPC preflight、response validation を追加する
 
 **Files:**
 
@@ -885,7 +908,9 @@ git commit -m "feat: Tokenizer DOをWorkerへ登録"
 - Consumes: a structural namespace with `idFromName()` and `get()`。
 - Produces: `TokenizerOutcome = resolved | unavailable`。
 - Produces: `tokenizeInput(namespace, request): Promise<TokenizerOutcome>`。
+- Produces: `estimateRpcPayloadSize(request: TokenizeRequest): number` for V8 serialization preflight。
 - Invariant: fixed ID、one stub lookup、one RPC attempt、no retry、no timeout。
+- Invariant: RPC preflight fails closed if estimated V8 payload `>= 32 MiB`.
 
 - [ ] **Step 1: Write RED client tests**
 
@@ -893,7 +918,9 @@ Use a generic fake namespace whose ID type is `string`. Assert the exact name
 `tokenizer:primary`, one `get`, and one `tokenize`. Add table-driven malformed results:
 missing fields, unknown path, NaN, Infinity, negative, fractional, and
 `Number.MAX_SAFE_INTEGER + 1`. Add a rejected RPC and assert `unavailable` with one
-attempt.
+attempt. Add RPC preflight cases: ASCII input under 16 MiB passes, non-Latin-1 input
+whose worst-case V8 size reaches 32 MiB returns `unavailable` without calling `get` or
+`tokenize`.
 
 - [ ] **Step 2: Run client tests and verify RED**
 
@@ -903,10 +930,12 @@ npm test -w apps/gateway-worker -- test/tokenizer-client.test.ts
 
 Expected: FAIL because the client does not exist.
 
-- [ ] **Step 3: Implement generic namespace adapter and independent parser**
+- [ ] **Step 3: Implement generic namespace adapter, RPC preflight, and independent parser**
 
 ```ts
 import type { TokenizeRequest, TokenizeResult } from "@octg/tokenizer-controller";
+
+const RPC_LIMIT_BYTES = 32 * 1024 * 1024;
 
 export type TokenizerOutcome =
   | { readonly kind: "resolved"; readonly result: TokenizeResult }
@@ -919,6 +948,13 @@ interface TokenizerRpcStub {
 export interface TokenizerNamespace<Id> {
   idFromName(name: string): Id;
   get(id: Id): TokenizerRpcStub;
+}
+
+export function estimateRpcPayloadSize(request: TokenizeRequest): number {
+  const inputTextUtf16Size = request.inputText.length * 2;
+  const requestIdSize = request.requestId.length * 2;
+  const framingOverhead = 200;
+  return inputTextUtf16Size + requestIdSize + framingOverhead;
 }
 
 function parseTokenizeResult(value: unknown): TokenizeResult | undefined {
@@ -935,10 +971,12 @@ function parseTokenizeResult(value: unknown): TokenizeResult | undefined {
 }
 ```
 
-`tokenizeInput()` must resolve `idFromName("tokenizer:primary")`, obtain one stub,
-await one `stub.tokenize(request)`, parse the result, and convert every rejection or
-invalid result to `{ kind: "unavailable" }`. It must not call itself recursively,
-schedule a timer, or perform local estimation.
+`tokenizeInput()` must first call `estimateRpcPayloadSize(request)` and return
+`{ kind: "unavailable" }` without resolving the stub if the estimate is
+`>= RPC_LIMIT_BYTES`. Otherwise, resolve `idFromName("tokenizer:primary")`, obtain one
+stub, await one `stub.tokenize(request)`, parse the result, and convert every
+rejection or invalid result to `{ kind: "unavailable" }`. It must not call itself
+recursively, schedule a timer, or perform local estimation.
 
 - [ ] **Step 4: Run client tests and gateway typecheck**
 
@@ -954,7 +992,7 @@ Expected: all client cases pass; typecheck exits 0.
 ```bash
 git add apps/gateway-worker/src/tokenizer.ts \
   apps/gateway-worker/test/tokenizer-client.test.ts
-git commit -m "feat: Gateway Tokenizer clientを追加"
+git commit -m "feat: Gateway Tokenizer clientとRPC preflightを追加"
 gh stack add tokenizer-do/cutover
 ```
 
@@ -962,13 +1000,13 @@ gh stack add tokenizer-do/cutover
 
 ## PR 3: `tokenizer-do/cutover`
 
-### Task 6: Safe quota arithmetic と HTTP 503 contract を追加する
+### Task 6: Safe quota arithmetic と 500 internal_error contract を追加する
 
 **Files:**
 
 - Create: `apps/gateway-worker/src/token-budget.ts`
 - Create: `apps/gateway-worker/test/token-budget.test.ts`
-- Modify: `packages/shared/src/errors.ts:155-183`
+- Modify: `packages/shared/src/errors.ts:155-157`
 - Modify: `packages/shared/test/errors.test.ts`
 - Modify: `apps/gateway-worker/src/resource-observation.ts:10-21`
 - Modify: `apps/gateway-worker/test/resource-observation.test.ts`
@@ -977,29 +1015,33 @@ gh stack add tokenizer-do/cutover
 
 - Produces: `resolveTokenBudget(args): TokenBudgetOutcome`。
 - Produces outcomes: `resolved | request_too_large | quota_exceeded | unavailable`。
-- Produces: `errTokenizerUnavailable(quota, requestId)` with exact 503 body/headers。
+- Produces: extended `errInternal(requestId, options?)` with optional `quota` and `route`。
+- Produces: internal resource-stage route `error:tokenizer_unavailable`。
+- Produces: external HTTP response route `error:internal_error` via `errInternal()`。
 
 - [ ] **Step 1: Write RED budget and error-contract tests**
 
 Test valid REJECT and CLAMP decisions, upper-bound 413, quota 429, invalid/overflow
 estimated input, limit, remaining ratio, margin, upper bound, output, and reservation.
-For 503, assert exact status, body, `X-OCTG-*` quota headers, route, and absence of
-`Retry-After`.
+For 500, assert exact status, body, `X-OCTG-*` quota headers, `X-OCTG-Route: error:internal_error`,
+and absence of `Retry-After`.
 
 ```ts
-expect(await errorResponse(errTokenizerUnavailable(snapshot, "req_tokenizer")).json())
-  .toEqual({
-    error: {
-      message: "Token estimation service unavailable.",
-      type: "server_error",
-      param: null,
-      code: "tokenizer_unavailable",
-      pool: "standard",
-      remaining_tokens: snapshot.remaining,
-      reset_at: snapshot.resetAt,
-    },
-    request_id: "req_tokenizer",
-  });
+expect(await errorResponse(errInternal("req_tokenizer", {
+  quota: snapshot,
+  route: "error:internal_error",
+})).json()).toEqual({
+  error: {
+    message: "An internal error occurred.",
+    type: "api_error",
+    param: null,
+    code: "internal_error",
+    pool: "standard",
+    remaining_tokens: snapshot.remaining,
+    reset_at: snapshot.resetAt,
+  },
+  request_id: "req_tokenizer",
+});
 ```
 
 - [ ] **Step 2: Run focused tests and verify RED**
@@ -1009,9 +1051,32 @@ npm test -w apps/gateway-worker -- test/token-budget.test.ts test/resource-obser
 npm test -w packages/shared -- test/errors.test.ts
 ```
 
-Expected: FAIL because budget outcome, route, and 503 helper do not exist.
+Expected: FAIL because budget outcome, route, and extended `errInternal()` do not exist.
 
-- [ ] **Step 3: Implement typed budget calculation**
+- [ ] **Step 3: Extend `errInternal()` with optional quota and route**
+
+```ts
+export function errInternal(
+  requestId: string,
+  options: { quota?: QuotaSnapshot; route?: string } = {},
+): OctgHttpError {
+  return makeError(
+    500,
+    requestId,
+    "An internal error occurred.",
+    "api_error",
+    null,
+    "internal_error",
+    options,
+  );
+}
+```
+
+Add only `"error:tokenizer_unavailable"` to `ResourceStageRoute`; do not add a new
+stage or `Retry-After` behavior. This is the internal resource-stage route, distinct
+from the external HTTP response route `error:internal_error`.
+
+- [ ] **Step 4: Implement typed budget calculation**
 
 ```ts
 export interface TokenBudgetArguments {
@@ -1035,28 +1100,6 @@ Validate all inputs before division. Call existing `safetyMargin`, `upperBoundOf
 `quota_exceeded` only for a valid reject decision, and `unavailable` for every invalid
 arithmetic result. Never clamp an invalid number.
 
-- [ ] **Step 4: Implement 503 helper and observation route**
-
-```ts
-export function errTokenizerUnavailable(
-  quota: QuotaSnapshot,
-  requestId: string,
-): OctgHttpError {
-  return makeError(
-    503,
-    requestId,
-    "Token estimation service unavailable.",
-    "server_error",
-    null,
-    "tokenizer_unavailable",
-    { quota, route: "error:tokenizer_unavailable" },
-  );
-}
-```
-
-Add only `"error:tokenizer_unavailable"` to `ResourceStageRoute`; do not add a new
-stage or `Retry-After` behavior.
-
 - [ ] **Step 5: Run focused tests and typechecks**
 
 ```bash
@@ -1076,14 +1119,14 @@ git add apps/gateway-worker/src/token-budget.ts \
   apps/gateway-worker/src/resource-observation.ts \
   apps/gateway-worker/test/resource-observation.test.ts \
   packages/shared/src/errors.ts packages/shared/test/errors.test.ts
-git commit -m "feat: Tokenizer障害の503契約を追加"
+git commit -m "feat: Tokenizer障害の500 internal_error契約を追加"
 ```
 
 ### Task 7: Proxy を Tokenizer RPC へ cut over する
 
 **Files:**
 
-- Modify: `apps/gateway-worker/src/proxy.ts:1-31,353-400`
+- Modify: `apps/gateway-worker/src/proxy.ts:1-31,101-103,353-400`
 - Create: `apps/gateway-worker/test/tokenizer-integration.test.ts`
 - Create: `apps/gateway-worker/test/tokenizer-74k-regression.test.ts`
 - Modify: `apps/gateway-worker/test/proxy.test.ts`
@@ -1092,23 +1135,27 @@ git commit -m "feat: Tokenizer障害の503契約を追加"
 **Interfaces:**
 
 - Consumes: `tokenizeInput(env.TOKENIZER_CONTROLLER, TokenizeRequest)`。
+- Consumes: `estimateRpcPayloadSize()` preflight inside `tokenizeInput()`。
 - Consumes: `resolveTokenBudget()` outcomes。
-- Preserves: all existing reserve/in-flight/upstream/finalization code after the current reservation calculation。
+- Consumes: extended `errInternal(requestId, { quota, route: "error:internal_error" })`。
+- Preserves: all existing reserve/in-flight/upstream/finalization code after the current reservation calculation.
 
 - [ ] **Step 1: Write RED HTTP integration tests**
 
 Temporarily replace `env.TOKENIZER_CONTROLLER` with a configurable fake via
 `Object.defineProperty`. For each failure, drive `SELF.fetch()` and assert:
 
-1. rejected RPC, overload-like rejection, and malformed result return 503;
-2. missing field, unknown path, NaN, Infinity, negative, fractional, and unsafe token count return 503;
-3. Tokenizer RPC call count is exactly one;
-4. reserve state and request count do not change;
-5. upstream fetch count is zero;
-6. response has quota snapshot headers and no `Retry-After`;
-7. tokenize finish log contains route `error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false`;
-8. no `quota_reserve` or `upstream` start event is emitted;
-9. prompt, body, Authorization, API key, exception text, and stack are absent from logs.
+1. rejected RPC, overload-like rejection, and malformed result return 500;
+2. missing field, unknown path, NaN, Infinity, negative, fractional, and unsafe token count return 500;
+3. RPC preflight size limit (input whose V8 payload estimate reaches 32 MiB) returns 500 without calling `get` or `tokenize`;
+4. Tokenizer RPC call count is exactly one (zero for preflight failure);
+5. reserve state and request count do not change;
+6. upstream fetch count is zero;
+7. response has quota snapshot headers and `X-OCTG-Route: error:internal_error` and no `Retry-After`;
+8. body is the existing `errInternal()` body: `message: "An internal error occurred."`, `type: "api_error"`, `code: "internal_error"`;
+9. tokenize finish log contains internal route `error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false`;
+10. no `quota_reserve` or `upstream` start event is emitted;
+11. prompt, body, Authorization, API key, exception text, and stack are absent from logs.
 
 Add success lifecycle cases for settle, upstream uncertainty/markUncertain, known
 pre-upstream release, and reserve rejection/upstream zero. Assert Tokenizer is called
@@ -1133,8 +1180,19 @@ Expected: FAIL because `proxy.ts` still calls local `estimateInputTokens()`.
 
 - [ ] **Step 3: Replace local estimation with one RPC and one budget decision**
 
-Remove `estimateInputTokens` from the shared import. Build this exact request after
-`quota_get_state` succeeds:
+Remove `estimateInputTokens` from the shared import. Update `resolveMaxInputBytes()` to
+cap at `16 MiB - 65,536 bytes`:
+
+```ts
+const MAX_INPUT_BYTES_CEILING = 16 * 1024 * 1024 - 65_536;
+
+export function resolveMaxInputBytes(configured: string | undefined): number {
+  const resolved = resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES);
+  return Math.min(resolved, MAX_INPUT_BYTES_CEILING);
+}
+```
+
+Build this exact request after `quota_get_state` succeeds:
 
 ```ts
 const tokenizerOutcome = await tokenizeInput(env.TOKENIZER_CONTROLLER, {
@@ -1145,9 +1203,10 @@ const tokenizerOutcome = await tokenizeInput(env.TOKENIZER_CONTROLLER, {
 });
 ```
 
-If unavailable, finish the existing `tokenize` stage as `exception` with the fixed
-route and false booleans, complete audit best-effort as failed, and return
-`errTokenizerUnavailable(snapshot, requestId)` before reserve starts.
+If unavailable, finish the existing `tokenize` stage as `exception` with the internal
+route `error:tokenizer_unavailable` and false booleans, complete audit best-effort as
+failed, and return `errInternal(requestId, { quota: snapshot, route: "error:internal_error" })`
+before reserve starts.
 
 For a resolved result, call `resolveTokenBudget`. Treat `unavailable` identically.
 Map `request_too_large` to the existing 413 and `quota_exceeded` to the existing 429.
@@ -1177,7 +1236,8 @@ npm test -w apps/gateway-worker -- \
 npm run typecheck -w apps/gateway-worker
 ```
 
-Expected: all commands exit 0; every Tokenizer failure has reserve/upstream count zero.
+Expected: all commands exit 0; every Tokenizer failure has reserve/upstream count zero
+and HTTP 500 with `internal_error` body.
 
 - [ ] **Step 6: Manually drive local HTTP success and bad-input surfaces**
 
@@ -1201,7 +1261,7 @@ curl --include http://localhost:8787/v1/chat/completions \
   --data-binary '{'
 ```
 
-The Tokenizer-specific 503 fault injection remains in the Worker-pool integration test
+The Tokenizer-specific 500 fault injection remains in the Worker-pool integration test
 where the binding can be replaced safely without adding a production test hook.
 
 - [ ] **Step 7: Commit Task 7 and create the verification layer**
@@ -1234,6 +1294,7 @@ gh stack add tokenizer-do/verification
 
 - Preserves: `safetyMargin`, `upperBoundOf`, `decideOutput`, `OutputDecision`。
 - Removes: `estimateInputTokens` and all shared/gateway production BPE symbols。
+- Preserves: golden fixture parity tests in `durable-objects/tokenizer-controller` (Task 2)。
 
 - [ ] **Step 1: Write RED dependency-isolation tests**
 
@@ -1257,6 +1318,9 @@ Expected: FAIL on the existing shared dependency and estimator export.
 Delete the `js-tiktoken` import, module cache, and `estimateInputTokens` from
 `estimate.ts`. Delete only the `describe("estimateInputTokens")` block from
 `estimate.test.ts`; retain all safety margin, upper bound, and output decision tests.
+The golden fixture parity tests already exist in
+`durable-objects/tokenizer-controller/test/estimator.test.ts` (Task 2), so no BPE
+test helper or `estimateInputTokens` copy remains in shared.
 Remove `js-tiktoken` from `packages/shared/package.json`; do not remove it from the
 Tokenizer workspace.
 
@@ -1296,6 +1360,7 @@ git commit -m "refactor: BPE依存をTokenizer DOへ隔離"
 **Interfaces:**
 
 - Produces: deploy revision、request IDs、Free Plan、stage ordering、settlement、privacy、rollback evidence。
+- Produces: canary halt conditions with 6 quantitative thresholds。
 - Uses: existing canary JSONL contract and operator-provided expected peak。
 
 - [ ] **Step 1: Update architecture and deployment runbook**
@@ -1330,11 +1395,31 @@ the known Error 1102 risk.
 
 For one documented revision, record: Worker plan, expected peak value and rationale,
 request ID, `$workers.outcome`, CPU/wall time, Gateway tokenize start/finish,
-Tokenizer `init`/`encode` events, estimation path, reserve/upstream ordering, actual
-usage settlement, failure reserve/upstream counts, and AI Gateway A/B payload logging
-state. A missing field keeps the incident open.
+Tokenizer `tokenizer_init`/`tokenizer_encode` events, estimation path, reserve/upstream
+ordering, actual usage settlement, failure reserve/upstream counts, and AI Gateway A/B
+payload logging state. A missing field keeps the incident open.
 
-- [ ] **Step 4: Run full local verification**
+- [ ] **Step 4: Add canary halt conditions**
+
+Document the 6 quantitative thresholds for the expected peak canary. Any threshold
+exceeded halts the canary immediately, and the exceeded metric, threshold, and
+concurrency level are recorded:
+
+| Metric | Threshold (example) | Source |
+| --- | --- | --- |
+| max queue length | 128 requests, or DO input queue limit 50% | Cloudflare DO metrics (if available) |
+| p95 tokenization latency | 250 ms | canary driver per-request timing |
+| p99 tokenization latency | 500 ms | canary driver per-request timing |
+| 503 overload rate | 0.1% of all requests | canary driver error count |
+| Tokenizer CPU utilization | 80% (monitorable only) | Cloudflare Workers analytics |
+| total completion time | 60 s | canary driver wall clock |
+
+If a metric cannot be measured by the canary driver (e.g., CPU utilization, queue
+length), document the Cloudflare dashboard query procedure and pass/fail judgment in
+the runbook. Record the measured value, threshold, and pass/fail result for each metric
+in the evidence table.
+
+- [ ] **Step 5: Run full local verification**
 
 ```bash
 npm test
@@ -1348,7 +1433,7 @@ npx markdownlint-cli2 \
 Run `lsp_diagnostics` on every changed TypeScript file. Expected: zero introduced
 diagnostics and all commands exit 0.
 
-- [ ] **Step 5: Deploy and run the required production canary**
+- [ ] **Step 6: Deploy and run the required production canary**
 
 After human-approved deployment, capture the emitted revision ID and run:
 
@@ -1375,9 +1460,10 @@ Verify no `exceededCpu`, Free Plan remains active, every successful request foll
 Tokenizer success -> reserve success -> upstream -> settle. Use Task 7's isolated
 binding fault-injection evidence for the failure contract; do not add a production
 fault-injection endpoint or environment flag. Confirm no prompt, payload, or API key
-appears in Worker, Tokenizer, or AI Gateway logs.
+appears in Worker, Tokenizer, or AI Gateway logs. Check all 6 canary halt thresholds
+against the evidence table; halt immediately if any threshold is exceeded.
 
-- [ ] **Step 6: Commit documentation and evidence**
+- [ ] **Step 7: Commit documentation and evidence**
 
 ```bash
 git add README.md docs/DEPLOY_FROM_TEMPLATE.md \
@@ -1385,7 +1471,7 @@ git add README.md docs/DEPLOY_FROM_TEMPLATE.md \
 git commit -m "docs: Tokenizer DOのcanaryとrollbackを追加"
 ```
 
-- [ ] **Step 7: Submit four stacked PRs, not one PR**
+- [ ] **Step 8: Submit four stacked PRs, not one PR**
 
 ```bash
 gh stack submit --auto --remote origin
@@ -1423,10 +1509,10 @@ and evidence pass.
 | AC-03 / AC-04 | observation and integration tests | matching Gateway and Tokenizer events by request ID |
 | AC-05 / AC-06 | ordered integration call trace | stage timestamps show tokenizer -> reserve -> upstream |
 | AC-07 | proxy/quota settle tests | actual usage settlement record |
-| AC-08 | injected RPC/malformed/overflow tests with reserve=0/upstream=0 | correlate any canary unavailable event without adding a production fault hook |
+| AC-08 | injected RPC/malformed/overflow tests with reserve=0/upstream=0 and HTTP 500 `internal_error` | correlate any canary unavailable event without adding a production fault hook |
 | AC-09 | existing settle/uncertain/release suites | upstream uncertain remains reconcilable |
 | AC-10 | allowlist/redaction/Storage tests | Worker/DO/AI Gateway log inspection |
-| AC-11 / AC-13 | canary driver validation | concurrency 1/2/expected peak on Free Plan |
+| AC-11 / AC-13 | canary driver validation with 6 halt thresholds | concurrency 1/2/expected peak on Free Plan, all thresholds within limits |
 | AC-12 | root scripts | `npm test` and `npm run typecheck` exit 0 |
 
 Implementation is complete only after all four stacked PR layers are green and the
