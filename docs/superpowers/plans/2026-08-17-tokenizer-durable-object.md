@@ -221,6 +221,8 @@ it.each([
   { ...valid, messageCount: 1.5 },
   { ...valid, messageCount: Number.MAX_SAFE_INTEGER + 1 },
   { ...valid, opaqueInputBytes: -1 },
+  { ...valid, opaqueInputBytes: 1.5 },
+  { ...valid, opaqueInputBytes: Number.MAX_SAFE_INTEGER + 1 },
 ])("rejects invalid request %j", (value) => {
   expect(() => parseTokenizeRequest(value)).toThrow(TypeError);
 });
@@ -339,9 +341,9 @@ the exact expected `estimatedInputTokens` for each case:
     { "name": "json", "inputText": "{\"model\":\"gpt-5.6-luna\",\"input\":\"hello\"}", "messageCount": 1, "opaqueInputBytes": 7, "expected": 30 },
     { "name": "mixed_unicode", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀", "messageCount": 3, "opaqueInputBytes": 11, "expected": 43 },
     { "name": "long_english_100x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 100, "opaqueInputBytes": 0, "repeat": 100, "expected": 1007 },
-    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": 3007 },
+    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": "TODO_VERIFY >= 4003 (min = 4*messageCount + 3)" },
     { "name": "long_mixed_500x", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀\n", "messageCount": 500, "opaqueInputBytes": 0, "repeat": 500, "expected": 9007 },
-    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 7400, "opaqueInputBytes": 0, "repeat": 7400, "expected": 74007 }
+    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 1, "opaqueInputBytes": 0, "repeat": 7400, "expected": "TODO_VERIFY from master estimateInputTokens(repeat=7400)" }
   ]
 }
 ```
@@ -822,14 +824,21 @@ const controller = () => env.TOKENIZER_CONTROLLER.get(
 
 Test a valid exact request, each invalid request contract over RPC, and two requests
 to the same object. After tokenization, use `runInDurableObject` to assert
-`state.storage.list()` has size zero. The class env must not expose `DB` or
+`state.storage.list()` has size zero. To catch transient writes that are later deleted,
+instrument `state.storage.put`, `state.storage.delete`, and `state.storage.deleteAll`
+with a fail-fast guard or operation-counting spy inside `runInDurableObject`, and assert
+the spy was never called rather than relying solely on the final `list()` size. The
+class env must not expose `DB` or
 `QUOTA_CONTROLLER`, making D1/quota access unavailable by construction.
 
 Invoke malformed RPC inputs without a type escape hatch:
 
 ```ts
+const stub = env.TOKENIZER_CONTROLLER.get(
+  env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
+);
 const invokeMalformed = (value: unknown): Promise<TokenizeResult> =>
-  Reflect.apply(controller().tokenize, controller(), [value]);
+  Reflect.apply(stub.tokenize, stub, [value]);
 ```
 
 - [ ] **Step 2: Run the real DO test and verify RED**
@@ -973,9 +982,12 @@ function parseTokenizeResult(value: unknown): TokenizeResult | undefined {
 
 `tokenizeInput()` must first call `estimateRpcPayloadSize(request)` and return
 `{ kind: "unavailable" }` without resolving the stub if the estimate is
-`>= RPC_LIMIT_BYTES`. Otherwise, resolve `idFromName("tokenizer:primary")`, obtain one
-stub, await one `stub.tokenize(request)`, parse the result, and convert every
-rejection or invalid result to `{ kind: "unavailable" }`. It must not call itself
+`>= RPC_LIMIT_BYTES`. Otherwise, wrap `idFromName("tokenizer:primary")`, `get()`,
+`stub.tokenize(request)`, and `parseTokenizeResult()` in a single try/catch so that
+both synchronous exceptions from `idFromName`/`get`/`Reflect.get` and rejected
+promises from `stub.tokenize()` are converted to `{ kind: "unavailable" }`. Parse
+the successful result and convert every rejection, exception, or invalid result to
+`{ kind: "unavailable" }`. It must not call itself
 recursively, schedule a timer, or perform local estimation.
 
 - [ ] **Step 4: Run client tests and gateway typecheck**
@@ -1058,7 +1070,7 @@ Expected: FAIL because budget outcome, route, and extended `errInternal()` do no
 ```ts
 export function errInternal(
   requestId: string,
-  options: { quota?: QuotaSnapshot; route?: string } = {},
+  options: { quota?: QuotaSnapshot; route?: "error:internal_error" } = {},
 ): OctgHttpError {
   return makeError(
     500,
@@ -1091,14 +1103,18 @@ export type TokenBudgetOutcome =
   | { readonly kind: "resolved"; readonly margin: number; readonly upperBound: number; readonly maxOutputTokens: number; readonly reservation: number }
   | { readonly kind: "request_too_large" }
   | { readonly kind: "quota_exceeded" }
-  | { readonly kind: "unavailable" };
+  | { readonly kind: "tokenizer_unavailable" }
+  | { readonly kind: "arithmetic_error" };
 ```
 
 Validate all inputs before division. Call existing `safetyMargin`, `upperBoundOf`, and
 `decideOutput`; validate every returned number as a non-negative safe integer. Return
 `request_too_large` only for a valid upper bound above a valid pool limit,
-`quota_exceeded` only for a valid reject decision, and `unavailable` for every invalid
-arithmetic result. Never clamp an invalid number.
+`quota_exceeded` only for a valid reject decision, `tokenizer_unavailable` for
+Tokenizer RPC failures, and `arithmetic_error` for every invalid arithmetic
+result. Never clamp an invalid number. Proxy must record `tokenizer_unavailable`
+and `arithmetic_error` distinctly so arithmetic bugs are not misclassified as
+external dependency failures in `octg.resource_stage` logs.
 
 - [ ] **Step 5: Run focused tests and typechecks**
 
@@ -1159,7 +1175,13 @@ Temporarily replace `env.TOKENIZER_CONTROLLER` with a configurable fake via
 
 Add success lifecycle cases for settle, upstream uncertainty/markUncertain, known
 pre-upstream release, and reserve rejection/upstream zero. Assert Tokenizer is called
-before the first reserve call in an ordered call trace.
+before the first reserve call in an ordered call trace. At least one success case must
+use the real `env.TOKENIZER_CONTROLLER` binding (not the fake) and exercise the exported
+`TokenizerController` RPC through `SELF.fetch()`, including RPC serialization and the
+Gateway-to-Durable-Object connection. Reserve the fake binding only for failure
+injection. Extend the success lifecycle coverage to preserve the existing settle,
+uncertainty, release, and reserve-rejection scenarios while asserting the real
+Tokenizer call occurs before the first reserve call.
 
 In `tokenizer-74k-regression.test.ts`, generate
 `"The quick brown fox jumps over the lazy dog.\n".repeat(7_400)`. Assert the real
@@ -1386,10 +1408,16 @@ npx wrangler rollback "$PREVIOUS_VERSION_ID" \
   --config apps/gateway-worker/wrangler.jsonc
 ```
 
-State that rollback creates a new deployment using the selected previous Worker
-version, does not remove/rewrite `v2`, and must not activate Gateway local BPE. After
-rollback, restrict large requests operationally because the previous revision retains
-the known Error 1102 risk.
+version, does not remove/rewrite `v2`, and must not activate Gateway local BPE.
+Rollback to a pre-Tokenizer revision re-introduces local BPE code. To prevent its
+activation, either (a) roll back to a Tokenizer DO-compatible revision that delegates
+estimation to the Durable Object, or (b) explicitly define a traffic-routing mechanism
+(e.g., route all requests through a maintenance path that rejects before BPE) that
+prevents the Gateway from invoking local BPE. Do not rely solely on restricting large
+requests, because small requests would still trigger local BPE. After rollback,
+document the chosen target revision or routing condition alongside the Wrangler
+commands, and restrict large requests operationally because the previous revision
+retains the known Error 1102 risk.
 
 - [ ] **Step 3: Expand the evidence table for AC-01 through AC-13**
 
