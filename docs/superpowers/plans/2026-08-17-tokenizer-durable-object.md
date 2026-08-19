@@ -166,8 +166,10 @@ PR の merge は human operator が bottom-to-top で行う。実装 agent は m
 
 **Interfaces:**
 
-- Produces: `TokenizeRequest`, `EstimationPath`, `TokenizeResult`。
-- Produces: `parseTokenizeRequest(value: unknown): TokenizeRequest`。
+- Produces: `TokenizeRequest`, `EstimationPath`, `TokenizeResult`.
+- Produces: `parseTokenizeRequest(value: unknown): TokenizeRequest`.
+- Produces: shared byte-size limit symbols `MAX_INPUT_TEXT_BYTES` (16 MiB - 65,536) and `MAX_REQUEST_ID_BYTES` (256).
+- Constraint: `parseTokenizeRequest` rejects `inputText` whose UTF-8 byte length exceeds `MAX_INPUT_TEXT_BYTES` and `requestId` whose UTF-8 byte length exceeds `MAX_REQUEST_ID_BYTES`. The Gateway client preflight (`tokenizeInput()`) validates the same limits before issuing an RPC. Define or reuse shared limit symbols so both the DO entry point and the Gateway client enforce identical ceilings.
 - Constraint: runtime dependencies は `js-tiktoken` だけで、`@octg/shared` を含めない。
 
 - [ ] **Step 1: Create manifest、test harness、failing contract tests**
@@ -201,7 +203,10 @@ Add `../../durable-objects/tokenizer-controller/test/**/*.test.ts` to the existi
 Vitest `include` array. In `contracts.test.ts`, write table-driven RED cases for a
 valid request and each invalid boundary: non-object, empty request ID, non-string
 input, negative/fractional/unsafe message count, and negative/fractional/unsafe
-opaque bytes.
+opaque bytes. Add exact-boundary acceptance and over-limit rejection for `inputText`
+and `requestId` UTF-8 byte lengths: `inputText` at exactly `MAX_INPUT_TEXT_BYTES`
+passes, one byte over rejects; `requestId` at exactly `MAX_REQUEST_ID_BYTES` passes,
+one byte over rejects.
 
 ```ts
 const valid = {
@@ -223,8 +228,30 @@ it.each([
   { ...valid, opaqueInputBytes: -1 },
   { ...valid, opaqueInputBytes: 1.5 },
   { ...valid, opaqueInputBytes: Number.MAX_SAFE_INTEGER + 1 },
-])("rejects invalid request %j", (value) => {
+])"rejects invalid request %j", (value) => {
   expect(() => parseTokenizeRequest(value)).toThrow(TypeError);
+});
+
+// Byte-size boundary cases for inputText and requestId
+const boundaryInputText = "x".repeat(MAX_INPUT_TEXT_BYTES);
+const overLimitInputText = "x".repeat(MAX_INPUT_TEXT_BYTES + 1);
+const boundaryRequestId = "r".repeat(MAX_REQUEST_ID_BYTES);
+const overLimitRequestId = "r".repeat(MAX_REQUEST_ID_BYTES + 1);
+
+it("accepts inputText at exact MAX_INPUT_TEXT_BYTES boundary", () => {
+  expect(() => parseTokenizeRequest({ ...valid, inputText: boundaryInputText })).not.toThrow();
+});
+
+it("rejects inputText one byte over MAX_INPUT_TEXT_BYTES", () => {
+  expect(() => parseTokenizeRequest({ ...valid, inputText: overLimitInputText })).toThrow(TypeError);
+});
+
+it("accepts requestId at exact MAX_REQUEST_ID_BYTES boundary", () => {
+  expect(() => parseTokenizeRequest({ ...valid, requestId: boundaryRequestId })).not.toThrow();
+});
+
+it("rejects requestId one byte over MAX_REQUEST_ID_BYTES", () => {
+  expect(() => parseTokenizeRequest({ ...valid, requestId: overLimitRequestId })).toThrow(TypeError);
 });
 ```
 
@@ -257,8 +284,15 @@ export interface TokenizeResult {
   readonly estimationPath: EstimationPath;
 }
 
+export const MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536;
+export const MAX_REQUEST_ID_BYTES = 256;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
 }
 
 export function parseTokenizeRequest(value: unknown): TokenizeRequest {
@@ -272,6 +306,12 @@ export function parseTokenizeRequest(value: unknown): TokenizeRequest {
     typeof opaqueInputBytes !== "number" ||
     !Number.isSafeInteger(opaqueInputBytes) || opaqueInputBytes < 0
   ) {
+    throw new TypeError("Invalid tokenizer request.");
+  }
+  if (utf8ByteLength(inputText) > MAX_INPUT_TEXT_BYTES) {
+    throw new TypeError("Invalid tokenizer request.");
+  }
+  if (utf8ByteLength(requestId) > MAX_REQUEST_ID_BYTES) {
     throw new TypeError("Invalid tokenizer request.");
   }
   return { requestId, inputText, messageCount, opaqueInputBytes };
@@ -340,17 +380,16 @@ the exact expected `estimatedInputTokens` for each case:
     { "name": "source_code", "inputText": "const answer: number = 42;\nconsole.log(answer);", "messageCount": 2, "opaqueInputBytes": 0, "expected": 23 },
     { "name": "json", "inputText": "{\"model\":\"gpt-5.6-luna\",\"input\":\"hello\"}", "messageCount": 1, "opaqueInputBytes": 7, "expected": 30 },
     { "name": "mixed_unicode", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀", "messageCount": 3, "opaqueInputBytes": 11, "expected": 43 },
-    { "name": "long_english_100x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 100, "opaqueInputBytes": 0, "repeat": 100, "expected": 1007 },
-    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": "TODO_VERIFY >= 4003 (min = 4*messageCount + 3)" },
-    { "name": "long_mixed_500x", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀\n", "messageCount": 500, "opaqueInputBytes": 0, "repeat": 500, "expected": 9007 },
-    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 1, "opaqueInputBytes": 0, "repeat": 7400, "expected": "TODO_VERIFY from master estimateInputTokens(repeat=7400)" }
+    { "name": "long_english_100x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 100, "opaqueInputBytes": 0, "repeat": 100, "expected": 1403 },
+    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": 7003 },
+    { "name": "long_mixed_500x", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀\n", "messageCount": 500, "opaqueInputBytes": 0, "repeat": 500, "expected": 11003 },
+    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 1, "opaqueInputBytes": 0, "repeat": 7400, "expected": 74007 }
   ]
 }
 ```
 
-These values must be verified against the current `estimateInputTokens()` on `master`
-before any BPE code is removed. If any value differs, update the fixture to match the
-pre-migration implementation — the fixture is the parity source of truth.
+These values have been verified against the current `estimateInputTokens()` on `master`.
+The fixture is the parity source of truth — no `TODO_VERIFY` placeholders remain.
 
 - [ ] **Step 2: Write RED estimator tests using the golden fixture**
 
@@ -914,12 +953,13 @@ git commit -m "feat: Tokenizer DOをWorkerへ登録"
 
 **Interfaces:**
 
-- Consumes: a structural namespace with `idFromName()` and `get()`。
-- Produces: `TokenizerOutcome = resolved | unavailable`。
-- Produces: `tokenizeInput(namespace, request): Promise<TokenizerOutcome>`。
-- Produces: `estimateRpcPayloadSize(request: TokenizeRequest): number` for V8 serialization preflight。
-- Invariant: fixed ID、one stub lookup、one RPC attempt、no retry、no timeout。
+- Consumes: a structural namespace with `idFromName()` and `get()`.
+- Produces: `TokenizerOutcome = resolved | unavailable`.
+- Produces: `tokenizeInput(namespace, request): Promise<TokenizerOutcome>`.
+- Produces: `estimateRpcPayloadSize(request: TokenizeRequest): number` for V8 serialization preflight.
+- Invariant: fixed ID、one stub lookup、one RPC attempt、no retry、no timeout.
 - Invariant: RPC preflight fails closed if estimated V8 payload `>= 32 MiB`.
+- Invariant: `tokenizeInput()` validates `inputText` UTF-8 byte length against `MAX_INPUT_TEXT_BYTES` and `requestId` byte length against `MAX_REQUEST_ID_BYTES` (imported from `@octg/tokenizer-controller`) before issuing an RPC. Oversized input returns `{ kind: "unavailable" }` without calling `get` or `tokenize`.
 
 - [ ] **Step 1: Write RED client tests**
 
@@ -1025,18 +1065,21 @@ gh stack add tokenizer-do/cutover
 
 **Interfaces:**
 
-- Produces: `resolveTokenBudget(args): TokenBudgetOutcome`。
-- Produces outcomes: `resolved | request_too_large | quota_exceeded | unavailable`。
-- Produces: extended `errInternal(requestId, options?)` with optional `quota` and `route`。
-- Produces: internal resource-stage route `error:tokenizer_unavailable`。
-- Produces: external HTTP response route `error:internal_error` via `errInternal()`。
+- Produces: `resolveTokenBudget(args): TokenBudgetOutcome`.
+- Produces outcomes: `resolved | request_too_large | quota_exceeded | arithmetic_error`. `resolveTokenBudget()` is limited to numeric budget decisions; it does not return `tokenizer_unavailable`.
+- Produces: extended `errInternal(requestId, options?)` with optional `quota` and `route`.
+- Produces: internal resource-stage route `error:tokenizer_unavailable` for Tokenizer RPC failures (handled by `tokenizeInput()` or proxy orchestration, not `resolveTokenBudget`).
+- Produces: external HTTP response route `error:internal_error` via `errInternal()` for both `tokenizer_unavailable` and `arithmetic_error`.
 
 - [ ] **Step 1: Write RED budget and error-contract tests**
 
 Test valid REJECT and CLAMP decisions, upper-bound 413, quota 429, invalid/overflow
 estimated input, limit, remaining ratio, margin, upper bound, output, and reservation.
-For 500, assert exact status, body, `X-OCTG-*` quota headers, `X-OCTG-Route: error:internal_error`,
-and absence of `Retry-After`.
+Cover all `TokenBudgetOutcome` variants: `resolved`, `request_too_large` (413),
+`quota_exceeded` (429), and `arithmetic_error` (500). `tokenizer_unavailable` is not a
+`TokenBudgetOutcome`; it is covered by Task 7 integration tests that inject Tokenizer RPC
+failures via `tokenizeInput()`. For 500 (`arithmetic_error`), assert exact status, body,
+`X-OCTG-*` quota headers, `X-OCTG-Route: error:internal_error`, and absence of `Retry-After`.
 
 ```ts
 expect(await errorResponse(errInternal("req_tokenizer", {
@@ -1103,18 +1146,22 @@ export type TokenBudgetOutcome =
   | { readonly kind: "resolved"; readonly margin: number; readonly upperBound: number; readonly maxOutputTokens: number; readonly reservation: number }
   | { readonly kind: "request_too_large" }
   | { readonly kind: "quota_exceeded" }
-  | { readonly kind: "tokenizer_unavailable" }
   | { readonly kind: "arithmetic_error" };
 ```
 
 Validate all inputs before division. Call existing `safetyMargin`, `upperBoundOf`, and
 `decideOutput`; validate every returned number as a non-negative safe integer. Return
 `request_too_large` only for a valid upper bound above a valid pool limit,
-`quota_exceeded` only for a valid reject decision, `tokenizer_unavailable` for
-Tokenizer RPC failures, and `arithmetic_error` for every invalid arithmetic
-result. Never clamp an invalid number. Proxy must record `tokenizer_unavailable`
-and `arithmetic_error` distinctly so arithmetic bugs are not misclassified as
-external dependency failures in `octg.resource_stage` logs.
+`quota_exceeded` only for a valid reject decision, and `arithmetic_error` for every
+invalid arithmetic result. Never clamp an invalid number.
+`resolveTokenBudget()` does not return `tokenizer_unavailable`; Tokenizer RPC failures
+are handled by `tokenizeInput()` or proxy orchestration before `resolveTokenBudget()` is
+called. Both `tokenizer_unavailable` and `arithmetic_error` map to HTTP 500
+`internal_error` with `X-OCTG-Route: error:internal_error`, internal resource-stage route
+`error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false`, and
+audit best-effort as failed. Proxy must record `tokenizer_unavailable` and
+`arithmetic_error` distinctly so arithmetic bugs are not misclassified as external
+dependency failures in `octg.resource_stage` logs.
 
 - [ ] **Step 5: Run focused tests and typechecks**
 
@@ -1230,12 +1277,16 @@ route `error:tokenizer_unavailable` and false booleans, complete audit best-effo
 failed, and return `errInternal(requestId, { quota: snapshot, route: "error:internal_error" })`
 before reserve starts.
 
-For a resolved result, call `resolveTokenBudget`. Treat `unavailable` identically.
-Map `request_too_large` to the existing 413 and `quota_exceeded` to the existing 429.
-For `resolved`, use only returned `reservation`, `upperBound`, and `maxOutputTokens`.
-Finish the tokenize stage as success with `estimationPath` and the three existing byte
-metrics. Use exhaustive `switch` statements with a `never` default assignment for
-both discriminated unions.
+For a resolved result, call `resolveTokenBudget`. Map `request_too_large` to the
+existing 413 and `quota_exceeded` to the existing 429. Map `arithmetic_error` to the
+same 500 `internal_error` response as `tokenizer_unavailable`: finish the `tokenize`
+stage as `exception` with internal route `error:tokenizer_unavailable`, return
+`errInternal(requestId, { quota: snapshot, route: "error:internal_error" })` with
+`quotaReserved: false` and `upstreamReached: false`, and complete audit best-effort as
+failed. For `resolved`, use only returned `reservation`, `upperBound`, and
+`maxOutputTokens`. Finish the tokenize stage as success with `estimationPath` and the
+three existing byte metrics. Use exhaustive `switch` statements with a `never` default
+assignment for both discriminated unions (`TokenizerOutcome` and `TokenBudgetOutcome`).
 
 - [ ] **Step 4: Preserve lifecycle and remove test-side shared BPE use**
 
@@ -1537,7 +1588,7 @@ and evidence pass.
 | AC-03 / AC-04 | observation and integration tests | matching Gateway and Tokenizer events by request ID |
 | AC-05 / AC-06 | ordered integration call trace | stage timestamps show tokenizer -> reserve -> upstream |
 | AC-07 | proxy/quota settle tests | actual usage settlement record |
-| AC-08 | injected RPC/malformed/overflow tests with reserve=0/upstream=0 and HTTP 500 `internal_error` | correlate any canary unavailable event without adding a production fault hook |
+| AC-08 | injected RPC/malformed/overflow tests covering `tokenizer_unavailable` (via `tokenizeInput()`) and `arithmetic_error` (via `resolveTokenBudget()`) with reserve=0/upstream=0, HTTP 500 `internal_error`, route `error:tokenizer_unavailable`, `quotaReserved: false`, `upstreamReached: false` | correlate any canary unavailable or arithmetic event without adding a production fault hook |
 | AC-09 | existing settle/uncertain/release suites | upstream uncertain remains reconcilable |
 | AC-10 | allowlist/redaction/Storage tests | Worker/DO/AI Gateway log inspection |
 | AC-11 / AC-13 | canary driver validation with 6 halt thresholds | concurrency 1/2/expected peak on Free Plan, all thresholds within limits |
