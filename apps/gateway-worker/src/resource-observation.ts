@@ -15,6 +15,7 @@ export type ResourceStageRoute =
   | "reject:duplicate_idempotency_key"
   | "reject:worker_concurrency"
   | "reject:tokenization_concurrency"
+  | "error:tokenizer_unavailable"
   | "error:pre_upstream"
   | "error:upstream_uncertain";
 

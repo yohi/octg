@@ -1,4 +1,3 @@
-import { estimateInputTokens } from "@octg/tokenizer-controller";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -371,12 +370,43 @@ export async function handleProxy(
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
     let estimatedInput: number;
+    let estimationPath: "exact_bpe" | "conservative_bytes";
     try {
-      estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
+      const tokenizer = env.TOKENIZER_CONTROLLER.get(
+        env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
+      );
+      const tokenizerOutcome = await tokenizer.estimate({
+        requestId,
+        inputText: requestData.inputText,
+        messageCount: requestData.messageCount,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+      });
+      switch (tokenizerOutcome.kind) {
+        case "resolved":
+          estimatedInput = tokenizerOutcome.result.estimatedInputTokens;
+          estimationPath = tokenizerOutcome.result.estimationPath;
+          break;
+        case "unavailable":
+          finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+            route: "error:tokenizer_unavailable",
+            inputBytes: requestData.inputBytes,
+            inputTextBytes: requestData.inputTextBytes,
+            opaqueInputBytes: requestData.opaqueInputBytes,
+            quotaReserved: false,
+            upstreamReached: false,
+          });
+          completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+          return errorResponse(errInternal(requestId, { quota: snapshot }));
+        default: {
+          const unreachable: never = tokenizerOutcome;
+          return unreachable;
+        }
+      }
       finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
         inputBytes: requestData.inputBytes,
         inputTextBytes: requestData.inputTextBytes,
         opaqueInputBytes: requestData.opaqueInputBytes,
+        estimationPath,
       });
     } catch (error) {
       finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
