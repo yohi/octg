@@ -1,4 +1,8 @@
 import {
+  tokenize,
+  type TokenizeOutcome,
+} from "./tokenizer";
+import {
   buildOctgHeaders,
   classifyModel,
   decideOutput,
@@ -52,11 +56,50 @@ import { proxyStream } from "./stream";
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
-// Durable Object RPC serialization is limited to 32 MiB. This ceiling accounts for
-// the UTF-8 input text, opaqueInputBytes, and JSON serialization overhead so that the
-// total serialized RPC request stays safely below that limit. Never increase this
+// Durable Object RPC uses V8 serialization carried over Cap'n Proto. Strings are
+// length-prefixed and do NOT undergo JSON escaping. However, V8 may encode strings
+// as UTF-16 (2 bytes per code unit) when non-Latin-1 characters are present. To stay
+// safely below the 32 MiB RPC limit even in the worst case, we reserve 65,536 bytes
+// of overhead and cap the input byte length at half the RPC limit minus that overhead.
+// This guarantees that the serialized TokenizeRequest stays strictly below 32 MiB
+// regardless of which V8 string encoding path is taken. Never increase this ceiling
 // without also defining a stream or chunk protocol.
-const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
+//
+// Worst-case serialized size for a ceiling request is:
+//   object envelope + 4 property-name strings + requestId string + inputText string
+//   + 2 numbers. Property names are 9/9/12/16 chars. requestId is 29 chars. A number
+//   takes 1 tag byte + 8 value bytes. A two-byte V8 string takes 1 tag byte + 4 length
+//   bytes + 2 bytes/code unit. At the ceiling this totals less than 32 MiB.
+//
+// Normalization guarantees inputTextBytes + opaqueInputBytes <= resolveMaxInputBytes(),
+// so the Gateway never emits a TokenizeRequest whose serialized RPC payload reaches
+// the 32 MiB limit.
+const RPC_SIZE_LIMIT_BYTES = 32 * 1024 * 1024;
+export const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
+
+export function estimateRpcPayloadSize(request: {
+  requestId: string;
+  inputText: string;
+  messageCount: number;
+  opaqueInputBytes: number;
+}): number {
+  // V8 ValueSerializer worst-case string encoding: 1-byte tag + 4-byte length +
+  // 2 bytes per UTF-16 code unit. This is conservative: pure ASCII strings are
+  // encoded as 1 byte/char in practice, and the actual RPC transport uses
+  // Cap'n Proto framing, not JSON escaping.
+  const v8StringSize = (s: string) => 1 + 4 + s.length * 2;
+  // Numbers are encoded as 1-byte tag + 8-byte IEEE-754 double.
+  const v8NumberSize = 1 + 8;
+  // Object envelope plus the four property-name strings, worst-case two-byte encoding.
+  const propertyNameSizes = [9, 9, 12, 16].map((len) => 1 + 4 + len * 2);
+  const objectOverhead = 16 + propertyNameSizes.reduce((a, b) => a + b, 0);
+  return (
+    objectOverhead +
+    v8StringSize(request.requestId) +
+    v8StringSize(request.inputText) +
+    2 * v8NumberSize
+  );
+}
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 
@@ -369,53 +412,56 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    let estimatedInput: number;
-    let estimationPath: "exact_bpe" | "conservative_bytes";
+    const rpcPayloadSize = estimateRpcPayloadSize({
+      requestId,
+      inputText: requestData.inputText,
+      messageCount: requestData.messageCount,
+      opaqueInputBytes: requestData.opaqueInputBytes,
+    });
+    if (rpcPayloadSize >= RPC_SIZE_LIMIT_BYTES) {
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+        route: "error:tokenizer_unavailable",
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+        quotaReserved: false,
+        upstreamReached: false,
+      });
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      return errorResponse(errInternal(requestId, { quota: snapshot }));
+    }
+    let tokenizeOutcome: TokenizeOutcome;
     try {
-      const tokenizer = env.TOKENIZER_CONTROLLER.get(
-        env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
-      );
-      const tokenizerOutcome = await tokenizer.estimate({
+      tokenizeOutcome = await tokenize(env, {
         requestId,
         inputText: requestData.inputText,
         messageCount: requestData.messageCount,
         opaqueInputBytes: requestData.opaqueInputBytes,
       });
-      switch (tokenizerOutcome.kind) {
-        case "resolved":
-          estimatedInput = tokenizerOutcome.result.estimatedInputTokens;
-          estimationPath = tokenizerOutcome.result.estimationPath;
-          break;
-        case "unavailable":
-          finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
-            route: "error:tokenizer_unavailable",
-            inputBytes: requestData.inputBytes,
-            inputTextBytes: requestData.inputTextBytes,
-            opaqueInputBytes: requestData.opaqueInputBytes,
-            quotaReserved: false,
-            upstreamReached: false,
-          });
-          completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-          return errorResponse(errInternal(requestId, { quota: snapshot }));
-        default: {
-          const unreachable: never = tokenizerOutcome;
-          return unreachable;
-        }
-      }
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-        estimationPath,
-      });
-    } catch (error) {
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-      });
-      throw error;
+    } catch {
+      tokenizeOutcome = { kind: "unavailable" };
     }
+
+    if (tokenizeOutcome.kind === "unavailable") {
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+        route: "error:tokenizer_unavailable",
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+        quotaReserved: false,
+        upstreamReached: false,
+      });
+      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+      return errorResponse(errInternal(requestId, { quota: snapshot }));
+    }
+
+    const estimatedInput = tokenizeOutcome.result.estimatedInputTokens;
+    finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
+      inputBytes: requestData.inputBytes,
+      inputTextBytes: requestData.inputTextBytes,
+      opaqueInputBytes: requestData.opaqueInputBytes,
+      estimationPath: tokenizeOutcome.result.estimationPath,
+    });
 
     const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
     const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
