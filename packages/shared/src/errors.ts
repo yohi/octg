@@ -152,8 +152,19 @@ export function errClientDisabled(requestId: string): OctgHttpError {
   return makeError(403, requestId, "This client is disabled.", "permission_error", null, "client_disabled");
 }
 
-export function errInternal(requestId: string): OctgHttpError {
-  return makeError(500, requestId, "An internal error occurred.", "api_error", null, "internal_error");
+export function errInternal(
+  requestId: string,
+  options: { quota?: QuotaSnapshot; route?: string } = {},
+): OctgHttpError {
+  return makeError(
+    500,
+    requestId,
+    "An internal error occurred.",
+    "api_error",
+    null,
+    "internal_error",
+    { ...options, route: options.route ?? "error:internal_error" },
+  );
 }
 
 export function buildOctgHeaders(args: {

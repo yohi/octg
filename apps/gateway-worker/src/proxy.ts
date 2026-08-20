@@ -437,7 +437,7 @@ export async function handleProxy(
         upstreamReached: false,
       });
       completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errInternal(requestId));
+      return errorResponse(errInternal(requestId, { quota: snapshot }));
     }
     let tokenizeOutcome: TokenizeOutcome;
     try {
@@ -461,7 +461,7 @@ export async function handleProxy(
         upstreamReached: false,
       });
       completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errInternal(requestId));
+      return errorResponse(errInternal(requestId, { quota: snapshot }));
     }
 
     const estimatedInput = tokenizeOutcome.result.estimatedInputTokens;
