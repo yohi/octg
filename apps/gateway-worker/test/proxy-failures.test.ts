@@ -9,11 +9,11 @@ import type { TokenizerController } from "@octg/tokenizer-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   estimateRpcPayloadSize,
+  MAX_TOKENIZATION_RPC_INPUT_BYTES,
   releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
   resolveMaxInputBytes,
-  tokenizeRequestByteSize,
 } from "../src/proxy";
 import type { InFlightLeaseReleaser } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
@@ -41,7 +41,15 @@ const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 }),
 });
 
-const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
+function jsonRequestByteSize(request: {
+  readonly requestId: string;
+  readonly inputText: string;
+  readonly messageCount: number;
+  readonly opaqueInputBytes: number;
+}): number {
+  return new TextEncoder().encode(JSON.stringify(request)).byteLength;
+}
+
 describe("resolveMaxInputBytes", () => {
   it("defaults to one mebibyte", () => {
     expect(resolveMaxInputBytes(undefined)).toBe(1_048_576);
@@ -102,7 +110,7 @@ describe("resolveMaxInputBytes", () => {
     const opaqueInputBytes = 0; // chat-style: all bytes are in inputText
 
     // When: the helper serializes the request.
-    const size = tokenizeRequestByteSize({
+    const size = jsonRequestByteSize({
       requestId,
       inputText,
       messageCount,
@@ -113,16 +121,16 @@ describe("resolveMaxInputBytes", () => {
     expect(size).toBeLessThan(32 * 1024 * 1024);
   });
 
-  it("guarantees a ceiling TokenizeRequest with split inputText and opaque bytes serializes below 32 MiB", () => {
-    // Given: the largest inputs normalization can emit, split between text and opaque bytes.
+  it("guarantees a split ceiling TokenizeRequest stays below 32 MiB under V8 UTF-16 worst case", () => {
+    // Given: the largest normalized input, split between visible text and opaque bytes.
     const maxInputBytes = resolveMaxInputBytes(String(MAX_TOKENIZATION_RPC_INPUT_BYTES));
     const requestId = "req_0123456789ABCDEFGHJKMNPQRS";
     const messageCount = Number.MAX_SAFE_INTEGER;
-    const inputText = "a".repeat(Math.floor(maxInputBytes / 2));
-    const opaqueInputBytes = maxInputBytes - Math.floor(maxInputBytes / 2);
+    const opaqueInputBytes = 1;
+    const inputText = "a".repeat(maxInputBytes - opaqueInputBytes);
 
-    // When: the helper serializes the request.
-    const size = tokenizeRequestByteSize({
+    // When: the V8 worst-case payload size is estimated.
+    const size = estimateRpcPayloadSize({
       requestId,
       inputText,
       messageCount,
@@ -166,7 +174,7 @@ describe("resolveMaxInputBytes", () => {
     const opaqueInputBytes = 0;
 
     // When: the request is serialized as JSON.
-    const size = tokenizeRequestByteSize({
+    const size = jsonRequestByteSize({
       requestId,
       inputText,
       messageCount,
@@ -188,7 +196,7 @@ describe("resolveMaxInputBytes", () => {
     const opaqueInputBytes = 0;
 
     // When: the request is serialized as JSON and as V8 worst-case.
-    const jsonSize = tokenizeRequestByteSize({
+    const jsonSize = jsonRequestByteSize({
       requestId,
       inputText,
       messageCount,

@@ -105,13 +105,11 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
     estimationPath: TokenizeResult["estimationPath"],
     failureCategory?: string,
   ): TokenizerOutcome {
-    const byteCount = estimationPath === "conservative_bytes"
-      ? base
-      : byteCountFor(request.inputText);
+    const byteCountFields = estimationPath === "conservative_bytes" ? { byteCount: base } : {};
     const estimated = base + request.opaqueInputBytes + 4 * request.messageCount + 3;
     if (!isNonNegativeSafeInteger(estimated)) {
       this.finishStage(encodeStage, "exception", performance.now() - startedAt, {
-        byteCount,
+        ...byteCountFields,
         failureCategory: "unsafe_integer",
       });
       return { kind: "unavailable" };
@@ -122,7 +120,7 @@ export class TokenizerController extends DurableObject<TokenizerControllerEnv> {
       estimationPath === "exact_bpe" ? "success" : "fallback",
       performance.now() - startedAt,
       {
-        byteCount,
+        ...byteCountFields,
         tokenCount: base,
         estimationPath,
         ...(failureCategory === undefined ? {} : { failureCategory }),

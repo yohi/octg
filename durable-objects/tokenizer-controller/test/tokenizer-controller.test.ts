@@ -31,7 +31,10 @@ function findInitStarts(logs: unknown[]): unknown[] {
   });
 }
 
-function findEncodeFallback(logs: unknown[]): unknown {
+function findEncodeFinish(
+  logs: unknown[],
+  outcome: "success" | "fallback" | "exception",
+): unknown {
   return logs.find((log) => {
     if (typeof log !== "object" || log === null) return false;
     return (
@@ -40,7 +43,7 @@ function findEncodeFallback(logs: unknown[]): unknown {
       "phase" in log &&
       log.phase === "finish" &&
       "outcome" in log &&
-      log.outcome === "fallback"
+      log.outcome === outcome
     );
   });
 }
@@ -63,6 +66,28 @@ describe("TokenizerController", () => {
     },
   );
 
+  it("omits byteCount from exact BPE success telemetry", async () => {
+    const controller = freshStub();
+    const { logs, spy } = collectLogs();
+    try {
+      const outcome = await controller.estimate({
+        requestId: "req_exact_success",
+        inputText: "hello",
+        messageCount: 1,
+        opaqueInputBytes: 0,
+      });
+      expect(outcome).toEqual({
+        kind: "resolved",
+        result: { estimatedInputTokens: 8, estimationPath: "exact_bpe" },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    const encodeFinish = findEncodeFinish(logs, "success");
+    expect(encodeFinish).toBeDefined();
+    expect(encodeFinish).not.toHaveProperty("byteCount");
+  });
+
   it("returns unavailable for an invalid request", async () => {
     const controller = stub();
     const outcome = await controller.estimate({
@@ -75,14 +100,22 @@ describe("TokenizerController", () => {
   });
 
   it("returns unavailable when the result is not a safe integer", async () => {
-    const controller = stub();
-    const outcome = await controller.estimate({
-      requestId: "req_overflow",
-      inputText: "hello",
-      messageCount: Number.MAX_SAFE_INTEGER,
-      opaqueInputBytes: 0,
-    });
-    expect(outcome).toEqual({ kind: "unavailable" });
+    const controller = freshStub();
+    const { logs, spy } = collectLogs();
+    try {
+      const outcome = await controller.estimate({
+        requestId: "req_overflow",
+        inputText: "hello",
+        messageCount: Number.MAX_SAFE_INTEGER,
+        opaqueInputBytes: 0,
+      });
+      expect(outcome).toEqual({ kind: "unavailable" });
+    } finally {
+      spy.mockRestore();
+    }
+    const encodeException = findEncodeFinish(logs, "exception");
+    expect(encodeException).toBeDefined();
+    expect(encodeException).not.toHaveProperty("byteCount");
   });
 
   it("does not log the input text", async () => {
@@ -189,9 +222,9 @@ describe("TokenizerController", () => {
     } finally {
       spy.mockRestore();
     }
-    const encodeFinish = findEncodeFallback(logs);
+    const encodeFinish = findEncodeFinish(logs, "fallback");
     expect(encodeFinish).toBeDefined();
+    expect(encodeFinish).toHaveProperty("byteCount", 4);
     expect(encodeFinish).toHaveProperty("failureCategory", "encoding_encode_failure");
   });
 });
-

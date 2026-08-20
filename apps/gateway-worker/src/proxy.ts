@@ -75,7 +75,7 @@ const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
 // so the Gateway never emits a TokenizeRequest whose serialized RPC payload reaches
 // the 32 MiB limit.
 const RPC_SIZE_LIMIT_BYTES = 32 * 1024 * 1024;
-const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
+export const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
 
 export function estimateRpcPayloadSize(request: {
   requestId: string;
@@ -99,15 +99,6 @@ export function estimateRpcPayloadSize(request: {
     v8StringSize(request.inputText) +
     2 * v8NumberSize
   );
-}
-
-export function tokenizeRequestByteSize(request: {
-  requestId: string;
-  inputText: string;
-  messageCount: number;
-  opaqueInputBytes: number;
-}): number {
-  return new TextEncoder().encode(JSON.stringify(request)).byteLength;
 }
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
