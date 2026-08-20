@@ -3,6 +3,7 @@ import wasm from "tiktoken/lite/tiktoken_bg.wasm";
 import o200kBase from "tiktoken/encoders/o200k_base";
 import type { TokenizeRequest, TokenizeResult } from "./contracts";
 import {
+  type TokenizerStage,
   type TokenizerStageEvent,
 } from "./observation";
 
@@ -30,6 +31,15 @@ export interface TokenizerEstimatorContext {
   readonly revisionId: string;
   readonly emit: (event: TokenizerStageEvent) => void;
 }
+
+type EncodingFailureCategory = "encoding_init" | "encoding_encode";
+
+type ConservativeFallbackContext = {
+  readonly context: TokenizerEstimatorContext;
+  readonly startedAt: number;
+  readonly stage: TokenizerStage;
+  readonly failureCategory: EncodingFailureCategory;
+};
 
 export class TokenizerEstimator {
   private encoding: Encoding | undefined;
@@ -69,35 +79,12 @@ export class TokenizerEstimator {
       initialized = this.encodingFactory();
     } catch (error) {
       if (error instanceof Error) {
-        try {
-          const fallback = this.conservativeEstimate(request);
-          context.emit({
-            event: "octg.tokenizer_stage",
-            requestId: request.requestId,
-            revisionId: context.revisionId,
-            stage: "tokenizer_init",
-            phase: "finish",
-            durationMs: durationSince(startedAt),
-            outcome: "fallback",
-            byteCount: fallback.byteCount,
-            tokenCount: fallback.result.estimatedInputTokens,
-            estimationPath: fallback.result.estimationPath,
-            failureCategory: "encoding_init",
-          });
-          return fallback.result;
-        } catch (arithmeticError) {
-          context.emit({
-            event: "octg.tokenizer_stage",
-            requestId: request.requestId,
-            revisionId: context.revisionId,
-            stage: "tokenizer_init",
-            phase: "finish",
-            durationMs: durationSince(startedAt),
-            outcome: "exception",
-            failureCategory: "arithmetic",
-          });
-          throw arithmeticError;
-        }
+        return this.conservativeEstimateWithFallback(request, {
+          context,
+          startedAt,
+          stage: "tokenizer_init",
+          failureCategory: "encoding_init",
+        });
       }
 
       context.emit({
@@ -161,35 +148,12 @@ export class TokenizerEstimator {
       base = encoding.encode(request.inputText).length;
     } catch (error) {
       if (error instanceof Error) {
-        try {
-          const fallback = this.conservativeEstimate(request);
-          context.emit({
-            event: "octg.tokenizer_stage",
-            requestId: request.requestId,
-            revisionId: context.revisionId,
-            stage: "tokenizer_encode",
-            phase: "finish",
-            durationMs: durationSince(startedAt),
-            outcome: "fallback",
-            byteCount: fallback.byteCount,
-            tokenCount: fallback.result.estimatedInputTokens,
-            estimationPath: fallback.result.estimationPath,
-            failureCategory: "encoding_encode",
-          });
-          return fallback.result;
-        } catch (arithmeticError) {
-          context.emit({
-            event: "octg.tokenizer_stage",
-            requestId: request.requestId,
-            revisionId: context.revisionId,
-            stage: "tokenizer_encode",
-            phase: "finish",
-            durationMs: durationSince(startedAt),
-            outcome: "exception",
-            failureCategory: "arithmetic",
-          });
-          throw arithmeticError;
-        }
+        return this.conservativeEstimateWithFallback(request, {
+          context,
+          startedAt,
+          stage: "tokenizer_encode",
+          failureCategory: "encoding_encode",
+        });
       }
 
       context.emit({
@@ -234,6 +198,42 @@ export class TokenizerEstimator {
         failureCategory: "arithmetic",
       });
       throw error;
+    }
+  }
+
+  private conservativeEstimateWithFallback(
+    request: TokenizeRequest,
+    fallbackContext: ConservativeFallbackContext,
+  ): TokenizeResult {
+    const { context, startedAt, stage, failureCategory } = fallbackContext;
+    try {
+      const fallback = this.conservativeEstimate(request);
+      context.emit({
+        event: "octg.tokenizer_stage",
+        requestId: request.requestId,
+        revisionId: context.revisionId,
+        stage,
+        phase: "finish",
+        durationMs: durationSince(startedAt),
+        outcome: "fallback",
+        byteCount: fallback.byteCount,
+        tokenCount: fallback.result.estimatedInputTokens,
+        estimationPath: fallback.result.estimationPath,
+        failureCategory,
+      });
+      return fallback.result;
+    } catch (arithmeticError) {
+      context.emit({
+        event: "octg.tokenizer_stage",
+        requestId: request.requestId,
+        revisionId: context.revisionId,
+        stage,
+        phase: "finish",
+        durationMs: durationSince(startedAt),
+        outcome: "exception",
+        failureCategory: "arithmetic",
+      });
+      throw arithmeticError;
     }
   }
 
