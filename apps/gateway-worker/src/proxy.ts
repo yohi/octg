@@ -15,7 +15,6 @@ import {
   errRequestTooLarge,
   errWorkerConcurrencyExceeded,
   errorResponse,
-  estimateInputTokens,
   MAX_NORMALIZED_INPUT_BYTES,
   nextUtcMidnight,
   normalizeChatCompletions,
@@ -53,6 +52,11 @@ import { proxyStream } from "./stream";
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
+// Durable Object RPC serialization is limited to 32 MiB. This ceiling accounts for
+// the UTF-8 input text, opaqueInputBytes, and JSON serialization overhead so that the
+// total serialized RPC request stays safely below that limit. Never increase this
+// without also defining a stream or chunk protocol.
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = 32 * 1024 * 1024 - 65_536;
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 
@@ -99,7 +103,10 @@ export function snapshotOf(view: QuotaView): QuotaSnapshot {
 }
 
 export function resolveMaxInputBytes(configured: string | undefined): number {
-  return resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES);
+  return Math.min(
+    resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES),
+    MAX_TOKENIZATION_RPC_INPUT_BYTES,
+  );
 }
 
 export function resolveMaxInFlightRequests(configured: string | undefined): number {
@@ -363,12 +370,43 @@ export async function handleProxy(
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
     let estimatedInput: number;
+    let estimationPath: "exact_bpe" | "conservative_bytes";
     try {
-      estimatedInput = estimateInputTokens(requestData.inputText, requestData.messageCount, requestData.opaqueInputBytes);
+      const tokenizer = env.TOKENIZER_CONTROLLER.get(
+        env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
+      );
+      const tokenizerOutcome = await tokenizer.estimate({
+        requestId,
+        inputText: requestData.inputText,
+        messageCount: requestData.messageCount,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+      });
+      switch (tokenizerOutcome.kind) {
+        case "resolved":
+          estimatedInput = tokenizerOutcome.result.estimatedInputTokens;
+          estimationPath = tokenizerOutcome.result.estimationPath;
+          break;
+        case "unavailable":
+          finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+            route: "error:tokenizer_unavailable",
+            inputBytes: requestData.inputBytes,
+            inputTextBytes: requestData.inputTextBytes,
+            opaqueInputBytes: requestData.opaqueInputBytes,
+            quotaReserved: false,
+            upstreamReached: false,
+          });
+          completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+          return errorResponse(errInternal(requestId, { quota: snapshot }));
+        default: {
+          const unreachable: never = tokenizerOutcome;
+          return unreachable;
+        }
+      }
       finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
         inputBytes: requestData.inputBytes,
         inputTextBytes: requestData.inputTextBytes,
         opaqueInputBytes: requestData.opaqueInputBytes,
+        estimationPath,
       });
     } catch (error) {
       finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
