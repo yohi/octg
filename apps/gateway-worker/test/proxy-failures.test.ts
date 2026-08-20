@@ -6,7 +6,6 @@ import {
   type InFlightLease,
 } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
-import type { TokenizerController } from "@octg/tokenizer-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   releaseInFlightBestEffort,
