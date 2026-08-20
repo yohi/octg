@@ -1,57 +1,76 @@
-import type { TokenizeResult } from "@octg/tokenizer-controller";
-import type { Env } from "./index";
+import {
+  MAX_INPUT_TEXT_BYTES,
+  MAX_REQUEST_ID_BYTES,
+  type TokenizeRequest,
+  type TokenizeResult,
+} from "@octg/tokenizer-controller";
 
-export interface TokenizeClientRequest {
-  readonly requestId: string;
-  readonly inputText: string;
-  readonly messageCount: number;
-  readonly opaqueInputBytes: number;
+const RPC_LIMIT_BYTES = 32 * 1024 * 1024;
+
+interface TokenizerRpcStub {
+  tokenize(request: TokenizeRequest): Promise<unknown>;
 }
 
-export type TokenizeOutcome =
+export interface TokenizerNamespace<Id> {
+  idFromName(name: string): Id;
+  get(id: Id): TokenizerRpcStub;
+}
+
+export type TokenizerOutcome =
   | { readonly kind: "resolved"; readonly result: TokenizeResult }
   | { readonly kind: "unavailable" };
 
-export async function tokenize(
-  env: Env,
-  request: TokenizeClientRequest,
-): Promise<TokenizeOutcome> {
+export function estimateRpcPayloadSize(request: TokenizeRequest): number {
+  const inputTextUtf16Size = request.inputText.length * 2;
+  const requestIdSize = request.requestId.length * 2;
+  const framingOverhead = 200;
+  return inputTextUtf16Size + requestIdSize + framingOverhead;
+}
+
+export async function tokenizeInput<Id>(
+  namespace: TokenizerNamespace<Id>,
+  request: TokenizeRequest,
+): Promise<TokenizerOutcome> {
   try {
-    const stub = env.TOKENIZER_CONTROLLER.get(
-      env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
-    );
-    const outcome = await stub.estimate(request);
-    if (
-      typeof outcome !== "object" ||
-      outcome === null ||
-      !("kind" in outcome) ||
-      outcome.kind !== "resolved" ||
-      !("result" in outcome) ||
-      !isValidTokenizeResult(outcome.result)
-    ) {
+    if (estimateRpcPayloadSize(request) >= RPC_LIMIT_BYTES) {
       return { kind: "unavailable" };
     }
-    return { kind: "resolved", result: outcome.result };
-  } catch {
+    if (!isWithinRequestLimits(request)) return { kind: "unavailable" };
+
+    const stub = namespace.get(namespace.idFromName("tokenizer:primary"));
+    const result = parseTokenizeResult(await stub.tokenize(request));
+    return result === undefined
+      ? { kind: "unavailable" }
+      : { kind: "resolved", result };
+  } catch (error) {
+    // no-excuse-ok: catch — the RPC boundary converts every failure to fail-closed.
+    void error;
     return { kind: "unavailable" };
   }
 }
 
-function isValidTokenizeResult(value: unknown): value is TokenizeResult {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as { estimatedInputTokens?: unknown; estimationPath?: unknown };
+function isWithinRequestLimits(request: TokenizeRequest): boolean {
+  if (request.requestId.length === 0) return false;
+  const encoder = new TextEncoder();
+  return (
+    encoder.encode(request.inputText).byteLength <= MAX_INPUT_TEXT_BYTES &&
+    encoder.encode(request.requestId).byteLength <= MAX_REQUEST_ID_BYTES
+  );
+}
+
+function parseTokenizeResult(value: unknown): TokenizeResult | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const estimatedInputTokens = Reflect.get(value, "estimatedInputTokens");
+  const estimationPath = Reflect.get(value, "estimationPath");
   if (
-    typeof candidate.estimatedInputTokens !== "number" ||
-    !Number.isSafeInteger(candidate.estimatedInputTokens) ||
-    candidate.estimatedInputTokens < 0
+    typeof estimatedInputTokens !== "number" ||
+    !Number.isSafeInteger(estimatedInputTokens) ||
+    estimatedInputTokens < 0
   ) {
-    return false;
+    return undefined;
   }
-  if (
-    candidate.estimationPath !== "exact_bpe" &&
-    candidate.estimationPath !== "conservative_bytes"
-  ) {
-    return false;
+  if (estimationPath !== "exact_bpe" && estimationPath !== "conservative_bytes") {
+    return undefined;
   }
-  return true;
+  return { estimatedInputTokens, estimationPath };
 }

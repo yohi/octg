@@ -21,6 +21,7 @@ export default defineConfig(async () => {
       include: [
         "./test/**/*.test.ts",
         "../../durable-objects/quota-controller/test/**/*.test.ts",
+        "../../durable-objects/tokenizer-controller/test/**/*.test.ts",
       ],
       setupFiles: ["./test/setup.ts"]
     }

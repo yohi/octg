@@ -1,4 +1,5 @@
 import { env, SELF } from "cloudflare:test";
+import { MAX_INPUT_TEXT_BYTES } from "@octg/tokenizer-controller";
 import {
   MAX_NORMALIZED_INPUT_BYTES,
   safetyMargin,
@@ -8,13 +9,12 @@ import type { QuotaController } from "@octg/quota-controller";
 import type { TokenizerController } from "@octg/tokenizer-controller";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  estimateRpcPayloadSize,
-  MAX_TOKENIZATION_RPC_INPUT_BYTES,
   releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
   resolveMaxInputBytes,
 } from "../src/proxy";
+import { estimateRpcPayloadSize } from "../src/tokenizer";
 import type { InFlightLeaseReleaser } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
@@ -32,9 +32,6 @@ const stub = () => {
   const day = new Date().toISOString().slice(0, 10);
   return env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
 };
-const tokenizerStub = () => env.TOKENIZER_CONTROLLER.get(
-  env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
-);
 const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   method: "POST",
   headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
@@ -50,6 +47,7 @@ function jsonRequestByteSize(request: {
   return new TextEncoder().encode(JSON.stringify(request)).byteLength;
 }
 
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = MAX_INPUT_TEXT_BYTES;
 describe("resolveMaxInputBytes", () => {
   it("defaults to one mebibyte", () => {
     expect(resolveMaxInputBytes(undefined)).toBe(1_048_576);
@@ -434,16 +432,8 @@ describe("proxy failure paths", () => {
     const inputText = "visible-summary";
     const opaqueInputBytes = new TextEncoder().encode("秘密状態").byteLength;
     const maxOutputTokens = 10;
-    const tokenizerOutcome = await tokenizerStub().estimate({
-      requestId: "req_expected_reservation",
-      inputText,
-      messageCount: 1,
-      opaqueInputBytes,
-    });
-    if (tokenizerOutcome.kind !== "resolved") {
-      throw new TypeError("Expected the tokenizer Durable Object to resolve the estimate.");
-    }
-    const estimatedInput = tokenizerOutcome.result.estimatedInputTokens;
+    const visibleSummaryTokens = 2;
+    const estimatedInput = visibleSummaryTokens + opaqueInputBytes + 4 + 3;
     const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
     const expectedReservation = estimatedInput + maxOutputTokens + margin;
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: { code: "upstream" } }), { status: 500 }));
@@ -477,7 +467,7 @@ describe("proxy failure paths", () => {
 
   it("fails closed with a tokenizer-specific resource route when tokenization is unavailable", async () => {
     const tokenizer = {
-      estimate: vi.fn().mockResolvedValue({ kind: "unavailable" as const }),
+      tokenize: vi.fn().mockResolvedValue(undefined),
     } as unknown as DurableObjectStub<TokenizerController>;
     vi.spyOn(env.TOKENIZER_CONTROLLER, "get").mockReturnValue(tokenizer);
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -496,7 +486,7 @@ describe("proxy failure paths", () => {
 
     expect(response.status).toBe(500);
     expect(response.headers.get("X-OCTG-Route")).toBe("error:internal_error");
-    expect(tokenizer.estimate).toHaveBeenCalledTimes(1);
+    expect(tokenizer.tokenize).toHaveBeenCalledTimes(1);
     expect(upstreamCallCount).toBe(0);
     expect(after).toMatchObject({
       reservedTokens: before.reservedTokens,
