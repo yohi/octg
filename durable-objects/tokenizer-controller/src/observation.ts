@@ -2,7 +2,7 @@ import type { EstimationPath } from "./contracts";
 
 export type TokenizerStage = "tokenizer_init" | "tokenizer_encode";
 export type TokenizerStageOutcome = "success" | "fallback" | "exception";
-export type TokenizerFailureCategory = "encoding_init" | "encoding_encode" | "arithmetic";
+export type TokenizerFailureCategory = "encoding_init" | "encoding_encode" | "arithmetic" | "work_limit";
 
 type TokenizerStageEventBase = {
   readonly event: "octg.tokenizer_stage";

@@ -377,6 +377,17 @@ export async function handleProxy(
       case "resolved":
         tokenizedResult = tokenizeOutcome.result;
         break;
+      case "request_too_large":
+        finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "rejected", {
+          route: "reject:request_too_large",
+          inputBytes: requestData.inputBytes,
+          inputTextBytes: requestData.inputTextBytes,
+          opaqueInputBytes: requestData.opaqueInputBytes,
+          quotaReserved: false,
+          upstreamReached: false,
+        });
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errRequestTooLarge(snapshot, requestId));
       case "unavailable":
         finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
           route: "error:tokenizer_unavailable",

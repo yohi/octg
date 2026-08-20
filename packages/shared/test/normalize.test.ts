@@ -160,9 +160,9 @@ describe("normalizeChatCompletions", () => {
       value: {
         endpoint: "chat",
         model: "gpt-5",
-        inputText: "hi",
-        inputTextBytes: 2,
-        inputBytes: 2,
+        inputText: "hi\n[]",
+        inputTextBytes: 5,
+        inputBytes: 5,
         messageCount: 1,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
         stream: false,
@@ -170,6 +170,44 @@ describe("normalizeChatCompletions", () => {
         opaqueInputBytes: 0,
       },
     });
+  });
+
+  it("rejects Chat tool declarations when their schema exceeds the input budget", () => {
+    const result = normalizeChatCompletions(
+      {
+        model: "gpt-5",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ type: "function", function: { name: "lookup", description: "schema" } }],
+      },
+      2,
+    );
+
+    expect(result).toEqual({ ok: false, error: "input_too_large" });
+  });
+
+  it("meters message-level tool calls against the input budget", () => {
+    const result = normalizeChatCompletions(
+      {
+        model: "gpt-5",
+        messages: [{
+          role: "assistant",
+          content: "",
+          tool_calls: [{ type: "function", function: { name: "lookup", arguments: "x" } }],
+        }],
+      },
+      2,
+    );
+
+    expect(result).toEqual({ ok: false, error: "input_too_large" });
+  });
+
+  it("classifies message-level tool history as tool use", () => {
+    const result = normalizeChatCompletions({
+      model: "gpt-5",
+      messages: [{ role: "tool", content: "result", tool_call_id: "call_1" }],
+    });
+
+    expect(result).toMatchObject({ ok: true, value: { isToolUse: true } });
   });
 
   it("rejects a missing model as an invalid body", () => {

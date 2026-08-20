@@ -53,6 +53,17 @@ function walkContent(content: unknown, allowedTypes: ReadonlySet<string>, unknow
   return { ok: true, text: texts.join(" ") };
 }
 
+function appendSerializedField(texts: string[], field: unknown): NormalizeResult | null {
+  if (field === undefined || field === null) return null;
+  try {
+    const serialized = JSON.stringify(field);
+    if (serialized !== undefined) texts.push(serialized);
+    return null;
+  } catch {
+    return { ok: false, error: "invalid_body" };
+  }
+}
+
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
@@ -85,9 +96,19 @@ export function normalizeChatCompletions(
   const texts: string[] = [];
   for (const message of value.messages) {
     if (typeof message !== "object" || message === null) return { ok: false, error: "invalid_body" };
-    const content = walkContent((message as Record<string, unknown>).content, CHAT_CONTENT_TYPES, "non_text");
+    const messageValue = message as Record<string, unknown>;
+    const content = walkContent(messageValue.content, CHAT_CONTENT_TYPES, "non_text");
     if (!content.ok) return content;
     texts.push(content.text);
+    for (const field of [messageValue.name, messageValue.tool_calls, messageValue.tool_call_id, messageValue.function_call]) {
+      const result = appendSerializedField(texts, field);
+      if (result) return result;
+    }
+  }
+
+  for (const field of [value.tools, value.tool_choice, value.functions, value.function_call]) {
+    const result = appendSerializedField(texts, field);
+    if (result) return result;
   }
 
   const inputText = texts.join("\n");
@@ -135,16 +156,6 @@ export function normalizeResponses(
   let isToolUse = false;
   let opaqueInputBytes = 0;
   const texts: string[] = [];
-  const appendSerialized = (field: unknown): NormalizeResult | null => {
-    if (field === undefined || field === null) return null;
-    try {
-      const serialized = JSON.stringify(field);
-      if (serialized !== undefined) texts.push(serialized);
-      return null;
-    } catch {
-      return { ok: false, error: "invalid_body" };
-    }
-  };
   const walkResponseMessage = (entry: Record<string, unknown>): NormalizeResult | null => {
     const role = entry.role;
     if (role !== "assistant" && role !== "developer" && role !== "system" && role !== "user") {
@@ -228,7 +239,7 @@ export function normalizeResponses(
   }
 
   for (const field of [value.instructions, value.tools, value.tool_choice]) {
-    const result = appendSerialized(field);
+    const result = appendSerializedField(texts, field);
     if (result) return result;
   }
   inputText = texts.join("\n");

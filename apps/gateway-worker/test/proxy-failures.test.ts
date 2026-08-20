@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { MAX_INPUT_TEXT_BYTES } from "@octg/tokenizer-controller";
+import { MAX_INPUT_TEXT_BYTES, type TokenizerController } from "@octg/tokenizer-controller";
 import {
   MAX_NORMALIZED_INPUT_BYTES,
   safetyMargin,
@@ -35,6 +35,15 @@ const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   method: "POST",
   headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
   body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 }),
+});
+const realWorkLimitRequest = () => SELF.fetch("https://octg.test/v1/chat/completions", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
+  body: JSON.stringify({
+    model: "gpt-5",
+    messages: [{ role: "user", content: "x".repeat(16_384) }],
+    max_completion_tokens: 1,
+  }),
 });
 
 const MAX_TOKENIZATION_RPC_INPUT_BYTES = MAX_INPUT_TEXT_BYTES;
@@ -414,6 +423,53 @@ describe("proxy failure paths", () => {
       if (original) Object.defineProperty(env, "MAX_INPUT_BYTES", original);
       else Reflect.deleteProperty(env, "MAX_INPUT_BYTES");
     }
+  });
+
+  it("returns 413 for tokenizer work-limit failures without reservation or upstream contact", async () => {
+    const before = await stub().getState();
+    const tokenize = vi.fn().mockResolvedValue({ kind: "work_limit" });
+    vi.spyOn(env.TOKENIZER_CONTROLLER, "get").mockReturnValue({ tokenize } as unknown as DurableObjectStub<TokenizerController>);
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    const response = await request();
+
+    expect(response.status).toBe(413);
+    expect(response.headers.get("X-OCTG-Route")).toBe("reject:request_too_large");
+    expect(await response.json()).toMatchObject({ error: { code: "request_too_large" } });
+    expect(tokenize).toHaveBeenCalledTimes(1);
+    expect(upstreamCallCount).toBe(0);
+    expect(await stub().getState()).toMatchObject({
+      confirmedTokens: before.confirmedTokens,
+      reservedTokens: before.reservedTokens,
+      uncertainTokens: before.uncertainTokens,
+      requestCount: before.requestCount,
+    });
+  });
+
+  it("maps a real tokenizer work-limit RPC result to 413 before reservation", async () => {
+    const before = await stub().getState();
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    const response = await realWorkLimitRequest();
+
+    expect(response.status).toBe(413);
+    expect(response.headers.get("X-OCTG-Route")).toBe("reject:request_too_large");
+    expect(await response.json()).toMatchObject({ error: { code: "request_too_large" } });
+    expect(upstreamCallCount).toBe(0);
+    expect(await stub().getState()).toMatchObject({
+      confirmedTokens: before.confirmedTokens,
+      reservedTokens: before.reservedTokens,
+      uncertainTokens: before.uncertainTokens,
+      requestCount: before.requestCount,
+    });
   });
 
   it("counts Responses opaque reasoning bytes once in the reservation", async () => {

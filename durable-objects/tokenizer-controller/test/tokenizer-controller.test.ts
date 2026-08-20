@@ -36,6 +36,16 @@ describe("TokenizerController Durable Object", () => {
     expect(accepted).toEqual({ estimatedInputTokens: 7, estimationPath: "exact_bpe" });
   });
 
+  it("returns a typed work-limit result over RPC", async () => {
+    const result = await controller("tokenizer:work-limit").tokenize({
+      ...validRequest,
+      requestId: "req_work_limit",
+      inputText: "x".repeat(16_384),
+    });
+
+    expect(result).toEqual({ kind: "work_limit" });
+  });
+
   it("does not persist request data in Durable Object storage", async () => {
     const tokenizer = controller("tokenizer:storage-absence");
 

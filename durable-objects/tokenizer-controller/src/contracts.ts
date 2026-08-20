@@ -12,6 +12,8 @@ export interface TokenizeResult {
   readonly estimationPath: EstimationPath;
 }
 
+export type TokenizeRpcResult = TokenizeResult | { readonly kind: "work_limit" };
+
 export const MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536;
 export const MAX_REQUEST_ID_BYTES = 256;
 
