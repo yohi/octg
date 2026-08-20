@@ -17,8 +17,7 @@ export type ResourceStageRoute =
   | "reject:tokenization_concurrency"
   | "error:tokenizer_unavailable"
   | "error:pre_upstream"
-  | "error:upstream_uncertain"
-  | "error:tokenizer_unavailable";
+  | "error:upstream_uncertain";
 
 export type ResourceStageOutcome = "success" | "rejected" | "exception" | "uncertain";
 
