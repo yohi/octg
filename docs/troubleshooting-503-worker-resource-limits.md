@@ -53,12 +53,28 @@ authentication
   -> raw body read / JSON parse
   -> endpoint normalization / normalized input byte check
   -> model registry / policy / quota getState
+  -> TokenizerController RPC (tokenizer:primary, exact o200k_base BPE)
   -> input estimation / margin / upper bound / output decision
   -> quota reserve
   -> in-flight admission
   -> upstream fetch
   -> settle, markUncertain, or known pre-upstream release
 ```
+
+TokenizerController RPC は 1 request につき 1 回だけ実行します。RPC failure、malformed result、
+入力上限超過、算術異常は未検証の推定値を使わず、`500 internal_error` として fail-closed になります。
+この場合、`quota_reserve`、in-flight admission、upstream fetch は実行しません。exact BPE は
+Gateway Worker や shared package では実行せず、`TokenizerController` の RPC 境界に隔離します。
+
+TokenizerController の estimate は次の境界を使用します。
+
+```text
+base = o200k_base.encode(inputText).length
+estimatedInputTokens = base + opaqueInputBytes + (messageCount * 4) + 3
+```
+
+TokenizerController は RPC 専用であり、`ctx.storage` を呼び出しません。入力本文、API key、
+tokenizer state を Durable Object storage や stage event に保存しないことを確認します。
 
 `readJsonBody()` の raw body 上限は JSON parse より前に適用されます。正規化処理は
 `inputTextBytes`、`opaqueInputBytes`、`inputBytes` を分離して返します。Responses では
@@ -110,6 +126,9 @@ Durable Object に置きます。
 - reserve の結果が不明な場合は fail-closed にし、release や upstream 到達を行わず、DO の
   reconciliation 対象として保持する。
 - upstream には payload collection 無効化 header を送る。
+- `TokenizerController` の success stage と quota reserve stage を request ID で相関する。
+- Tokenizer stage event は request ID、revision、stage、duration、safe な byte/token 数、
+  allowlist 済み outcome だけを記録し、入力本文、Authorization、API key、例外文字列を記録しない。
 
 ### CPU branch（Gate 通過時だけ）
 
@@ -167,6 +186,11 @@ CPU・memory・concurrency の設定値は追加していません。
 | revision | request ID | CPU limit / memory limit | raw / normalized bytes | stage / outcome / concurrency | reserve / upstream | branch |
 | --- | --- | --- | --- | --- | --- | --- |
 | 未取得 | 未取得 | 未取得 / 未取得 | 未取得 / 未取得 | 未取得 / 未取得 / 未取得 | 未取得 / 未取得 | CPU・memory・concurrency 未適用 |
+
+TokenizerController migration の確認も branch decision の前提です。`apps/gateway-worker/wrangler.jsonc`
+の `TOKENIZER_CONTROLLER` binding と migration `v2` を削除・改名・再利用せず、rollback でも
+manifest を維持します。Free Plan の CPU 上限を理由に、production 証跡なしで arbitrary cutoff、
+未検証の byte 比率式、tokenization lease、paid fallback を追加しません。
 
 operator が想定ピークを正の safe integer として決めた場合の実行例は次のとおりです。
 

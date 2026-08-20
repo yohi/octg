@@ -42,7 +42,13 @@ Client (OpenCode / AI Agent / MCP / Apps)
         ▼
 Cloudflare Worker (OpenAI 互換 API)
         │  認証 → ポリシー解決 → モデル分類 → Tool-use 判定
-        │  → トークン推定 → reservation 要求
+        │  → QuotaController state 読み出し
+        ▼
+Durable Object: TokenizerController (exact o200k_base BPE)
+        │  固定 ID tokenizer:primary への 1 回の RPC
+        ▼
+Cloudflare Worker
+        │  token budget 算術 → reservation 要求
         ▼
 Durable Object: QuotaController (pool × UTC 日)
         │  reserve / settle / markUncertain（単一スレッドで直列化）
@@ -164,9 +170,18 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 
 ### 5.4 トークン推定
 
-要件第 11 章の二段階方式：
+要件第 11 章の二段階方式を、Gateway Worker と TokenizerController の責務に分けて実行する。
 
-- モデル対応 tokenizer で input tokens を推定。**入力正規化**: `/v1/chat/completions` の `max_completion_tokens` は内部の `max_output_tokens` へ変換する。互換入力 `max_tokens` も同様に変換する。`max_tokens` と `max_completion_tokens` の両方が指定された場合は `max_completion_tokens` を優先し、**値が異なる場合は `invalid_request`（400, `param: "max_tokens"`）で拒否**して予約へ進まない。
+- Worker は入力を正規化し、`inputText`、`opaqueInputBytes`、`messageCount` を作る。`/v1/chat/completions` の `max_completion_tokens` は内部の `max_output_tokens` へ変換する。互換入力 `max_tokens` も同様に変換する。`max_tokens` と `max_completion_tokens` の両方が指定された場合は `max_completion_tokens` を優先し、**値が異なる場合は `invalid_request`（400, `param: "max_tokens"`）で拒否**して予約へ進まない。
+- `quota_get_state` の後、Worker は `TokenizerController` Durable Object を固定 ID `tokenizer:primary` で 1 回だけ RPC 呼び出しする。TokenizerController は `o200k_base` の exact BPE を実行し、次の式で最終的な推定入力 token 数を返す：
+
+  ```text
+  base = o200k_base.encode(inputText).length
+  estimated_input = base + opaqueInputBytes + (messageCount * 4) + 3
+  ```
+
+- TokenizerController の encoder 初期化または encode が通常の `Error` で失敗した場合だけ、同じ DO 内の conservative bytes path（UTF-8 byte 数を base とする）へ切り替える。算術異常、malformed RPC result、RPC failure、入力上限超過は fallback として扱わず fail-closed とする。Gateway Worker と `packages/shared` は BPE encoder を import しない。
+- TokenizerController は RPC 専用であり、`ctx.storage` を使用せず、入力本文・Authorization・API key・tokenizer state を保存しない。`MAX_INPUT_TEXT_BYTES` は 16 MiB から RPC safety margin を引いた値、`MAX_REQUEST_ID_BYTES` は 256 bytes、Worker 側の RPC preflight ceiling は 32 MiB とする。
 - 安全マージン（プール残量率で段階化）:
   - `remaining > 20%` : `max(256, estimatedInput * 0.02)`
   - `remaining <= 20%`: `max(512, estimatedInput * 0.05)`
@@ -176,7 +191,6 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 - **非テキスト入力の扱い（MVP）**: `/v1/responses` および `/v1/chat/completions` の予約処理で `input_image`・`input_audio` など非テキストのモダリティを検出した場合、tokenizer 推定が成立しないため**予約前に明示的に拒否**する（エラー契約は 5.7 の `invalid_request` を使用）。将来対応としてモダリティ別の保守的上限を `estimated_input` へ加算する方式を採る場合は、モダリティごとの上限表を本書に追加し、過少計上を防ぐ。
 - **Responses のテキスト・ツール履歴（OpenCode互換）**: `/v1/responses` は `input` の message item（`type` 省略または `message`）について、user/system/developer の `input_text` と assistant の `output_text` を受理する。`function_call` の `call_id`・`name`・`arguments`、`function_call_output` の `call_id`・文字列または `input_text` 配列の `output`、および reasoning の `summary_text` 配列と `encrypted_content` を受理する。これらの prompt-bearing な可視文字列は input token 推定へ含め、encrypted reasoning state は `opaqueInputBytes` として UTF-8 byte 数を保守的に加算する。複数 reasoning item の opaque bytes は合算する。
 - **Responses の参照状態**: `item_reference`、`previous_response_id`、`conversation`、未知の top-level item、未知または不正な nested part は、参照先を取得して token 推定できないため、予約前に HTTP 400 (`invalid_request`, `param: null`) で拒否する。BYOK/OpenCode 側は `store: false` と必要履歴の再送を使用する。
-- tokenizer 未知のモデルは UTF-8 バイト数等から保守的上限を使用する。
 
 ### 5.5 Output 制御（要件第 12 章）
 
@@ -193,17 +207,18 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 
 ### 5.6 Reservation → 上流転送 → Settlement
 
-1. `QuotaController.reserve(request_id, reservation, upperBound)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。
+1. `quota_get_state` の後に TokenizerController RPC を実行する。Tokenizer outcome が unavailable（RPC failure、malformed result、入力上限超過、算術異常）の場合は `500` (`api_error` / `internal_error`, route `error:internal_error`) を返し、`QuotaController.reserve`、in-flight admission、AI Gateway REST を呼び出さない。
+2. `QuotaController.reserve(request_id, reservation, upperBound)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。
    - Worker は受信リクエストの `Idempotency-Key` ヘッダー（存在する場合）を `QuotaController.reserve()` および Gateway B への upstream 呼び出しに変更せず転送する。同一 key に対する再送は Durable Object 内で重複排除され、完了済み key に対する再送は `409 Conflict` で拒否する。key がない場合は新規リクエストとして扱う。
-2. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する：
+3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
    - `cf-aig-max-attempts: 2`
    - `cf-aig-retry-delay: 1000` / `cf-aig-backoff: exponential`
    - リトライ対象は AI Gateway 側の既定（ネットワークエラーおよび上流 5xx）に限定する。クライアント起因の 4xx（認証・バリデーション等）はリトライしない。
-3. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
-4. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。
-5. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
-6. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
+4. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
+5. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。
+6. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
+7. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
 
 ### 5.7 レスポンスとエラー
 
@@ -218,6 +233,7 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 | 不明モデルで paid 必須 | `403` | `The requested model requires paid mode, which is not enabled.` | `invalid_request_error` / `model_requires_paid` | `model` | 付与しない | `complimentary=NONE` で、paid mode が許可されていない場合。 |
 | 非テキスト入力（MVP 未対応） | `400` | `Non-text input is not supported in the MVP.` | `invalid_request_error` / `invalid_request` | `input` | 付与しない | 5.4 の予約前拒否。 |
 | `max_tokens` / `max_completion_tokens` 衝突 | `400` | `max_tokens and max_completion_tokens must match when both are provided.` | `invalid_request_error` / `invalid_request` | `max_tokens` | 付与しない | 5.4 の正規化規則。 |
+| Tokenizer RPC / 算術異常 | `500` | `An internal error occurred.` | `api_error` / `internal_error` | `null` | pool 確定後に付与 | 5.4 の TokenizerController が unavailable、または token budget 算術が不正な場合。reservation・in-flight・upstream は実行しない。 |
 
 - **エラー body の共通契約**: `message`、`type`、`param`、`code` は必須キーとし、`param` が対象外の場合も `null` を返す。`message` は上表の固定値を使用する。テスト・クライアントロジックは原則として `message` ではなく `error.type` / `error.code` / HTTP status を参照するが、固定値はログ・互換性確認用の契約として扱う。
 - **pool 系ヘッダの値**: pool が確定したエラーでは、`X-OCTG-Pool` は小文字の `standard` / `mini`、`X-OCTG-Quota-Limit` は対象 DO の `limit`、`X-OCTG-Quota-Used` は `confirmedTokens + reservedTokens + uncertainTokens`、`X-OCTG-Quota-Remaining` は DO が返す `remaining`、`X-OCTG-Quota-Reset` は次の UTC 00:00 の RFC 3339 timestamp とする。`X-OCTG-Request-Id` は body の `request_id` と同一値にする。
