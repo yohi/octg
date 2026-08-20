@@ -3,12 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json" },
-  "dependencies": { "js-tiktoken": "^1.0.12" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "tiktoken": "1.0.22"
+  },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250617.0",
     "@cloudflare/vitest-pool-workers": "^0.20.3",
+    "@cloudflare/workers-types": "^4.20250617.0",
     "vitest": "^4.1.0"
   }
 }

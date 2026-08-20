@@ -5,18 +5,33 @@ type RawGlob = <Value>(
   options: { eager: true; import: "default"; query: "?raw" },
 ) => Record<string, Value>;
 
-const productionSources = (import.meta as ImportMeta & { readonly glob: RawGlob }).glob<string>(
-  ["../src/**/*.ts", "../../apps/gateway-worker/src/**/*.ts"],
+const gatewaySources = (import.meta as ImportMeta & { readonly glob: RawGlob }).glob<string>(
+  [
+    "../src/**/*.ts",
+    "../../../apps/gateway-worker/src/**/*.ts",
+  ],
+  { eager: true, import: "default", query: "?raw" },
+);
+const tokenizerSources = (import.meta as ImportMeta & { readonly glob: RawGlob }).glob<string>(
+  ["../../../durable-objects/tokenizer-controller/src/**/*.ts"],
   { eager: true, import: "default", query: "?raw" },
 );
 
 describe("Tokenizer dependency isolation", () => {
   it("keeps BPE ownership out of shared and Gateway production source", () => {
-    const forbidden = [/js-tiktoken/, /getEncoding\(/, /encoding\.encode\(/];
+    const forbidden = [/from ["']js-tiktoken["']/, /getEncoding\(/, /encoding\.encode\(/];
 
-    for (const [file, content] of Object.entries(productionSources)) {
+    for (const [file, content] of Object.entries(gatewaySources)) {
       for (const pattern of forbidden) expect(content, file).not.toMatch(pattern);
     }
+  });
+
+  it("uses the lite tokenizer entrypoint for the isolated BPE owner", () => {
+    const source = Object.values(tokenizerSources).join("\n");
+
+    expect(source).not.toMatch(/from ["']js-tiktoken["']/);
+    expect(source).not.toMatch(/from ["']tiktoken["']/);
+    expect(source).toMatch(/from ["']tiktoken\/lite(?:\/init)?["']/);
   });
 
   it("does not export estimateInputTokens from shared", async () => {

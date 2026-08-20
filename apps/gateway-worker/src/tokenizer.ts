@@ -2,6 +2,7 @@ import {
   MAX_INPUT_TEXT_BYTES,
   MAX_REQUEST_ID_BYTES,
   type TokenizeRequest,
+  type TokenizeRpcResult,
   type TokenizeResult,
 } from "@octg/tokenizer-controller";
 
@@ -18,6 +19,7 @@ export interface TokenizerNamespace<Id> {
 
 export type TokenizerOutcome =
   | { readonly kind: "resolved"; readonly result: TokenizeResult }
+  | { readonly kind: "request_too_large" }
   | { readonly kind: "unavailable" };
 
 export function estimateRpcPayloadSize(request: TokenizeRequest): number {
@@ -39,8 +41,9 @@ export async function tokenizeInput<Id>(
 
     const stub = namespace.get(namespace.idFromName("tokenizer:primary"));
     const result = parseTokenizeResult(await stub.tokenize(request));
-    return result === undefined
-      ? { kind: "unavailable" }
+    if (result === undefined) return { kind: "unavailable" };
+    return "kind" in result
+      ? { kind: "request_too_large" }
       : { kind: "resolved", result };
   } catch (error) {
     // no-excuse-ok: catch — the RPC boundary converts every failure to fail-closed.
@@ -58,8 +61,9 @@ function isWithinRequestLimits(request: TokenizeRequest): boolean {
   );
 }
 
-function parseTokenizeResult(value: unknown): TokenizeResult | undefined {
+function parseTokenizeResult(value: unknown): TokenizeRpcResult | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (Reflect.get(value, "kind") === "work_limit") return { kind: "work_limit" };
   const estimatedInputTokens = Reflect.get(value, "estimatedInputTokens");
   const estimationPath = Reflect.get(value, "estimationPath");
   if (

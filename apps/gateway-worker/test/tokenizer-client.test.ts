@@ -19,7 +19,7 @@ interface Calls {
   readonly requests: TokenizeRequest[];
 }
 
-function namespaceWith(result: unknown, rejected = false): {
+function namespaceWith(result: unknown, rejected = false, failure?: unknown): {
   readonly namespace: TokenizerNamespace<string>;
   readonly calls: Calls;
 } {
@@ -34,7 +34,9 @@ function namespaceWith(result: unknown, rejected = false): {
       return {
         tokenize(request) {
           calls.requests.push(request);
-          return rejected ? Promise.reject(new Error("RPC unavailable")) : Promise.resolve(result);
+          return rejected
+            ? Promise.reject(failure ?? new Error("RPC unavailable"))
+            : Promise.resolve(result);
         },
       };
     },
@@ -81,6 +83,13 @@ describe("tokenizeInput", () => {
     await expect(tokenizeInput(namespace, baseRequest)).resolves.toEqual({ kind: "unavailable" });
     expect(calls.names).toHaveLength(1);
     expect(calls.ids).toHaveLength(1);
+    expect(calls.requests).toHaveLength(1);
+  });
+
+  it("classifies a typed tokenizer work-limit RPC result as request_too_large", async () => {
+    const { namespace, calls } = namespaceWith({ kind: "work_limit" });
+
+    await expect(tokenizeInput(namespace, baseRequest)).resolves.toEqual({ kind: "request_too_large" });
     expect(calls.requests).toHaveLength(1);
   });
 

@@ -93,6 +93,82 @@ describe("TokenizerEstimator", () => {
     });
   });
 
+  it("rejects oversized BPE work without invoking the encoder", () => {
+    let encodeCalls = 0;
+    const estimator = new TokenizerEstimator(() => ({
+      encode: () => {
+        encodeCalls += 1;
+        return [1];
+      },
+    }));
+
+    expect(() => estimator.estimate(requestFor("x".repeat(16_384)), contextFor())).toThrow(
+      "Tokenizer BPE work limit exceeded.",
+    );
+    expect(encodeCalls).toBe(0);
+  });
+
+  it("rejects punctuation followed by newlines when the combined BPE piece exceeds the work limit", () => {
+    let encodeCalls = 0;
+    const estimator = new TokenizerEstimator(() => ({
+      encode: () => {
+        encodeCalls += 1;
+        return [1];
+      },
+    }));
+
+    expect(() => estimator.estimate(requestFor(`${"!".repeat(5_000)}${"\n".repeat(5_000)}`), contextFor())).toThrow(
+      "Tokenizer BPE work limit exceeded.",
+    );
+    expect(encodeCalls).toBe(0);
+  });
+
+  it("rejects contraction suffixes that keep a single BPE piece above the work limit", () => {
+    let encodeCalls = 0;
+    const estimator = new TokenizerEstimator(() => ({
+      encode: () => {
+        encodeCalls += 1;
+        return [1];
+      },
+    }));
+
+    expect(() => estimator.estimate(requestFor(`${"a".repeat(8_191)}'s`), contextFor())).toThrow(
+      "Tokenizer BPE work limit exceeded.",
+    );
+    expect(encodeCalls).toBe(0);
+  });
+
+  it("rejects leading optional prefixes that belong to a large letter BPE piece", () => {
+    let encodeCalls = 0;
+    const estimator = new TokenizerEstimator(() => ({
+      encode: () => {
+        encodeCalls += 1;
+        return [1];
+      },
+    }));
+
+    const inputText = (`'${"a".repeat(5_792)}1`).repeat(2);
+    expect(() => estimator.estimate(requestFor(inputText), contextFor())).toThrow(
+      "Tokenizer BPE work limit exceeded.",
+    );
+    expect(encodeCalls).toBe(0);
+  });
+
+  it("allows compact punctuation-rich input above eight KiB when BPE chunks stay bounded", () => {
+    const inputText = JSON.stringify(Array.from({ length: 200 }, (_, index) => ({
+      type: "function",
+      function: { name: `lookup_${index}`, parameters: { type: "object" } },
+    })));
+    expect(new TextEncoder().encode(inputText).byteLength).toBeGreaterThan(8 * 1024);
+
+    const estimator = new TokenizerEstimator(() => ({ encode: () => [1] }));
+
+    expect(estimator.estimate(requestFor(inputText), contextFor())).toEqual({
+      estimatedInputTokens: 8,
+      estimationPath: "exact_bpe",
+    });
+  });
+
   it("throws when safe-integer arithmetic overflows", () => {
     const estimator = new TokenizerEstimator(() => ({ encode: () => [] }));
 

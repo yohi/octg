@@ -1,11 +1,29 @@
-import { getEncoding, type Tiktoken } from "js-tiktoken";
+import { init, Tiktoken } from "tiktoken/lite/init";
+import wasm from "tiktoken/lite/tiktoken_bg.wasm";
+import o200kBase from "tiktoken/encoders/o200k_base";
 import type { TokenizeRequest, TokenizeResult } from "./contracts";
 import {
   type TokenizerStageEvent,
 } from "./observation";
 
-type Encoding = Pick<Tiktoken, "encode">;
+type Encoding = {
+  readonly encode: (text: string) => { readonly length: number };
+};
 export type EncodingFactory = () => Encoding;
+
+export const MAX_BPE_WORK_UNITS = 64 * 1024 * 1024;
+
+const BPE_WORK_CHUNK_PATTERN = /[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+(?:'[sStT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]{2}|'[dD])?| ?[^\s\p{L}\p{N}]+[\r\n/]*|[\p{N}]{1,3}|[^\s\p{L}\p{N}]+|\s+/gu;
+const UTF8_ENCODER = new TextEncoder();
+
+await init((imports) => WebAssembly.instantiate(wasm, imports));
+
+export class TokenizerWorkLimitError extends Error {
+  public constructor() {
+    super("Tokenizer BPE work limit exceeded.");
+    this.name = "TokenizerWorkLimitError";
+  }
+}
 
 export interface TokenizerEstimatorContext {
   readonly requestId: string;
@@ -17,7 +35,11 @@ export class TokenizerEstimator {
   private encoding: Encoding | undefined;
 
   public constructor(
-    private readonly encodingFactory: EncodingFactory = () => getEncoding("o200k_base"),
+    private readonly encodingFactory: EncodingFactory = () => new Tiktoken(
+      o200kBase.bpe_ranks,
+      o200kBase.special_tokens,
+      o200kBase.pat_str,
+    ),
   ) {}
 
   public estimate(
@@ -118,6 +140,22 @@ export class TokenizerEstimator {
       phase: "start",
     });
 
+    try {
+      assertBpeWorkWithinLimit(request.inputText);
+    } catch (error) {
+      context.emit({
+        event: "octg.tokenizer_stage",
+        requestId: request.requestId,
+        revisionId: context.revisionId,
+        stage: "tokenizer_encode",
+        phase: "finish",
+        durationMs: durationSince(startedAt),
+        outcome: "exception",
+        failureCategory: error instanceof TokenizerWorkLimitError ? "work_limit" : "arithmetic",
+      });
+      throw error;
+    }
+
     let base: number;
     try {
       base = encoding.encode(request.inputText).length;
@@ -216,6 +254,18 @@ export class TokenizerEstimator {
 
 function durationSince(startedAt: number): number {
   return Math.max(0, performance.now() - startedAt);
+}
+
+function assertBpeWorkWithinLimit(inputText: string): void {
+  let workUnits = 0;
+  for (const match of inputText.matchAll(BPE_WORK_CHUNK_PATTERN)) {
+    const pieceBytes = UTF8_ENCODER.encode(match[0]).byteLength;
+    const pieceWorkUnits = pieceBytes * pieceBytes;
+    if (workUnits > MAX_BPE_WORK_UNITS - pieceWorkUnits) {
+      throw new TokenizerWorkLimitError();
+    }
+    workUnits += pieceWorkUnits;
+  }
 }
 
 function estimatedTokensOf(base: number, request: TokenizeRequest): number {
