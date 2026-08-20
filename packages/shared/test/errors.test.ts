@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOctgHeaders,
+  errInternal,
   errInvalidApiKey,
   errMaxTokensConflict,
   errModelNotAllowed,
@@ -21,6 +22,30 @@ const snapshot: QuotaSnapshot = {
 };
 
 describe("canonical error bodies", () => {
+  it("returns an internal error with quota headers and no retry hint", async () => {
+    const response = errorResponse(errInternal("req_tokenizer", {
+      quota: snapshot,
+      route: "error:internal_error",
+    }));
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("Retry-After")).toBeNull();
+    expect(response.headers.get("X-OCTG-Route")).toBe("error:internal_error");
+    expect(response.headers.get("X-OCTG-Quota-Remaining")).toBe("12500");
+    expect(await response.json()).toEqual({
+      error: {
+        message: "An internal error occurred.",
+        type: "api_error",
+        param: null,
+        code: "internal_error",
+        pool: "standard",
+        remaining_tokens: snapshot.remaining,
+        reset_at: snapshot.resetAt,
+      },
+      request_id: "req_tokenizer",
+    });
+  });
+
   it("includes quota details in a 429 body and pool headers", async () => {
     const response = errorResponse(errQuotaExceeded(snapshot, "req_1"));
     expect(response.status).toBe(429);

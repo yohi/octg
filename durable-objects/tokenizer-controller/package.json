@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/tokenizer-controller.ts" },
+  "exports": { ".": "./src/index.ts" },
   "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json" },
   "dependencies": { "js-tiktoken": "^1.0.12" },
   "devDependencies": {

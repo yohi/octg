@@ -1,102 +1,44 @@
-import { describe, expect, it, vi } from "vitest";
-import type { TokenizerController } from "@octg/tokenizer-controller";
-import { tokenize, type TokenizeClientRequest } from "../src/tokenizer";
-import type { Env } from "../src/index";
+import { describe, expect, it } from "vitest";
+import type { TokenizeRequest } from "@octg/tokenizer-controller";
+import { tokenizeInput, type TokenizerNamespace } from "../src/tokenizer";
 
-const baseRequest: TokenizeClientRequest = {
+const request: TokenizeRequest = {
   requestId: "req_test",
   inputText: "Hello world",
   messageCount: 1,
   opaqueInputBytes: 0,
 };
 
-function envWithEstimate(result: unknown): Env {
+function namespaceWith(
+  call: (input: TokenizeRequest) => Promise<unknown>,
+): TokenizerNamespace<string> {
   return {
-    TOKENIZER_CONTROLLER: {
-      idFromName: () => ({ name: "tokenizer:primary" } as DurableObjectId),
-      get: () =>
-        ({
-          estimate: vi.fn().mockResolvedValue(result),
-        } as unknown as DurableObjectStub<TokenizerController>),
-    },
-  } as unknown as Env;
+    idFromName: (name) => name,
+    get: () => ({ tokenize: call }),
+  };
 }
 
-function envWithRejectedEstimate(error: Error): Env {
-  return {
-    TOKENIZER_CONTROLLER: {
-      idFromName: () => ({ name: "tokenizer:primary" } as DurableObjectId),
-      get: () =>
-        ({
-          estimate: vi.fn().mockRejectedValue(error),
-        } as unknown as DurableObjectStub<TokenizerController>),
-    },
-  } as unknown as Env;
-}
+describe("tokenizeInput", () => {
+  it("returns a validated result from the tokenizer RPC", async () => {
+    const outcome = await tokenizeInput(
+      namespaceWith(async () => ({ estimatedInputTokens: 9, estimationPath: "exact_bpe" })),
+      request,
+    );
 
-function envWithStubResolutionError(error: Error): Env {
-  return {
-    TOKENIZER_CONTROLLER: {
-      idFromName: () => { throw error; },
-      get: () => ({} as unknown as DurableObjectStub<TokenizerController>),
-    },
-  } as unknown as Env;
-}
-
-describe("tokenize", () => {
-  it("returns resolved result on successful RPC", async () => {
-    const env = envWithEstimate({
-      kind: "resolved",
-      result: { estimatedInputTokens: 9, estimationPath: "exact_bpe" },
-    });
-    const outcome = await tokenize(env, baseRequest);
     expect(outcome).toEqual({
       kind: "resolved",
       result: { estimatedInputTokens: 9, estimationPath: "exact_bpe" },
     });
   });
 
-  it("returns unavailable when the outcome kind is not resolved", async () => {
-    const env = envWithEstimate({
-      kind: "unavailable",
-    });
-    const outcome = await tokenize(env, baseRequest);
-    expect(outcome).toEqual({ kind: "unavailable" });
-  });
-
-  it("returns unavailable when the RPC throws", async () => {
-    const env = envWithRejectedEstimate(new Error("DO unavailable"));
-    const outcome = await tokenize(env, baseRequest);
-    expect(outcome).toEqual({ kind: "unavailable" });
-  });
-
-  it("returns unavailable when the result shape is invalid", async () => {
-    const env = envWithEstimate({
-      kind: "resolved",
-      result: {
-        estimatedInputTokens: -1,
-        estimationPath: "exact_bpe",
+  it("fails closed when object lookup throws", async () => {
+    const namespace: TokenizerNamespace<string> = {
+      idFromName: () => {
+        throw new Error("binding missing");
       },
-    });
-    const outcome = await tokenize(env, baseRequest);
-    expect(outcome).toEqual({ kind: "unavailable" });
-  });
+      get: () => ({ tokenize: async () => undefined }),
+    };
 
-  it("returns unavailable when the estimation path is unknown", async () => {
-    const env = envWithEstimate({
-      kind: "resolved",
-      result: {
-        estimatedInputTokens: 9,
-        estimationPath: "unknown_path",
-      },
-    });
-    const outcome = await tokenize(env, baseRequest);
-    expect(outcome).toEqual({ kind: "unavailable" });
-  });
-
-  it("returns unavailable when stub resolution throws", async () => {
-    const env = envWithStubResolutionError(new Error("binding missing"));
-    const outcome = await tokenize(env, baseRequest);
-    expect(outcome).toEqual({ kind: "unavailable" });
+    await expect(tokenizeInput(namespace, request)).resolves.toEqual({ kind: "unavailable" });
   });
 });

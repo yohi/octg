@@ -1,33 +1,16 @@
 {
   "description": "Golden token counts produced by the pre-migration estimateInputTokens() implementation using o200k_base.",
   "cases": [
-    {
-      "inputText": "Hello world",
-      "messageCount": 1,
-      "opaqueInputBytes": 0,
-      "expectedTokens": 9,
-      "estimationPath": "exact_bpe"
-    },
-    {
-      "inputText": "abcabcabc",
-      "messageCount": 3,
-      "opaqueInputBytes": 0,
-      "expectedTokens": 18,
-      "estimationPath": "exact_bpe"
-    },
-    {
-      "inputText": "visible",
-      "messageCount": 1,
-      "opaqueInputBytes": 28,
-      "expectedTokens": 36,
-      "estimationPath": "exact_bpe"
-    },
-    {
-      "inputText": "こんにちは",
-      "messageCount": 1,
-      "opaqueInputBytes": 0,
-      "expectedTokens": 8,
-      "estimationPath": "exact_bpe"
-    }
+    { "name": "empty", "inputText": "", "messageCount": 0, "opaqueInputBytes": 0, "expected": 3 },
+    { "name": "ascii_hello", "inputText": "Hello, world!", "messageCount": 1, "opaqueInputBytes": 0, "expected": 11 },
+    { "name": "japanese", "inputText": "こんにちは、世界！", "messageCount": 1, "opaqueInputBytes": 0, "expected": 11 },
+    { "name": "emoji", "inputText": "Hello 👋🌍", "messageCount": 1, "opaqueInputBytes": 0, "expected": 12 },
+    { "name": "source_code", "inputText": "const answer: number = 42;\nconsole.log(answer);", "messageCount": 2, "opaqueInputBytes": 0, "expected": 23 },
+    { "name": "json", "inputText": "{\"model\":\"gpt-5.6-luna\",\"input\":\"hello\"}", "messageCount": 1, "opaqueInputBytes": 7, "expected": 30 },
+    { "name": "mixed_unicode", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀", "messageCount": 3, "opaqueInputBytes": 11, "expected": 43 },
+    { "name": "long_english_100x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 100, "opaqueInputBytes": 0, "repeat": 100, "expected": 1403 },
+    { "name": "long_japanese_1000x", "inputText": "こんにちは世界。\n", "messageCount": 1000, "opaqueInputBytes": 0, "repeat": 1000, "expected": 7003 },
+    { "name": "long_mixed_500x", "inputText": "OCTG は exact BPE を Durable Object で実行します 🚀\n", "messageCount": 500, "opaqueInputBytes": 0, "repeat": 500, "expected": 11003 },
+    { "name": "long_english_7400x", "inputText": "The quick brown fox jumps over the lazy dog.\n", "messageCount": 1, "opaqueInputBytes": 0, "repeat": 7400, "expected": 74007 }
   ]
 }
