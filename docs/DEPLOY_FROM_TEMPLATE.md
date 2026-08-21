@@ -239,17 +239,28 @@ npm test -w apps/gateway-worker
 npm test -w durable-objects/tokenizer-controller
 ```
 
-次の動作を確認してから deploy してください。
+次の outcome ごとの動作を確認してから deploy してください。
 
-- TokenizerController の exact BPE が成功するまで `quota_reserve` と upstream call が発生しない。
-- malformed RPC result、RPC failure、入力上限超過、算術異常が `500 internal_error` になり、
-  reservation と upstream call が発生しない。
+- TokenizerController の exact BPE が成功するまで `quota_reserve`、in-flight admission、
+  upstream call が発生しない。
+- `work_limit` は HTTP `413` / `request_too_large` / `reject:request_too_large` になり、
+  reservation、in-flight admission、upstream call が発生しない。
+- malformed RPC result、RPC failure、RPC preflight ceiling 超過、Tokenizer RPC 境界の
+  `MAX_INPUT_TEXT_BYTES` 超過は HTTP `500` / `api_error` / `internal_error` /
+  `error:internal_error` になり、reservation、in-flight admission、upstream call が発生しない。
+- `MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536` の `inputText` UTF-8 byte 境界は、
+  `MAX_INPUT_TEXT_BYTES - 1` と `MAX_INPUT_TEXT_BYTES` を受け入れ、
+  `MAX_INPUT_TEXT_BYTES + 1` を Tokenizer RPC では HTTP `500` / `error:internal_error` で拒否する。
+  Worker の HTTP 正規化経路では RPC より前に HTTP `413` / `reject:request_too_large` で拒否する。
+- token budget の算術異常は HTTP `500` / `api_error` / `internal_error` になり、公開 route は
+  `error:internal_error`、resource stage route は `error:arithmetic_error` になる。
 - 74,000 token 級の fixture で exact token count と quota accounting が一致する。
 - Tokenizer stage event が request ID、revision、safe な数値、allowlist 済み outcome だけを含み、
   payload や credential を含まない。
 - Worker から Gateway B への outbound が `cf-aig-max-attempts: 1` で、retry-delay / backoff を
   設定していない。`Idempotency-Key` は空文字・未指定が absent、指定値が UTF-8 255 bytes 以下で、
-  client × pool × UTC day 単位の重複排除に使われる。
+  trim・大小文字変換なしで reserve と Gateway B に転送され、client × pool × UTC day 単位の
+  重複排除に使われる。`clientId` は認証済みクライアントの `auth.id` から導出される。
 
 ## Custom Provider として AI Gateway 経由で公開する
 

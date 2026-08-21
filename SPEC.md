@@ -119,10 +119,11 @@ reserved --release--> released                             # upstream 到達前�
 
 ### 4.3 RPC インターフェース（3 つのみ）
 
-1. `reserve(requestId, tokens, upperBoundTokens, idempotencyKey?, clientId?) -> { ok, remaining, resetAt }`
+1. `reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey?: string, clientId?: string) -> { ok, remaining, resetAt }`
    - 予約量が remaining 内に収まる場合のみ `reservedTokens += tokens`。
    - pool 利用ポリシー（要件第 28 章）に基づく NORMAL / CAUTION / STRICT 判定もここで行う。STRICT 帯では conservative upper bound（`upperBoundTokens`）が remaining 以下の場合のみ許可。
    - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の空文字・未指定は absent として扱い、指定値は UTF-8 255 bytes 以下に制限する。重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
+   - `idempotencyKey` と `clientId` はいずれも任意の `string`。Worker は認証済みクライアントの `auth.id` を `clientId` として導出して渡す。Worker の受信境界では、未指定・`null`・空文字を absent（新規リクエスト）として扱い、非空の有効なキーは trim・大小文字変換などの正規化をせず、そのまま reserve に渡す。255 UTF-8 bytes を超えるキーは reserve や upstream の前に拒否する。Worker が常に `clientId` を渡すため、通常の重複排除範囲は client × pool × UTC day となる。
 2. `settle(requestId, actualTokens) -> { ok }`
    - `reserved` から: `reservedTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。
    - `uncertain` から（Usage API 確定より先に上流 usage が届いた遅延 settle）: `uncertainTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。**予約量の二重減算はしない**（減算対象は遷移元バケットのみ）。
@@ -181,7 +182,7 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
   ```
 
 - TokenizerController の encoder 初期化または encode が通常の `Error` で失敗した場合だけ、同じ DO 内の conservative bytes path（UTF-8 byte 数を base とする）へ切り替える。算術異常、malformed RPC result、RPC failure、入力上限超過は fallback として扱わず fail-closed とする。Gateway Worker と `packages/shared` は BPE encoder を import しない。
-- TokenizerController は RPC 専用であり、`ctx.storage` を使用せず、入力本文・Authorization・API key・tokenizer state を保存しない。`MAX_INPUT_TEXT_BYTES` は 16 MiB から RPC safety margin を引いた値、`MAX_REQUEST_ID_BYTES` は 256 bytes、Worker 側の RPC preflight ceiling は 32 MiB とする。
+- TokenizerController は RPC 専用であり、`ctx.storage` を使用せず、入力本文・Authorization・API key・tokenizer state を保存しない。`MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536`、`MAX_REQUEST_ID_BYTES` は 256 bytes、Worker 側の RPC preflight ceiling は 32 MiB とする。`inputText` の UTF-8 byte 数は `MAX_INPUT_TEXT_BYTES - 1` と `MAX_INPUT_TEXT_BYTES` を受け入れ、`MAX_INPUT_TEXT_BYTES + 1` を拒否する。
 - 安全マージン（プール残量率で段階化）:
   - `remaining > 20%` : `max(256, estimatedInput * 0.02)`
   - `remaining <= 20%`: `max(512, estimatedInput * 0.05)`
@@ -207,9 +208,15 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 
 ### 5.6 Reservation → 上流転送 → Settlement
 
-1. `quota_get_state` の後に TokenizerController RPC を実行する。Tokenizer outcome が unavailable（RPC failure、malformed result、入力上限超過、算術異常）の場合は `500` (`api_error` / `internal_error`, route `error:internal_error`) を返し、`QuotaController.reserve`、in-flight admission、AI Gateway REST を呼び出さない。
-2. `QuotaController.reserve(request_id, reservation, upperBound)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。
-   - Worker は受信リクエストの `Idempotency-Key` ヘッダー（存在する場合）を `QuotaController.reserve()` および Gateway B への upstream 呼び出しに変更せず転送する。同一 key に対する再送は Durable Object 内で重複排除され、完了済み key に対する再送は `409 Conflict` で拒否する。key がない場合は新規リクエストとして扱う。
+1. `quota_get_state` の後に TokenizerController RPC を実行する。outcome は次のとおりである。
+   - `work_limit`（BPE work limit 超過）は HTTP `413`、`invalid_request_error` / `request_too_large`、route `reject:request_too_large` とする。
+   - `unavailable`（RPC failure、malformed result、RPC preflight ceiling 超過、Tokenizer RPC 境界での `MAX_INPUT_TEXT_BYTES` 超過）は HTTP `500`、`api_error` / `internal_error`、route `error:internal_error` とする。
+   - Worker の HTTP 正規化で解決済み入力上限（`MAX_INPUT_TEXT_BYTES` 以下）を超過した場合は Tokenizer RPC より前に HTTP `413`、`invalid_request_error` / `request_too_large`、route `reject:request_too_large` とする。これは RPC unavailable とは別の入力拒否である。
+   - token budget の `arithmetic_error` は HTTP `500`、`api_error` / `internal_error` とする。公開 HTTP route は `error:internal_error`、resource stage event の route は `error:arithmetic_error` とする。
+   - 上記の全 outcome では `QuotaController.reserve`、in-flight admission、AI Gateway REST を呼び出さない。
+2. `QuotaController.reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey?: string, clientId?: string)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。Worker は認証済みクライアントの `auth.id` を `clientId` として渡す。
+   - Worker は有効な非空の受信 `Idempotency-Key` を `QuotaController.reserve()` および Gateway B への upstream 呼び出しへ、trim・大小文字変換なしで変更せず転送する。空文字・未指定は absent としてヘッダーを転送せず、新規リクエストとして扱う。255 UTF-8 bytes を超える値は reserve や upstream の前に HTTP 400 で拒否する。
+   - 同一 key に対する再送は client × pool × UTC day 単位で Durable Object 内で重複排除され、完了済み key を含む既存 entry への再送は `409 Conflict` で拒否する。
 3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する。OCTG の Worker outbound は単一試行とし、隠れた再試行による usage の二重計上を防ぐ：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
    - `cf-aig-max-attempts: 1`
@@ -228,16 +235,18 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 | 状況 | HTTP | `error.message` | `error.type` / `error.code` | `param` | pool 系ヘッダ | 補足 |
 |------|------|-------------------|------------------------------|---------|----------------|------|
 | 無料枠不足 | `429` | `Complimentary quota exceeded for pool '{pool}'.` | `complimentary_quota_exceeded` / `insufficient_quota` | `null` | 付与 | 予約量が当日の `remaining` を超えるが、pool の `limit` 以下の場合。`error` 内に `pool` / `remaining_tokens` / `reset_at` を含める。 |
-| リクエスト過大 | `413` | `Request exceeds the complimentary quota limit for pool '{pool}'.` | `invalid_request_error` / `request_too_large` | `null` | 付与 | conservative upper bound が pool の `limit` 自体を超える場合。`remaining` 不足（limit 以下）は 429 とする。 |
+| リクエスト過大（`work_limit` / upper bound） | `413` | `Request exceeds the complimentary quota limit for pool '{pool}'.` | `invalid_request_error` / `request_too_large` | `null` | 付与 | TokenizerController の `work_limit`、または conservative upper bound が pool の `limit` 自体を超える場合。`remaining` 不足（limit 以下）は 429 とする。 |
+| 入力本文上限超過（Worker 正規化） | `413` | `Request exceeds the configured input size limit.` | `invalid_request_error` / `request_too_large` | `null` | 付与しない | `inputText` / normalized input が Worker の解決済み上限（最大 `MAX_INPUT_TEXT_BYTES`）を超えた場合。Tokenizer RPC、reservation、in-flight、upstream の前に拒否する。 |
 | モデル不許可 | `403` | `The requested model is not allowed for this client.` | `invalid_request_error` / `model_not_allowed` | `model` | pool 確定時のみ付与 | `tools` / `tool_choice` 等の PAID_ONLY リクエストを含む。pool を分類できない場合は `X-OCTG-Request-Id` のみ付与する。 |
 | 不明モデルで paid 必須 | `403` | `The requested model requires paid mode, which is not enabled.` | `invalid_request_error` / `model_requires_paid` | `model` | 付与しない | `complimentary=NONE` で、paid mode が許可されていない場合。 |
 | 非テキスト入力（MVP 未対応） | `400` | `Non-text input is not supported in the MVP.` | `invalid_request_error` / `invalid_request` | `input` | 付与しない | 5.4 の予約前拒否。 |
 | `max_tokens` / `max_completion_tokens` 衝突 | `400` | `max_tokens and max_completion_tokens must match when both are provided.` | `invalid_request_error` / `invalid_request` | `max_tokens` | 付与しない | 5.4 の正規化規則。 |
-| Tokenizer RPC / 算術異常 | `500` | `An internal error occurred.` | `api_error` / `internal_error` | `null` | pool 確定後に付与 | 5.4 の TokenizerController が unavailable、または token budget 算術が不正な場合。reservation・in-flight・upstream は実行しない。 |
+| Tokenizer RPC unavailable | `500` | `An internal error occurred.` | `api_error` / `internal_error` | `null` | pool 確定後に付与 | RPC failure、malformed result、RPC preflight ceiling 超過、Tokenizer RPC 境界の `MAX_INPUT_TEXT_BYTES` 超過。reservation・in-flight・upstream は実行しない。 |
+| Token budget 算術異常 | `500` | `An internal error occurred.` | `api_error` / `internal_error` | `null` | pool 確定後に付与 | 公開 HTTP route は `error:internal_error`、resource stage event の route は `error:arithmetic_error`。reservation・in-flight・upstream は実行しない。 |
 
 - **エラー body の共通契約**: `message`、`type`、`param`、`code` は必須キーとし、`param` が対象外の場合も `null` を返す。`message` は上表の固定値を使用する。テスト・クライアントロジックは原則として `message` ではなく `error.type` / `error.code` / HTTP status を参照するが、固定値はログ・互換性確認用の契約として扱う。
 - **pool 系ヘッダの値**: pool が確定したエラーでは、`X-OCTG-Pool` は小文字の `standard` / `mini`、`X-OCTG-Quota-Limit` は対象 DO の `limit`、`X-OCTG-Quota-Used` は `confirmedTokens + reservedTokens + uncertainTokens`、`X-OCTG-Quota-Remaining` は DO が返す `remaining`、`X-OCTG-Quota-Reset` は次の UTC 00:00 の RFC 3339 timestamp とする。`X-OCTG-Request-Id` は body の `request_id` と同一値にする。
-- **エラー別 route**: `429` は `reject:complimentary_quota`、`413` は `reject:request_too_large`、pool が確定した `403 model_not_allowed` は `reject:model_not_allowed` とする。pool が確定しないエラーでは `X-OCTG-Route` を含む pool 系ヘッダを付与しない。
+- **エラー別 route**: `429` は `reject:complimentary_quota`、`413` は `reject:request_too_large`、Tokenizer RPC unavailable は `error:internal_error`、pool が確定した `403 model_not_allowed` は `reject:model_not_allowed` とする。算術異常は公開 HTTP route が `error:internal_error`、resource stage event が `error:arithmetic_error` である。pool が確定しないエラーでは `X-OCTG-Route` を含む pool 系ヘッダを付与しない。
 
 4 条件の canonical response は以下のとおりとする（`request_id`、pool の残量、reset 時刻、ヘッダ値はリクエストごとの実値に置換する）。
 

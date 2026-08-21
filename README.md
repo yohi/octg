@@ -220,9 +220,21 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動 (http://loc
 TokenizerController は Gateway Worker の `TOKENIZER_CONTROLLER` binding から
 `tokenizer:primary` という固定 ID で呼び出されます。入力文字列は TokenizerController 内で
 `o200k_base` により exact BPE token 数へ変換され、成功するまで QuotaController の
-reservation は実行されません。RPC failure、malformed result、入力上限超過、算術異常は
-内部エラーとして fail-closed になります。TokenizerController は RPC 処理だけを行い、
-入力本文・API key・tokenizer state をログや Durable Object storage に保存しません。
+reservation は実行されません。Tokenizer の outcome は次の契約です。
+
+- `work_limit`（BPE work limit 超過）は HTTP 413、`request_too_large`、
+  `X-OCTG-Route: reject:request_too_large` で拒否します。
+- RPC failure、malformed result、Worker の RPC preflight ceiling 超過、または
+  Tokenizer RPC 境界で `MAX_INPUT_TEXT_BYTES` を超過した場合は unavailable として、
+  HTTP 500、`api_error` / `internal_error`、`X-OCTG-Route: error:internal_error` にします。
+- Worker の HTTP 正規化で入力上限を超過した場合は RPC より前に HTTP 413、
+  `request_too_large`、`reject:request_too_large` で拒否します。
+- token budget の算術異常は HTTP 500、`api_error` / `internal_error`、公開 HTTP route は
+  `error:internal_error` とし、resource stage event の route は `error:arithmetic_error` とします。
+
+いずれも `QuotaController.reserve`、in-flight admission、upstream call は実行しません。
+TokenizerController は RPC 処理だけを行い、入力本文・API key・tokenizer state をログや
+Durable Object storage に保存しません。
 
 ここまででローカル開発環境の準備は完了です。実運用する場合は [テンプレートから新規作成（デプロイする場合）](#テンプレートから新規作成デプロイする場合) を参照してください。
 
@@ -307,7 +319,19 @@ npm test -w durable-objects/tokenizer-controller
 少なくとも、次の条件を満たすことを確認してください。
 
 - `TokenizerController` の exact BPE success 後にだけ `quota_reserve` が発生する。
-- RPC failure、malformed result、16 MiB 境界超過、算術異常では upstream と reservation が発生しない。
+- `work_limit` は HTTP 413 / `request_too_large` / `reject:request_too_large` となり、
+  reservation、in-flight admission、upstream call が発生しない。
+- RPC failure、malformed result、RPC preflight ceiling 超過は HTTP 500 /
+  `api_error` / `internal_error` / `error:internal_error` となり、reservation、in-flight
+  admission、upstream call が発生しない。
+- `MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536` の `inputText` UTF-8 byte 境界を確認する。
+  - `MAX_INPUT_TEXT_BYTES - 1` bytes: 受け入れる。
+  - `MAX_INPUT_TEXT_BYTES` bytes: 受け入れる。
+  - `MAX_INPUT_TEXT_BYTES + 1` bytes: Tokenizer RPC では HTTP 500 / `error:internal_error` で拒否し、
+    reservation、in-flight admission、upstream call を実行しない。Worker の HTTP 正規化経路では
+    RPC より前に HTTP 413 / `reject:request_too_large` で拒否する。
+- token budget の算術異常は HTTP 500 / `api_error` / `internal_error` となり、公開 route は
+  `error:internal_error`、resource stage route は `error:arithmetic_error` になる。
 - 74,000 token 級 fixture で tokenization 結果が安定し、success response の実 usage で settle される。
 - `apps/gateway-worker/wrangler.jsonc` の `TOKENIZER_CONTROLLER` binding と migration `v2` が残っている。
 

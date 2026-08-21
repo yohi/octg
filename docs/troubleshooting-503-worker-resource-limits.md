@@ -61,10 +61,21 @@ authentication
   -> settle, markUncertain, or known pre-upstream release
 ```
 
-TokenizerController RPC は 1 request につき 1 回だけ実行します。RPC failure、malformed result、
-入力上限超過、算術異常は未検証の推定値を使わず、`500 internal_error` として fail-closed になります。
-この場合、`quota_reserve`、in-flight admission、upstream fetch は実行しません。exact BPE は
-Gateway Worker や shared package では実行せず、`TokenizerController` の RPC 境界に隔離します。
+TokenizerController RPC は 1 request につき 1 回だけ実行します。outcome ごとの契約は次のとおりです。
+
+- `work_limit` は HTTP `413`、`request_too_large`、route `reject:request_too_large` です。
+- RPC failure、malformed result、RPC preflight ceiling 超過、Tokenizer RPC 境界の
+  `MAX_INPUT_TEXT_BYTES` 超過は unavailable として HTTP `500 internal_error`、route
+  `error:internal_error` になります。
+- Worker の HTTP 正規化で解決済み入力上限を超過した場合は RPC より前に HTTP `413`
+  `request_too_large`、route `reject:request_too_large` になります。
+- token budget の算術異常は HTTP `500 internal_error` です。公開 HTTP route は
+  `error:internal_error`、resource stage event の route は `error:arithmetic_error` です。
+
+上記の全ケースで未検証の推定値を使わず、`quota_reserve`、in-flight admission、upstream fetch
+は実行しません。障害時は response の HTTP status / `error.code` / `X-OCTG-Route` と、同じ
+request ID の `octg.resource_stage` event を照合してください。exact BPE は Gateway Worker や
+shared package では実行せず、`TokenizerController` の RPC 境界に隔離します。
 
 TokenizerController の estimate は次の境界を使用します。
 
