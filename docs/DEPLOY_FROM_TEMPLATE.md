@@ -247,6 +247,9 @@ npm test -w durable-objects/tokenizer-controller
 - 74,000 token 級の fixture で exact token count と quota accounting が一致する。
 - Tokenizer stage event が request ID、revision、safe な数値、allowlist 済み outcome だけを含み、
   payload や credential を含まない。
+- Worker から Gateway B への outbound が `cf-aig-max-attempts: 1` で、retry-delay / backoff を
+  設定していない。`Idempotency-Key` は空文字・未指定が absent、指定値が UTF-8 255 bytes 以下で、
+  client × pool × UTC day 単位の重複排除に使われる。
 
 ## Custom Provider として AI Gateway 経由で公開する
 

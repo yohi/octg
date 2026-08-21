@@ -119,10 +119,10 @@ reserved --release--> released                             # upstream 到達前�
 
 ### 4.3 RPC インターフェース（3 つのみ）
 
-1. `reserve(requestId, tokens, upperBoundTokens) -> { ok, remaining, resetAt }`
+1. `reserve(requestId, tokens, upperBoundTokens, idempotencyKey?, clientId?) -> { ok, remaining, resetAt }`
    - 予約量が remaining 内に収まる場合のみ `reservedTokens += tokens`。
    - pool 利用ポリシー（要件第 28 章）に基づく NORMAL / CAUTION / STRICT 判定もここで行う。STRICT 帯では conservative upper bound（`upperBoundTokens`）が remaining 以下の場合のみ許可。
-   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
+   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の空文字・未指定は absent として扱い、指定値は UTF-8 255 bytes 以下に制限する。重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
 2. `settle(requestId, actualTokens) -> { ok }`
    - `reserved` から: `reservedTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。
    - `uncertain` から（Usage API 確定より先に上流 usage が届いた遅延 settle）: `uncertainTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。**予約量の二重減算はしない**（減算対象は遷移元バケットのみ）。
@@ -210,11 +210,11 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 1. `quota_get_state` の後に TokenizerController RPC を実行する。Tokenizer outcome が unavailable（RPC failure、malformed result、入力上限超過、算術異常）の場合は `500` (`api_error` / `internal_error`, route `error:internal_error`) を返し、`QuotaController.reserve`、in-flight admission、AI Gateway REST を呼び出さない。
 2. `QuotaController.reserve(request_id, reservation, upperBound)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。
    - Worker は受信リクエストの `Idempotency-Key` ヘッダー（存在する場合）を `QuotaController.reserve()` および Gateway B への upstream 呼び出しに変更せず転送する。同一 key に対する再送は Durable Object 内で重複排除され、完了済み key に対する再送は `409 Conflict` で拒否する。key がない場合は新規リクエストとして扱う。
-3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する：
+3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する。OCTG の Worker outbound は単一試行とし、隠れた再試行による usage の二重計上を防ぐ：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
-   - `cf-aig-max-attempts: 2`
-   - `cf-aig-retry-delay: 1000` / `cf-aig-backoff: exponential`
-   - リトライ対象は AI Gateway 側の既定（ネットワークエラーおよび上流 5xx）に限定する。クライアント起因の 4xx（認証・バリデーション等）はリトライしない。
+   - `cf-aig-max-attempts: 1`
+   - `cf-aig-collect-log-payload: false`
+   - `Idempotency-Key` は受信値を変更せず、valid な場合のみ転送する。自動 retry は行わず、クライアント切断・usage 取得不能・upstream 通信失敗は `markUncertain` とする。
 4. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
 5. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。
 6. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。

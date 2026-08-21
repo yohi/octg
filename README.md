@@ -43,6 +43,7 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 5. Paid fallback は明示的 opt-in がない限り発生させない
 6. exact BPE は TokenizerController に隔離し、Gateway と shared package に encoder を依存させない
 7. TokenizerController は RPC 専用で、入力本文や tokenizer state を Durable Object storage に保存しない
+8. `Idempotency-Key` は client × pool × UTC 日単位で重複排除し、空文字を absent、指定値を UTF-8 255 bytes 以下として扱う。Worker の upstream 自動 retry は無効化する
 
 ## はじめに：あなたの立場に応じた手順
 

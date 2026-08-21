@@ -96,6 +96,11 @@ AI Gateway へ送る `cf-aig-collect-log-payload` は `false` とし、payload c
 無効化します。D1 は監査・証跡用途だけであり、quota の authoritative state は
 Durable Object に置きます。
 
+Worker から Gateway B への outbound は `cf-aig-max-attempts: 1` とし、retry-delay / backoff を
+設定しません。隠れた再試行で usage が二重計上されないようにし、upstream 通信失敗・usage
+取得不能・クライアント切断は `markUncertain` へ倒します。`Idempotency-Key` は空文字・未指定を
+absent、指定値を UTF-8 255 bytes 以下として client × pool × UTC day 単位で重複排除します。
+
 ## 観測ゲート
 
 同じ request ID と deployment revision について、次の証跡が揃った場合だけ原因別 branch
