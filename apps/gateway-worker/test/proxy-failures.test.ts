@@ -591,6 +591,29 @@ describe("proxy failure paths", () => {
     expect((await stub().getState()).uncertainTokens).toBeGreaterThan(0);
   });
 
+  it("does not retry an upstream 5xx and marks the reservation uncertain", async () => {
+    // Given: a provider failure that may have consumed tokens before returning 5xx.
+    let upstreamCallCount = 0;
+    let upstreamHeaders: Headers | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamCallCount += 1;
+      upstreamHeaders = new Headers(init?.headers);
+      return new Response(JSON.stringify({ error: { code: "provider_error" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    // When: the request reaches the provider boundary.
+    const response = await request();
+
+    // Then: the Worker performs one attempt and retains the reserved quota as uncertain.
+    expect(response.status).toBe(503);
+    expect(upstreamCallCount).toBe(1);
+    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("1");
+    expect((await stub().getState()).uncertainTokens).toBeGreaterThan(0);
+  });
+
   it("releases a reservation when upstream configuration is missing", async () => {
     const original = env.OCTG_UPSTREAM_API_TOKEN;
     Object.defineProperty(env, "OCTG_UPSTREAM_API_TOKEN", { value: "", configurable: true });

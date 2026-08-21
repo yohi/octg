@@ -172,6 +172,44 @@ describe("proxy stream finalization", () => {
     }
   });
 
+  it("marks a reservation uncertain when the client disconnects after usage was streamed", async () => {
+    // Given: a streamed response that has exposed usage but remains open.
+    const controller = controllerFor("2026-10-13");
+    const requestId = "stream-client-disconnect";
+    await controller.reserve(requestId, 10, 10);
+    const lease = await acquireLease(controller, requestId);
+    const context = createExecutionContext();
+    const upstream = new Response(new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode('data: {"usage":{"total_tokens":5}}\n\n'));
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+
+    const response = proxyStream(
+      upstream,
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+    const reader = response.body?.getReader();
+    if (!reader) throw new TypeError("Expected a streamed response body.");
+
+    // When: the client cancels after receiving the first chunk.
+    await reader.read();
+    await reader.cancel("client disconnected");
+    await waitOnExecutionContext(context);
+
+    // Then: the reservation remains fail-closed instead of settling partial usage.
+    expect(await controller.getState()).toMatchObject({
+      confirmedTokens: 0,
+      reservedTokens: 0,
+      uncertainTokens: 10,
+    });
+  });
+
   it("treats audit insertion rejection as best effort while releasing the in-flight lease", async () => {
     // Given: settlement succeeds but the audit insertion promise rejects after a lease was acquired.
     const controller = controllerFor("2026-10-07");

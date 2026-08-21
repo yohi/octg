@@ -26,6 +26,7 @@ export function proxyStream(
   const { lease, ttlMs, renewalMs } = options;
   const { generation, requestId } = lease;
   let finalized = false;
+  let clientDisconnected = false;
   let usage: Usage | undefined;
   let renewalFailed = false;
   let renewalError: unknown;
@@ -60,8 +61,8 @@ export function proxyStream(
     if (finalized) return;
     finalized = true;
     stopRenewal();
-    if (renewalFailed) {
-      await finalizeUncertain(renewalError);
+    if (renewalFailed || clientDisconnected) {
+      await finalizeUncertain(renewalFailed ? renewalError : undefined);
       return;
     }
     try {
@@ -155,6 +156,7 @@ export function proxyStream(
       ctx.waitUntil(finalize());
     },
     cancel() {
+      clientDisconnected = true;
       ctx.waitUntil(finalize());
     },
   }), { signal: streamAbort.signal });

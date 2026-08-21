@@ -70,4 +70,36 @@ describe("QuotaController.reserve idempotency key", () => {
       requestId: "req-1",
     });
   });
+
+  it("treats an empty idempotency key as absent", async () => {
+    // Given: an unused quota pool and two requests with an empty key.
+    const controller = stub("2026-08-15");
+
+    // When: both requests reserve with an empty idempotency key.
+    const first = await controller.reserve("req-empty-1", 100, 100, "");
+    const second = await controller.reserve("req-empty-2", 100, 100, "");
+    const state = await controller.getState();
+
+    // Then: the empty value does not create a deduplication entry.
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(state.requestCount).toBe(2);
+  });
+
+  it("rejects an idempotency key over 255 UTF-8 bytes", async () => {
+    // Given: a direct RPC call with a key beyond the documented storage bound.
+    const controller = stub("2026-08-16");
+
+    // When: the key crosses the QuotaController boundary.
+    const reservation = runInDurableObject(controller, async (instance) => {
+      if (!hasReserve(instance)) {
+        throw new TypeError("Expected a QuotaController instance.");
+      }
+      return instance.reserve("req-too-long-key", 100, 100, "k".repeat(256));
+    });
+
+    // Then: the invalid key is rejected before any reservation is stored.
+    await expect(reservation).rejects.toThrow("Idempotency-Key must be at most 255 UTF-8 bytes.");
+    expect(await controller.getState()).toMatchObject({ reservedTokens: 0, requestCount: 0 });
+  });
 });
