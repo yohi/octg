@@ -119,18 +119,65 @@ API Key:  <Gateway A の Provider Key に登録した octg_sk_xxx>
 
 この経路では `/v1/chat/completions` と `/v1/responses` の両方を利用できます。
 
-#### OpenCode で Responses API を利用する場合
+この表記は、クライアントから Provider Key を送る一般的な構成です。Gateway A の
+Provider Key を BYOK として保存する場合は、次の OpenCode 設定のようにクライアントから
+API key や `Authorization` ヘッダーを送信しません。
 
-OpenCode の provider ID `cloudflare-ai-gateway-octg` はローカル設定上の名前です。
-Cloudflare の Custom Provider slug と URL パスは従来どおり `custom-octg` であり、
-provider ID を URL に置き換えないでください。この provider は native OpenAI SDK の
-Responses API を使用します。
+#### OpenCode で Responses API を利用する場合（OpenCode v2 設定形式）
 
-OpenCode 側では `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_GATEWAY_ID`、Gateway A の
-Run token に対応する `CLOUDFLARE_API_TOKEN` だけを設定し、Custom Provider に登録した
-`OCTG_SK_REMOTE` や OpenAI API key を設定しません。Gateway A に保存された Custom
-Provider の credential を利用するため、OpenCode の provider 設定から OCTG
-クライアントキーを直接送信しない構成にします。
+以下は OpenCode v2 provider configuration（[公式 docs](https://opencode.ai/v2/docs/providers)）に
+対応する `opencode.jsonc` の例です。
+`package` は Responses API 用の provider runtime、`body.store` は保存を無効にする指定、
+`headers` の値は OpenCode の仕様に合わせて文字列で記述します。
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cloudflare-ai-gateway-octg/gpt-5.6-luna",
+  "providers": {
+    "cloudflare-ai-gateway-octg": {
+      "name": "OCTG via Cloudflare AI Gateway",
+      "package": "@opencode-ai/ai/providers/openai/responses",
+      "settings": {
+        "baseURL": "https://gateway.ai.cloudflare.com/v1/{env:CLOUDFLARE_ACCOUNT_ID}/{env:CLOUDFLARE_GATEWAY_ID}/custom-octg/v1"
+      },
+      "headers": {
+        "cf-aig-authorization": "Bearer {env:CLOUDFLARE_API_TOKEN}",
+        "cf-aig-collect-log-payload": "false",
+        "cf-aig-skip-cache": "true"
+      },
+      "body": {
+        "store": false
+      },
+      "models": {
+        "gpt-5.6-luna": {
+          "name": "gpt-5.6 Luna",
+          "modelID": "gpt-5.6-luna"
+        }
+      }
+    }
+  }
+}
+```
+
+起動前に次の環境変数を設定してください。ここでの `CLOUDFLARE_API_TOKEN` は Gateway A
+の **Run token** であり、Cloudflare 管理 API 用 token や OpenAI API key ではありません。
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID="<account_id>"
+export CLOUDFLARE_GATEWAY_ID="<gateway_a_id>"
+export CLOUDFLARE_API_TOKEN="<gateway_a_run_token>"
+```
+
+OpenCode は `{env:NAME}` を環境変数の値へ展開します。`env`、`apiKey`、
+`Authorization` はこの provider に設定しないでください。Gateway A の Provider Key に
+登録した `octg_sk_*` と Gateway B の OpenAI key は Cloudflare 側の BYOK / Secrets Store
+に残し、OpenCode の設定・ソースコード・ログへ配布しません。
+
+この例では provider ID `cloudflare-ai-gateway-octg`、Gateway A の登録用 provider slug
+`octg`、呼び出し URL に現れる Custom Provider slug `custom-octg` を使い分けています。
+Responses の履歴はリクエスト本文に含めて再送し、`item_reference`、
+`previous_response_id`、`conversation` には依存しないでください。
 
 詳細なセットアップ手順とトラブルシューティングは [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照してください。
 
