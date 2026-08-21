@@ -47,7 +47,8 @@ import {
   type ResourceStageRoute,
 } from "./resource-observation";
 import { proxyStream } from "./stream";
-import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller";
+import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller/contracts";
+import { assertNever } from "./exhaustiveness";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
@@ -400,7 +401,7 @@ export async function handleProxy(
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));
       default:
-        return assertNever(tokenizeOutcome);
+        return assertNever(tokenizeOutcome, "proxy outcome");
     }
 
     const estimatedInput = tokenizedResult.estimatedInputTokens;
@@ -444,7 +445,7 @@ export async function handleProxy(
         finishTokenizeSuccess();
         break;
       default:
-        return assertNever(budget);
+        return assertNever(budget, "proxy outcome");
     }
 
     const { maxOutputTokens, reservation, upperBound } = budget;
@@ -715,8 +716,4 @@ export async function handleProxy(
     completeAudit(ctx, env, requestId, auditInserted, { status: auditStatus, billingClass: "none" });
     return errorResponse(errInternal(requestId));
   }
-}
-
-function assertNever(value: never): never {
-  throw new TypeError(`Unexpected proxy outcome: ${String(value)}`);
 }

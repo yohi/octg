@@ -16,13 +16,15 @@ export type TokenizeRpcResult = TokenizeResult | { readonly kind: "work_limit" }
 
 export const MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536;
 export const MAX_REQUEST_ID_BYTES = 256;
+export const MAX_BPE_WORK_UNITS = 64 * 1024 * 1024;
+const UTF8_ENCODER = new TextEncoder();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
+  return UTF8_ENCODER.encode(value).byteLength;
 }
 
 export function parseTokenizeRequest(value: unknown): TokenizeRequest {

@@ -1,5 +1,9 @@
 import { env, SELF } from "cloudflare:test";
-import { MAX_INPUT_TEXT_BYTES, type TokenizerController } from "@octg/tokenizer-controller";
+import type { TokenizerController } from "@octg/tokenizer-controller";
+import {
+  MAX_BPE_WORK_UNITS,
+  MAX_INPUT_TEXT_BYTES,
+} from "@octg/tokenizer-controller/contracts";
 import {
   MAX_NORMALIZED_INPUT_BYTES,
   safetyMargin,
@@ -36,12 +40,13 @@ const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
   body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }], max_completion_tokens: 100 }),
 });
+const WORK_LIMIT_INPUT_LENGTH = Math.floor(Math.sqrt(MAX_BPE_WORK_UNITS)) + 1;
 const realWorkLimitRequest = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   method: "POST",
   headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
   body: JSON.stringify({
     model: "gpt-5",
-    messages: [{ role: "user", content: "x".repeat(16_384) }],
+    messages: [{ role: "user", content: "x".repeat(WORK_LIMIT_INPUT_LENGTH) }],
     max_completion_tokens: 1,
   }),
 });
@@ -487,7 +492,16 @@ describe("proxy failure paths", () => {
     const inputText = "visible-summary";
     const opaqueInputBytes = new TextEncoder().encode("秘密状態").byteLength;
     const maxOutputTokens = 10;
-    const visibleSummaryTokens = 2;
+    const tokenizerResult = await env.TOKENIZER_CONTROLLER.get(
+      env.TOKENIZER_CONTROLLER.idFromName("tokenizer:primary"),
+    ).tokenize({
+      requestId: "req_opaque_reasoning_expected",
+      inputText,
+      messageCount: 1,
+      opaqueInputBytes: 0,
+    });
+    if ("kind" in tokenizerResult) throw new TypeError("Expected an exact tokenizer result.");
+    const visibleSummaryTokens = tokenizerResult.estimatedInputTokens - 4 - 3;
     const estimatedInput = visibleSummaryTokens + opaqueInputBytes + 4 + 3;
     const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
     const expectedReservation = estimatedInput + maxOutputTokens + margin;

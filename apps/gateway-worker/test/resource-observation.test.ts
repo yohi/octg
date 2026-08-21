@@ -79,7 +79,13 @@ describe("resource stage event contract", () => {
       quotaReserved: false,
       upstreamReached: false,
     };
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
-    expect(() => emitResourceStage(event)).not.toThrow();
+    emitResourceStage(event);
+
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      quotaReserved: false,
+      upstreamReached: false,
+    }));
   });
 });

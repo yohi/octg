@@ -36,28 +36,28 @@ describe("parseTokenizeRequest", () => {
   it("accepts inputText at exactly MAX_INPUT_TEXT_BYTES", () => {
     expect(() => parseTokenizeRequest({
       ...valid,
-      inputText: "x".repeat(MAX_INPUT_TEXT_BYTES),
+      inputText: "あ".repeat(MAX_INPUT_TEXT_BYTES / 3),
     })).not.toThrow();
   });
 
   it("rejects inputText one byte over MAX_INPUT_TEXT_BYTES", () => {
     expect(() => parseTokenizeRequest({
       ...valid,
-      inputText: "x".repeat(MAX_INPUT_TEXT_BYTES + 1),
+      inputText: `${"あ".repeat(MAX_INPUT_TEXT_BYTES / 3)}a`,
     })).toThrow(TypeError);
   });
 
   it("accepts requestId at exactly MAX_REQUEST_ID_BYTES", () => {
     expect(() => parseTokenizeRequest({
       ...valid,
-      requestId: "r".repeat(MAX_REQUEST_ID_BYTES),
+      requestId: `${"あ".repeat(Math.floor((MAX_REQUEST_ID_BYTES - 1) / 3))}a`,
     })).not.toThrow();
   });
 
   it("rejects requestId one byte over MAX_REQUEST_ID_BYTES", () => {
     expect(() => parseTokenizeRequest({
       ...valid,
-      requestId: "r".repeat(MAX_REQUEST_ID_BYTES + 1),
+      requestId: `${"あ".repeat(Math.floor((MAX_REQUEST_ID_BYTES - 1) / 3))}aa`,
     })).toThrow(TypeError);
   });
 });

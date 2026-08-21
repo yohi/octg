@@ -1,7 +1,7 @@
 import { init, Tiktoken } from "tiktoken/lite/init";
 import wasm from "tiktoken/lite/tiktoken_bg.wasm";
 import o200kBase from "tiktoken/encoders/o200k_base";
-import type { TokenizeRequest, TokenizeResult } from "./contracts";
+import { MAX_BPE_WORK_UNITS, type TokenizeRequest, type TokenizeResult } from "./contracts";
 import {
   type TokenizerStage,
   type TokenizerStageEvent,
@@ -12,9 +12,7 @@ type Encoding = {
 };
 export type EncodingFactory = () => Encoding;
 
-export const MAX_BPE_WORK_UNITS = 64 * 1024 * 1024;
-
-const BPE_WORK_CHUNK_PATTERN = /[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+(?:'[sStT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]{2}|'[dD])?| ?[^\s\p{L}\p{N}]+[\r\n/]*|[\p{N}]{1,3}|[^\s\p{L}\p{N}]+|\s+/gu;
+const BPE_WORK_CHUNK_PATTERN = /[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]{2}|'[dD])?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]{2}|'[dD])?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
 const UTF8_ENCODER = new TextEncoder();
 
 await init((imports) => WebAssembly.instantiate(wasm, imports));
@@ -241,7 +239,7 @@ export class TokenizerEstimator {
     readonly result: TokenizeResult;
     readonly byteCount: number;
   } {
-    const byteCount = new TextEncoder().encode(request.inputText).byteLength;
+    const byteCount = UTF8_ENCODER.encode(request.inputText).byteLength;
     return {
       byteCount,
       result: {

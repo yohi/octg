@@ -9,28 +9,7 @@ const request: TokenizeRequest = {
   opaqueInputBytes: 0,
 };
 
-function namespaceWith(
-  call: (input: TokenizeRequest) => Promise<unknown>,
-): TokenizerNamespace<string> {
-  return {
-    idFromName: (name) => name,
-    get: () => ({ tokenize: call }),
-  };
-}
-
 describe("tokenizeInput", () => {
-  it("returns a validated result from the tokenizer RPC", async () => {
-    const outcome = await tokenizeInput(
-      namespaceWith(async () => ({ estimatedInputTokens: 9, estimationPath: "exact_bpe" })),
-      request,
-    );
-
-    expect(outcome).toEqual({
-      kind: "resolved",
-      result: { estimatedInputTokens: 9, estimationPath: "exact_bpe" },
-    });
-  });
-
   it("fails closed when object lookup throws", async () => {
     const namespace: TokenizerNamespace<string> = {
       idFromName: () => {

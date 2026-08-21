@@ -1,6 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import type { TokenizeRequest } from "@octg/tokenizer-controller";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 const inputText = "The quick brown fox jumps over the lazy dog.\n".repeat(7_400);
@@ -29,6 +29,11 @@ function eventValues(calls: readonly unknown[][], name: string): Record<string, 
 describe("74k tokenizer regression", () => {
   beforeEach(async () => {
     await seedClient();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("returns the exact BPE count through the real Durable Object", async () => {

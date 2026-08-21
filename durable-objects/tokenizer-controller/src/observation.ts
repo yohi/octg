@@ -43,8 +43,7 @@ export function emitTokenizerStage(event: TokenizerStageEvent): void {
       ...(event.failureCategory === undefined ? {} : { failureCategory: event.failureCategory }),
     };
     console.log(runtimeEvent);
-  } catch (error) {
+  } catch {
     // no-excuse-ok: catch — telemetry must never make tokenization fail.
-    void error;
   }
 }

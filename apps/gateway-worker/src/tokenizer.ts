@@ -4,7 +4,7 @@ import {
   type TokenizeRequest,
   type TokenizeRpcResult,
   type TokenizeResult,
-} from "@octg/tokenizer-controller";
+} from "@octg/tokenizer-controller/contracts";
 
 const RPC_LIMIT_BYTES = 32 * 1024 * 1024;
 
@@ -45,9 +45,8 @@ export async function tokenizeInput<Id>(
     return "kind" in result
       ? { kind: "request_too_large" }
       : { kind: "resolved", result };
-  } catch (error) {
+  } catch {
     // no-excuse-ok: catch — the RPC boundary converts every failure to fail-closed.
-    void error;
     return { kind: "unavailable" };
   }
 }

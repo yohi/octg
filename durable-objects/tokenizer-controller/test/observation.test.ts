@@ -79,7 +79,13 @@ describe("emitTokenizerStage", () => {
         phase: "start",
       });
 
-      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith({
+        event: "octg.tokenizer_stage",
+        requestId: "req_stage",
+        revisionId: "revision_test",
+        stage,
+        phase: "start",
+      });
     },
   );
 });

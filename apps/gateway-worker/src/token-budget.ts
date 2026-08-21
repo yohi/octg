@@ -1,4 +1,5 @@
 import { decideOutput, safetyMargin, upperBoundOf } from "@octg/shared";
+import { assertNever } from "./exhaustiveness";
 
 export interface TokenBudgetArguments {
   readonly estimatedInput: number;
@@ -49,11 +50,10 @@ export function resolveTokenBudget(args: TokenBudgetArguments): TokenBudgetOutco
           : { kind: "arithmetic_error" };
       }
       default:
-        return assertNever(output);
+        return assertNever(output, "output decision");
     }
-  } catch (error) {
+  } catch {
     // no-excuse-ok: catch — invalid arithmetic is a typed fail-closed outcome.
-    void error;
     return { kind: "arithmetic_error" };
   }
 }
@@ -72,8 +72,4 @@ function validArguments(args: TokenBudgetArguments): boolean {
 
 function validNonNegativeSafeInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
-}
-
-function assertNever(value: never): never {
-  throw new TypeError(`Unexpected output decision: ${String(value)}`);
 }

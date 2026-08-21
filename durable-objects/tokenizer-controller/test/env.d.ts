@@ -1,4 +1,3 @@
-import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import type { TokenizerController, TokenizerControllerEnv } from "../src/tokenizer-controller";
 
 declare global {

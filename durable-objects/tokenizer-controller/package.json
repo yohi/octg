@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./contracts": "./src/contracts.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -15,7 +16,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.3",
-    "@cloudflare/workers-types": "^4.20250617.0",
+    "@cloudflare/workers-types": "^5.20260820.1",
     "vitest": "^4.1.0"
   }
 }

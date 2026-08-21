@@ -64,6 +64,8 @@ describe("Tokenizer RPC proxy integration", () => {
   afterEach(() => {
     if (originalTokenizerBinding) {
       Object.defineProperty(env, "TOKENIZER_CONTROLLER", originalTokenizerBinding);
+    } else {
+      Reflect.deleteProperty(env, "TOKENIZER_CONTROLLER");
     }
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
