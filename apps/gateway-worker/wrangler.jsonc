@@ -3,6 +3,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false }],
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "observability": {
     "enabled": true,

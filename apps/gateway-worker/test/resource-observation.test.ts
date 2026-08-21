@@ -68,4 +68,24 @@ describe("resource stage event contract", () => {
 
     expect(() => emitResourceStage(event)).not.toThrow();
   });
+
+  it("accepts arithmetic error as an internal tokenize route", () => {
+    const event: ResourceStageEvent = {
+      ...baseEvent,
+      route: "error:arithmetic_error",
+      phase: "finish",
+      durationMs: 1,
+      outcome: "exception",
+      quotaReserved: false,
+      upstreamReached: false,
+    };
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitResourceStage(event);
+
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      quotaReserved: false,
+      upstreamReached: false,
+    }));
+  });
 });

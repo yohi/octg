@@ -358,6 +358,8 @@ describe("QuotaController in-flight leases", () => {
   });
 
   it("keeps duplicate acquire and release signals from freeing another request", async () => {
+    // Keep the 50 ms lease from expiring while the Durable Object storage is busy.
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
     const controller = stub("STANDARD", "2026-09-10");
     const first = await controller.acquireInFlight("request-one", 1, 50);
     if (!first.ok) throw new TypeError("Expected the first lease acquisition to succeed.");

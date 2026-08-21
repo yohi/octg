@@ -1,11 +1,8 @@
-import {
-  tokenize,
-  type TokenizeOutcome,
-} from "./tokenizer";
+import { tokenizeInput } from "./tokenizer";
+import { resolveTokenBudget } from "./token-budget";
 import {
   buildOctgHeaders,
   classifyModel,
-  decideOutput,
   DEFAULT_IN_FLIGHT_LEASE_RENEWAL_MS,
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   errInputTooLarge,
@@ -24,9 +21,7 @@ import {
   normalizeChatCompletions,
   normalizeResponses,
   quotaIdOf,
-  safetyMargin,
   toPoolLower,
-  upperBoundOf,
   utcDayOf,
   type QuotaSnapshot,
   type QuotaView,
@@ -52,54 +47,13 @@ import {
   type ResourceStageRoute,
 } from "./resource-observation";
 import { proxyStream } from "./stream";
+import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller/contracts";
+import { assertNever } from "./exhaustiveness";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
-// Durable Object RPC uses V8 serialization carried over Cap'n Proto. Strings are
-// length-prefixed and do NOT undergo JSON escaping. However, V8 may encode strings
-// as UTF-16 (2 bytes per code unit) when non-Latin-1 characters are present. To stay
-// safely below the 32 MiB RPC limit even in the worst case, we reserve 65,536 bytes
-// of overhead and cap the input byte length at half the RPC limit minus that overhead.
-// This guarantees that the serialized TokenizeRequest stays strictly below 32 MiB
-// regardless of which V8 string encoding path is taken. Never increase this ceiling
-// without also defining a stream or chunk protocol.
-//
-// Worst-case serialized size for a ceiling request is:
-//   object envelope + 4 property-name strings + requestId string + inputText string
-//   + 2 numbers. Property names are 9/9/12/16 chars. requestId is 29 chars. A number
-//   takes 1 tag byte + 8 value bytes. A two-byte V8 string takes 1 tag byte + 4 length
-//   bytes + 2 bytes/code unit. At the ceiling this totals less than 32 MiB.
-//
-// Normalization guarantees inputTextBytes + opaqueInputBytes <= resolveMaxInputBytes(),
-// so the Gateway never emits a TokenizeRequest whose serialized RPC payload reaches
-// the 32 MiB limit.
-const RPC_SIZE_LIMIT_BYTES = 32 * 1024 * 1024;
-export const MAX_TOKENIZATION_RPC_INPUT_BYTES = 16 * 1024 * 1024 - 65_536;
-
-export function estimateRpcPayloadSize(request: {
-  requestId: string;
-  inputText: string;
-  messageCount: number;
-  opaqueInputBytes: number;
-}): number {
-  // V8 ValueSerializer worst-case string encoding: 1-byte tag + 4-byte length +
-  // 2 bytes per UTF-16 code unit. This is conservative: pure ASCII strings are
-  // encoded as 1 byte/char in practice, and the actual RPC transport uses
-  // Cap'n Proto framing, not JSON escaping.
-  const v8StringSize = (s: string) => 1 + 4 + s.length * 2;
-  // Numbers are encoded as 1-byte tag + 8-byte IEEE-754 double.
-  const v8NumberSize = 1 + 8;
-  // Object envelope plus the four property-name strings, worst-case two-byte encoding.
-  const propertyNameSizes = [9, 9, 12, 16].map((len) => 1 + 4 + len * 2);
-  const objectOverhead = 16 + propertyNameSizes.reduce((a, b) => a + b, 0);
-  return (
-    objectOverhead +
-    v8StringSize(request.requestId) +
-    v8StringSize(request.inputText) +
-    2 * v8NumberSize
-  );
-}
+const MAX_TOKENIZATION_RPC_INPUT_BYTES = MAX_INPUT_TEXT_BYTES;
 
 export type InFlightLeaseReleaser = Pick<QuotaController, "releaseInFlight">;
 
@@ -412,76 +366,89 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    const rpcPayloadSize = estimateRpcPayloadSize({
+    const tokenizeOutcome = await tokenizeInput(env.TOKENIZER_CONTROLLER, {
       requestId,
       inputText: requestData.inputText,
       messageCount: requestData.messageCount,
       opaqueInputBytes: requestData.opaqueInputBytes,
     });
-    if (rpcPayloadSize >= RPC_SIZE_LIMIT_BYTES) {
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
-        route: "error:tokenizer_unavailable",
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-        quotaReserved: false,
-        upstreamReached: false,
-      });
-      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errInternal(requestId, { quota: snapshot }));
-    }
-    let tokenizeOutcome: TokenizeOutcome;
-    try {
-      tokenizeOutcome = await tokenize(env, {
-        requestId,
-        inputText: requestData.inputText,
-        messageCount: requestData.messageCount,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-      });
-    } catch {
-      tokenizeOutcome = { kind: "unavailable" };
+
+    let tokenizedResult: TokenizeResult;
+    switch (tokenizeOutcome.kind) {
+      case "resolved":
+        tokenizedResult = tokenizeOutcome.result;
+        break;
+      case "request_too_large":
+        finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "rejected", {
+          route: "reject:request_too_large",
+          inputBytes: requestData.inputBytes,
+          inputTextBytes: requestData.inputTextBytes,
+          opaqueInputBytes: requestData.opaqueInputBytes,
+          quotaReserved: false,
+          upstreamReached: false,
+        });
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errRequestTooLarge(snapshot, requestId));
+      case "unavailable":
+        finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+          route: "error:tokenizer_unavailable",
+          inputBytes: requestData.inputBytes,
+          inputTextBytes: requestData.inputTextBytes,
+          opaqueInputBytes: requestData.opaqueInputBytes,
+          quotaReserved: false,
+          upstreamReached: false,
+        });
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));
+      default:
+        return assertNever(tokenizeOutcome, "proxy outcome");
     }
 
-    if (tokenizeOutcome.kind === "unavailable") {
-      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
-        route: "error:tokenizer_unavailable",
-        inputBytes: requestData.inputBytes,
-        inputTextBytes: requestData.inputTextBytes,
-        opaqueInputBytes: requestData.opaqueInputBytes,
-        quotaReserved: false,
-        upstreamReached: false,
-      });
-      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errInternal(requestId, { quota: snapshot }));
-    }
-
-    const estimatedInput = tokenizeOutcome.result.estimatedInputTokens;
-    finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
-      inputBytes: requestData.inputBytes,
-      inputTextBytes: requestData.inputTextBytes,
-      opaqueInputBytes: requestData.opaqueInputBytes,
-      estimationPath: tokenizeOutcome.result.estimationPath,
-    });
-
-    const margin = safetyMargin(estimatedInput, before.remaining / before.limit);
-    const upperBound = upperBoundOf(estimatedInput, requestData.maxOutputTokens);
-    if (upperBound > before.limit) {
-      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errRequestTooLarge(snapshot, requestId));
-    }
-    const output = decideOutput({
+    const estimatedInput = tokenizedResult.estimatedInputTokens;
+    const budget = resolveTokenBudget({
       estimatedInput,
       maxOutputTokens: requestData.maxOutputTokens,
-      margin,
       remaining: before.remaining,
+      limit: before.limit,
       outputLimitMode: policy.outputLimitMode,
     });
-    if (output.action === "reject") {
-      completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errQuotaExceeded(snapshot, requestId));
+    const finishTokenizeSuccess = (): void => {
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "success", {
+        inputBytes: requestData.inputBytes,
+        inputTextBytes: requestData.inputTextBytes,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+        estimationPath: tokenizedResult.estimationPath,
+      });
+    };
+    switch (budget.kind) {
+      case "arithmetic_error":
+        finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+          route: "error:arithmetic_error",
+          inputBytes: requestData.inputBytes,
+          inputTextBytes: requestData.inputTextBytes,
+          opaqueInputBytes: requestData.opaqueInputBytes,
+          estimationPath: tokenizedResult.estimationPath,
+          quotaReserved: false,
+          upstreamReached: false,
+        });
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));
+      case "request_too_large":
+        finishTokenizeSuccess();
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errRequestTooLarge(snapshot, requestId));
+      case "quota_exceeded":
+        finishTokenizeSuccess();
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errQuotaExceeded(snapshot, requestId));
+      case "resolved":
+        finishTokenizeSuccess();
+        break;
+      default:
+        return assertNever(budget, "proxy outcome");
     }
 
-    const reservation = estimatedInput + output.maxOutputTokens + margin;
+    const { maxOutputTokens, reservation, upperBound } = budget;
     const reserveStartedAt = startResourceStage(env, requestId, "quota_reserve");
     reserveStageStartedAt = reserveStartedAt;
     let reserveOutcome: ReserveOutcome;
@@ -514,7 +481,7 @@ export async function handleProxy(
       reserveStageStartedAt = undefined;
       await stub.markReserveOutcomeUnknown(requestId).catch(() => undefined);
       completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-      return errorResponse(errInternal(requestId));
+      return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));
     }
     const reserved = reserveOutcome.result;
     if (reserved.ok) reservationState = "resolved";
@@ -574,7 +541,7 @@ export async function handleProxy(
     upstreamStageStartedAt = upstreamStartedAt;
     let upstream: Response;
     try {
-      const upstreamBody = buildUpstreamBody(endpoint, body as Record<string, unknown>, output.maxOutputTokens);
+      const upstreamBody = buildUpstreamBody(endpoint, body as Record<string, unknown>, maxOutputTokens);
       upstreamAttempted = true;
       upstream = await callUpstream(
         env,
