@@ -114,6 +114,8 @@ interface RequestEntry {
 reserved --markUncertain--> uncertain --settle--> settled  # 消費確定（後述）
 uncertain --reconcile--> reconciled                        # confirmed へ確定
 uncertain --reconcile--> released                          # 未消費が Usage API で裏付けられた場合のみ解放
+reserved --reconcile--> reconciled                         # markUncertain 配送失敗後に Usage API で消費確定
+reserved --reconcile--> released                           # markUncertain 配送失敗後に未消費を確認
 reserved --release--> released                             # upstream 到達前と確定的に判明した場合のみ
 ```
 
@@ -122,7 +124,7 @@ reserved --release--> released                             # upstream 到達前�
 1. `reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey?: string, clientId?: string) -> { ok, remaining, resetAt }`
    - 予約量が remaining 内に収まる場合のみ `reservedTokens += tokens`。
    - pool 利用ポリシー（要件第 28 章）に基づく NORMAL / CAUTION / STRICT 判定もここで行う。STRICT 帯では conservative upper bound（`upperBoundTokens`）が remaining 以下の場合のみ許可。
-   - 冪等性: 同一 `requestId` で状態が `reserved` のまま再送された場合はカウンターを再変更せず、保存済みの最初の結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、既存 entry が `reserved`・`uncertain`・`settled`・`reconciled` の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の空文字・未指定は absent として扱い、指定値は UTF-8 255 bytes 以下に制限する。重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
+   - 冪等性: 同一 `requestId` と同一 `idempotencyKey` の再送は、entry の状態にかかわらずカウンターを再変更せず、保存済みの最初の reserve 結果を返す。`idempotencyKey` が指定された場合は client × pool × UTC day 単位で重複排除し、異なる `requestId` に紐づく既存 entry（`reserved`・`uncertain`・`settled`・`reconciled`）の再送は `duplicate_idempotency_key` 理由で拒否する。`released` entry の key は新しい予約として再利用できる。Idempotency-Key の空文字・未指定は absent として扱い、指定値は UTF-8 255 bytes 以下に制限する。異なる requestId の重複再送は保存済み upstream response を再生せず、常に `409 Conflict` とする。`ok=false`（容量不足等）で失敗した reserve は状態を残さず、再送は新規として評価する。
    - `idempotencyKey` と `clientId` はいずれも任意の `string`。Worker は認証済みクライアントの `auth.id` を `clientId` として導出して渡す。Worker の受信境界では、未指定・`null`・空文字を absent（新規リクエスト）として扱い、非空の有効なキーは trim・大小文字変換などの正規化をせず、そのまま reserve に渡す。255 UTF-8 bytes を超えるキーは reserve や upstream の前に拒否する。Worker が常に `clientId` を渡すため、通常の重複排除範囲は client × pool × UTC day となる。
 2. `settle(requestId, actualTokens) -> { ok }`
    - `reserved` から: `reservedTokens -= reserved`, `confirmedTokens += actual`, 状態を `settled` へ。
@@ -143,8 +145,8 @@ SQLite-backed Durable Object Storage を使用し、read-modify-write をトラ�
 
 過去日 DO はアイドル化による自然淘汰に任せず、以下の保持・削除ポリシーで管理する。
 
-- **保持期間**: 当該 UTC 日の翌々日 00:00 UTC まで、request_id マップと uncertain 状態を永続化して保持する。これは Usage API の集計遅延（最大 ~24 時間を想定）と 1 回の reconciliation リトライを吸収するための最低保証であり、`D1 reconciliations` で当該日・pool の突合が完了（uncertain 件数 0）ステータスになった場合は、この期限を待たず早期に削除してよい。
-- **削除手順**: Worker / Cron から当該 DO の `finalizeDay()` を呼び、(1) `uncertain` 状態が 0 件であることを確認 → (2) `deleteAll()` で request_id マップと PoolState を消去 → (3) D1 `utc_day × pool` に `deleted` を記録、の順で冪等に実行する。`uncertain` が残っている DO は `deleteAll()` してはならない。
+- **保持期間**: 当該 UTC 日の翌々日 00:00 UTC まで、request_id マップと `reserved` / `uncertain` 状態を永続化して保持する。これは Usage API の集計遅延（最大 ~24 時間を想定）と 1 回の reconciliation リトライを吸収するための最低保証であり、`D1 reconciliations` で当該日・pool の突合が完了（`reserved` / `uncertain` 件数 0）ステータスになった場合は、この期限を待たず早期に削除してよい。
+- **削除手順**: Worker / Cron から当該 DO の `finalizeDay()` を呼び、(1) `reserved` / `uncertain` 状態が 0 件であることを確認 → (2) `deleteAll()` で request_id マップと PoolState を消去 → (3) D1 `utc_day × pool` に `deleted` を記録、の順で冪等に実行する。`reserved` または `uncertain` が残っている DO は `deleteAll()` してはならない。
 - **削除後の遅延 settle**: 削除済み requestId に対する遅延 `settle` は、当該 DO が存在しないため受理不能となる。日次リセット後の pool は新しい DO に切り替わっているため課金の二重計上リスクはなく、worker は当該 settle を破棄し、D1 `requests.status = 'orphaned'` として記録したうえで成功（no-op）として扱う。**新しい日の quota を過去のリクエストで消費してはならない**。
 - **reconciliation の再実行**: reconcile RPC は、`no_state`（削除済み）を「0 トークン」として冪等に扱う。削除後の再 reconcile は前回結果（D1 `reconciliations`）を返して no-op とし、過去日 quota を再変更しない。
 
@@ -216,14 +218,14 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
    - 上記の全 outcome では `QuotaController.reserve`、in-flight admission、AI Gateway REST を呼び出さない。
 2. `QuotaController.reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey?: string, clientId?: string)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。Worker は認証済みクライアントの `auth.id` を `clientId` として渡す。
    - Worker は有効な非空の受信 `Idempotency-Key` を `QuotaController.reserve()` および Gateway B への upstream 呼び出しへ、trim・大小文字変換なしで変更せず転送する。空文字・未指定は absent としてヘッダーを転送せず、新規リクエストとして扱う。255 UTF-8 bytes を超える値は reserve や upstream の前に HTTP 400 で拒否する。
-   - 同一 key に対する再送は client × pool × UTC day 単位で Durable Object 内で重複排除され、完了済み key を含む既存 entry への再送は `409 Conflict` で拒否する。
+   - 同一 key に対する再送は client × pool × UTC day 単位で Durable Object 内で重複排除され、同じ requestId の再送だけは保存済み reserve 結果を再返却する。異なる requestId による既存 entry への再送は、完了済み key を含めて `409 Conflict` で拒否する。
 3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する。OCTG の Worker outbound は単一試行とし、隠れた再試行による usage の二重計上を防ぐ：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
-   - `cf-aig-max-attempts: 1`
+   - `cf-aig-max-attempts: 1`（Worker が固定して付与し、受信クライアントの同名ヘッダーは転送しない）
    - `cf-aig-collect-log-payload: false`
    - `Idempotency-Key` は受信値を変更せず、valid な場合のみ転送する。自動 retry は行わず、クライアント切断・usage 取得不能・upstream 通信失敗は `markUncertain` とする。
 4. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
-5. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。
+5. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。upstream が HTTP 4xx を返した場合も、上流で token 使用がなかったことを保証できない限り `markUncertain` とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。`markUncertain` の配送に失敗した `reserved` entry は、後続 reconciliation が `consumed` / `unused` の証跡で解決できる状態として保持する。
 6. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
 7. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
 

@@ -135,7 +135,7 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - `/quota` で残りクォータを確認してください。
 - Gateway A の timeout 設定を確認してください。
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
-- **Gateway A の retry と冪等性**: Gateway A の retry 試行回数は、重複配送を避けるため `1`（= `cf-aig-max-attempts: 1`）に設定してください。OCTG Worker から Gateway B への outbound も `cf-aig-max-attempts: 1` とし、retry-delay / backoff は設定しません。`Idempotency-Key` は空文字・未指定を absent とし、指定値は UTF-8 255 bytes 以下にしてください。valid な key は Worker が QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。key が欠落した場合は新規リクエストとして処理されます。完了済み key の再送は `409 Conflict` で拒否され、reserve / Gateway B 呼び出し / settle の重複実行を防ぎます。保持 TTL は Durable Object の既存ライフサイクルに従います。
+- **Gateway A の retry と冪等性**: OCTG Worker は受信クライアントの `cf-aig-max-attempts` を Gateway B へ転送せず、Gateway B への outbound に `cf-aig-max-attempts: 1` を固定付与します。Gateway A を OCTG Worker の前段に直接公開する構成では、信頼できないクライアントが同名ヘッダーを上書きできないよう、Gateway A または trusted ingress で削除・固定してください。その境界を保証できない構成では、retry 回数の設定だけで重複配送を防げるとはみなさず、`Idempotency-Key` と reconciliation を併用してください。`Idempotency-Key` は空文字・未指定を absent とし、指定値は UTF-8 255 bytes 以下にしてください。valid な key は Worker が QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。同じ requestId の再送は保存済み reserve 結果を再返却し、異なる requestId の重複再送は `409 Conflict` で拒否されます。key が欠落した場合は新規リクエストとして処理されます。保持 TTL は Durable Object の既存ライフサイクルに従います。
 
 ### OpenCode / BYOK の Responses ツール履歴
 

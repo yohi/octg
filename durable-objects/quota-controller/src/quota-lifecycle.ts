@@ -278,22 +278,29 @@ export class QuotaLifecycle {
         }
         return priorResult;
       }
-      if (entry.state !== "uncertain") return { ok: true, applied: false };
+      if (entry.state !== "reserved" && entry.state !== "uncertain") {
+        return { ok: true, applied: false };
+      }
 
       const { pool, utcDay } = this.context.identityOf();
       const poolState = await loadPool(storage, this.context.env, { pool, utcDay });
-      const stateAfterUncertainty = {
-        ...poolState,
-        uncertainTokens: Math.max(0, poolState.uncertainTokens - entry.reservedTokens),
-      };
+      const stateAfterUnresolved = entry.state === "reserved"
+        ? {
+            ...poolState,
+            reservedTokens: Math.max(0, poolState.reservedTokens - entry.reservedTokens),
+          }
+        : {
+            ...poolState,
+            uncertainTokens: Math.max(0, poolState.uncertainTokens - entry.reservedTokens),
+          };
       const unresolved = await loadUnresolved(storage);
       const nextState =
         disposition === "consumed"
           ? {
-              ...stateAfterUncertainty,
-              confirmedTokens: stateAfterUncertainty.confirmedTokens + entry.reservedTokens,
+              ...stateAfterUnresolved,
+              confirmedTokens: stateAfterUnresolved.confirmedTokens + entry.reservedTokens,
             }
-          : stateAfterUncertainty;
+          : stateAfterUnresolved;
       const nextRequestState: RequestEntry["state"] =
         disposition === "consumed" ? "reconciled" : "released";
       const result: ReconcileResult = { ok: true, applied: true };
@@ -307,8 +314,8 @@ export class QuotaLifecycle {
       await savePool(storage, nextState);
       await putEntry(storage, requestId, nextEntry);
       await saveUnresolved(storage, {
-        uncertainCount: Math.max(0, unresolved.uncertainCount - 1),
-        reservedCount: unresolved.reservedCount,
+        uncertainCount: Math.max(0, unresolved.uncertainCount - (entry.state === "uncertain" ? 1 : 0)),
+        reservedCount: Math.max(0, unresolved.reservedCount - (entry.state === "reserved" ? 1 : 0)),
       });
       return result;
     });

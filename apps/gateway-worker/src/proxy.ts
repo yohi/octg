@@ -213,18 +213,10 @@ function upstreamStageResult(upstream: Response): {
       fields: { route: "free_shared", quotaReserved: true, upstreamReached: true },
     };
   }
-  const isUncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
-  if (isUncertain) {
-    return {
-      isUncertain: true,
-      outcome: "uncertain",
-      fields: { route: "error:upstream_uncertain", quotaReserved: true, upstreamReached: true },
-    };
-  }
   return {
-    isUncertain: false,
-    outcome: "rejected",
-    fields: { quotaReserved: true, upstreamReached: true },
+    isUncertain: true,
+    outcome: "uncertain",
+    fields: { route: "error:upstream_uncertain", quotaReserved: true, upstreamReached: true },
   };
 }
 

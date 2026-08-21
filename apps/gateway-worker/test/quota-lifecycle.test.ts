@@ -10,6 +10,10 @@ interface UnvalidatedReconcileController {
   reconcileRequest(requestId: string, disposition: string): Promise<unknown>;
 }
 
+interface UnvalidatedReserveController {
+  reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey: string): Promise<unknown>;
+}
+
 function hasUnvalidatedReconcileController(value: unknown): value is UnvalidatedReconcileController {
   return (
     typeof value === "object" &&
@@ -18,6 +22,62 @@ function hasUnvalidatedReconcileController(value: unknown): value is Unvalidated
     typeof value.reconcileRequest === "function"
   );
 }
+
+function hasUnvalidatedReserveController(value: unknown): value is UnvalidatedReserveController {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "reserve" in value &&
+    typeof value.reserve === "function"
+  );
+}
+
+describe("QuotaController.reserve idempotency key", () => {
+  it("replays the saved reserve result for the same request ID and key", async () => {
+    // Given: one reservation identified by a request ID and idempotency key.
+    const controller = stub("2026-08-17");
+    const first = await controller.reserve("req-replay", 100, 100, "idem-replay");
+
+    // When: the same reserve RPC is retried with the same identity and parameters.
+    const replay = await controller.reserve("req-replay", 100, 100, "idem-replay");
+    const state = await controller.getState();
+
+    // Then: the original result is returned and quota is counted once.
+    expect(replay).toEqual(first);
+    expect(state.reservedTokens).toBe(100);
+    expect(state.requestCount).toBe(1);
+  });
+
+  it("rejects an idempotency key over 255 UTF-8 bytes", async () => {
+    // Given: a direct RPC call with a key beyond the documented storage bound.
+    const controller = stub("2026-08-18");
+
+    // When: the key crosses the QuotaController RPC boundary.
+    const reservation = runInDurableObject(controller, async (instance) => {
+      if (!hasUnvalidatedReserveController(instance)) {
+        throw new TypeError("Expected a QuotaController instance.");
+      }
+      return instance.reserve("req-too-long-key", 100, 100, "€".repeat(86));
+    });
+
+    // Then: the invalid key is rejected before any reservation is stored.
+    await expect(reservation).rejects.toThrow("Idempotency-Key must be at most 255 UTF-8 bytes.");
+    expect(await controller.getState()).toMatchObject({ reservedTokens: 0, requestCount: 0 });
+  });
+
+  it("accepts a 255-byte multibyte idempotency key", async () => {
+    // Given: an idempotency key whose UTF-8 representation is exactly 255 bytes.
+    const controller = stub("2026-08-19");
+    const key = "€".repeat(85);
+
+    // When: the key crosses the QuotaController RPC boundary.
+    const reservation = await controller.reserve("req-utf8-boundary", 100, 100, key);
+
+    // Then: the exact byte-boundary key is accepted and stored once.
+    expect(reservation.ok).toBe(true);
+    expect(await controller.getState()).toMatchObject({ reservedTokens: 100, requestCount: 1 });
+  });
+});
 
 describe("QuotaController.release", () => {
   it("frees a reservation before upstream contact", async () => {
@@ -65,6 +125,38 @@ describe("QuotaController.release", () => {
 });
 
 describe("QuotaController.reconcileRequest", () => {
+  it("releases a reserved request left after uncertainty marking failed", async () => {
+    // Given: a reservation that could not be moved to uncertain state.
+    const controller = stub("2026-09-26");
+    await controller.reserve("req-reserved-reconcile-unused", 25_000, 25_000);
+
+    // When: reconciliation confirms that the request was unused.
+    const result = await controller.reconcileRequest("req-reserved-reconcile-unused", "unused");
+    const state = await controller.getState();
+
+    // Then: the reserved bucket is released exactly once.
+    expect(result).toEqual({ ok: true, applied: true });
+    expect(state.reservedTokens).toBe(0);
+    expect(state.uncertainTokens).toBe(0);
+    expect(state.remaining).toBe(1_000_000);
+  });
+
+  it("confirms a reserved request left after uncertainty marking failed", async () => {
+    // Given: a reservation that could not be moved to uncertain state.
+    const controller = stub("2026-09-27");
+    await controller.reserve("req-reserved-reconcile-consumed", 25_000, 25_000);
+
+    // When: reconciliation confirms that the request was consumed.
+    const result = await controller.reconcileRequest("req-reserved-reconcile-consumed", "consumed");
+    const state = await controller.getState();
+
+    // Then: the reserved bucket becomes confirmed usage exactly once.
+    expect(result).toEqual({ ok: true, applied: true });
+    expect(state.reservedTokens).toBe(0);
+    expect(state.uncertainTokens).toBe(0);
+    expect(state.confirmedTokens).toBe(25_000);
+  });
+
   it("moves consumed uncertain usage to confirmed", async () => {
     // Given: an uncertain reservation.
     const controller = stub("2026-09-13");

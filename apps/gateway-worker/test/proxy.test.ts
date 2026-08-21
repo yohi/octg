@@ -160,7 +160,7 @@ describe("proxy pipeline", () => {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${TEST_CLIENT_KEY}`,
-        "Idempotency-Key": "k".repeat(256),
+        "Idempotency-Key": "€".repeat(86),
       },
       body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }] }),
     });
@@ -170,7 +170,7 @@ describe("proxy pipeline", () => {
     expect(upstreamCallCount).toBe(0);
   });
 
-  it("retries a released Idempotency-Key through upstream", async () => {
+  it("does not retry an upstream-rejected Idempotency-Key through upstream", async () => {
     let upstreamCallCount = 0;
     vi.stubGlobal("fetch", async () => {
       upstreamCallCount += 1;
@@ -197,8 +197,9 @@ describe("proxy pipeline", () => {
     const second = await send();
 
     expect(first.status).toBe(400);
-    expect(second.status).toBe(400);
-    expect(upstreamCallCount).toBe(2);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({ error: { code: "duplicate_idempotency_key" } });
+    expect(upstreamCallCount).toBe(1);
   });
 
   it("rejects a completed duplicate Idempotency-Key without calling upstream again", async () => {

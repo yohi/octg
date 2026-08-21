@@ -40,7 +40,10 @@ export function proxyStream(
     renewalTimer = undefined;
   };
   const finalizeUncertain = async (originalError?: unknown) => {
-    await stub.markUncertain(requestId).catch(() => undefined);
+    const markError = await stub.markUncertain(requestId).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await completeRequestAuditBestEffort(
       env,
       requestId,
@@ -52,9 +55,10 @@ export function proxyStream(
       (error: unknown) => error,
     );
     await Promise.resolve()
-      .then(() => onFinalized?.(originalError === undefined ? "uncertain" : "exception"))
+      .then(() => onFinalized?.(originalError === undefined && markError === undefined ? "uncertain" : "exception"))
       .catch(() => undefined);
     if (originalError !== undefined) throw originalError;
+    if (markError !== undefined) throw markError;
     if (releaseError !== undefined) throw releaseError;
   };
   const finalize = async () => {

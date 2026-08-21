@@ -78,6 +78,45 @@ describe("reconciliation", () => {
     fetchMock.mockRestore();
   });
 
+  it("reconciles a reserved request whose uncertainty mark was not delivered", async () => {
+    // Given: a reserved request and an uncertain D1 projection after a failed mark RPC.
+    const reconciliationNow = new Date("2026-08-25T00:05:00Z");
+    const reconciliationDay = "2026-08-24";
+    const requestId = "reconcile-reserved-after-mark-failure";
+    Object.assign(env, { OPENAI_USAGE_API_KEY: "test" });
+    await seedClient();
+    const controller = env.QUOTA_CONTROLLER.get(
+      env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${reconciliationDay}`),
+    );
+    await controller.reserve(requestId, 150, 150);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, reconciliationDay, "client_test", "STANDARD", 150, 0, "uncertain", reconciliationNow.toISOString()).run();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({
+        data: [{ results: [{ model: "gpt-5", input_tokens: 125, output_tokens: 25 }] }],
+        has_more: false,
+      })),
+    );
+
+    try {
+      // When: automatic reconciliation matches the upstream usage to the reserved request.
+      const reports = await runReconciliation(env, reconciliationNow);
+
+      // Then: the reserved bucket is confirmed and the day closes cleanly.
+      expect(reports.find((report) => report.pool === "STANDARD")).toMatchObject({ status: "done", difference: 0 });
+      expect(await controller.getState()).toMatchObject({ confirmedTokens: 150, reservedTokens: 0, uncertainTokens: 0 });
+      expect(await controller.getReconcileRequest(requestId)).toMatchObject({ state: "reconciled", requestedDisposition: "consumed" });
+      expect(
+        await env.DB.prepare("SELECT status, total_tokens, billing_class FROM requests WHERE request_id = ?")
+          .bind(requestId)
+          .first<{ status: string; total_tokens: number; billing_class: string }>(),
+      ).toEqual({ status: "completed", total_tokens: 150, billing_class: "free" });
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("reconciles upstream uncertainty while leaving reserve-unknown usage open", async () => {
     // Given: one upstream-uncertain and one reserve-unknown reservation in the same pool.
     const reconciliationNow = new Date("2026-08-24T00:05:00Z");

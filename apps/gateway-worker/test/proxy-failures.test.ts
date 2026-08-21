@@ -571,7 +571,7 @@ describe("proxy failure paths", () => {
     }));
   });
 
-  it("releases a reservation for upstream 4xx other than timeout and rate limit", async () => {
+  it("marks an upstream 4xx uncertain when usage is not provably zero", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: { code: "invalid_request" } }), {
       status: 400,
       headers: { "content-type": "application/json" },
@@ -581,7 +581,7 @@ describe("proxy failure paths", () => {
     const after = await stub().getState();
     expect(response.status).toBe(400);
     expect(after.reservedTokens).toBe(before.reservedTokens);
-    expect(after.uncertainTokens).toBe(before.uncertainTokens);
+    expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
   });
 
   it("marks network failure as uncertain", async () => {
