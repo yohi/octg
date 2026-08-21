@@ -197,6 +197,22 @@ describe("TokenizerEstimator", () => {
     ]);
   });
 
+  it("rejects the original o200k Unicode boundary input", () => {
+    let encodeCalls = 0;
+    const estimator = new TokenizerEstimator(() => ({
+      encode: () => {
+        encodeCalls += 1;
+        return [1];
+      },
+    }));
+    const inputText = "  𐀀".repeat(2_785_280);
+
+    expect(() => estimator.estimate(requestFor(inputText), contextFor())).toThrow(
+      "Tokenizer BPE work limit exceeded.",
+    );
+    expect(encodeCalls).toBe(0);
+  });
+
   it("rejects punctuation followed by newlines when the combined BPE piece exceeds the work limit", () => {
     let encodeCalls = 0;
     const estimator = new TokenizerEstimator(() => ({
