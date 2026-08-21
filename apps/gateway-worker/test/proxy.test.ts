@@ -57,7 +57,7 @@ describe("proxy pipeline", () => {
     expect(response.status).toBe(200);
     expect(upstreamBody?.max_completion_tokens).toBeTypeOf("number");
     expect(upstreamBody?.max_tokens).toBeUndefined();
-    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
+    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("1");
     expect(upstreamHeaders?.get("cf-aig-metadata")).toContain("client_test");
     expect(upstreamHeaders?.get("cf-aig-cache-key")).toBeNull();
     expect(upstreamHeaders?.get("cf-aig-authorization")).toBe("Bearer test-upstream-token");
@@ -88,7 +88,7 @@ describe("proxy pipeline", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("2");
+    expect(upstreamHeaders?.get("cf-aig-max-attempts")).toBe("1");
     expect(upstreamHeaders?.get("cf-aig-authorization")).toBe("Bearer test-upstream-token");
     expect(upstreamHeaders?.get("Idempotency-Key")).toBe("idem-test-1");
     expect(upstreamMetadata?.idempotency_key).toBeUndefined();
@@ -118,7 +118,59 @@ describe("proxy pipeline", () => {
     expect(upstreamHeaders?.get("Idempotency-Key")).toBe("idem-upstream-1");
   });
 
-  it("retries a released Idempotency-Key through upstream", async () => {
+  it("treats an empty Idempotency-Key as absent", async () => {
+    let upstreamCallCount = 0;
+    let upstreamHeaders: Headers | undefined;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamCallCount += 1;
+      upstreamHeaders = new Headers(init?.headers);
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const send = () => SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_CLIENT_KEY}`,
+        "Idempotency-Key": "",
+      },
+      body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    const first = await send();
+    const second = await send();
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(upstreamCallCount).toBe(2);
+    expect(upstreamHeaders?.get("Idempotency-Key")).toBeNull();
+  });
+
+  it("rejects an Idempotency-Key over 255 UTF-8 bytes before reservation", async () => {
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), { status: 200 });
+    });
+
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_CLIENT_KEY}`,
+        "Idempotency-Key": "€".repeat(86),
+      },
+      body: JSON.stringify({ model: "gpt-5", messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+    expect(upstreamCallCount).toBe(0);
+  });
+
+  it("does not retry an upstream-rejected Idempotency-Key through upstream", async () => {
     let upstreamCallCount = 0;
     vi.stubGlobal("fetch", async () => {
       upstreamCallCount += 1;
@@ -145,8 +197,9 @@ describe("proxy pipeline", () => {
     const second = await send();
 
     expect(first.status).toBe(400);
-    expect(second.status).toBe(400);
-    expect(upstreamCallCount).toBe(2);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({ error: { code: "duplicate_idempotency_key" } });
+    expect(upstreamCallCount).toBe(1);
   });
 
   it("rejects a completed duplicate Idempotency-Key without calling upstream again", async () => {

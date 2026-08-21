@@ -14,7 +14,13 @@ Client (OpenCode / AI Agent / MCP / Apps)
         ▼
 Cloudflare Worker (OpenAI 互換 API)
         │  認証 → ポリシー解決 → モデル分類 → Tool-use 判定
-        │  → トークン推定 → reservation 要求
+        │  → QuotaController state 読み出し
+        ▼
+Durable Object: TokenizerController (exact o200k_base BPE)
+        │  固定 ID tokenizer:primary への 1 回の RPC
+        ▼
+Cloudflare Worker
+        │  token budget 算術 → reservation 要求
         ▼
 Durable Object: QuotaController (pool × UTC 日)
         │  reserve / settle / markUncertain（単一スレッドで直列化）
@@ -35,6 +41,9 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 3. actual usage で reservation を精算する
 4. 不確実な request は消費済みとして扱う（fail-closed）
 5. Paid fallback は明示的 opt-in がない限り発生させない
+6. exact BPE は TokenizerController に隔離し、Gateway と shared package に encoder を依存させない
+7. TokenizerController は RPC 専用で、入力本文や tokenizer state を Durable Object storage に保存しない
+8. `Idempotency-Key` は client × pool × UTC 日単位で重複排除し、空文字を absent、指定値を UTF-8 255 bytes 以下として扱う。Worker の upstream 自動 retry は無効化する
 
 ## はじめに：あなたの立場に応じた手順
 
@@ -208,6 +217,25 @@ npm test            # 全 workspace のユニットテスト (Vitest + @cloudfla
 npm run dev -w apps/gateway-worker   # ローカルで Worker 起動 (http://localhost:8787)
 ```
 
+TokenizerController は Gateway Worker の `TOKENIZER_CONTROLLER` binding から
+`tokenizer:primary` という固定 ID で呼び出されます。入力文字列は TokenizerController 内で
+`o200k_base` により exact BPE token 数へ変換され、成功するまで QuotaController の
+reservation は実行されません。Tokenizer の outcome は次の契約です。
+
+- `work_limit`（BPE work limit 超過）は HTTP 413、`request_too_large`、
+  `X-OCTG-Route: reject:request_too_large` で拒否します。
+- RPC failure、malformed result、Worker の RPC preflight ceiling 超過、または
+  Tokenizer RPC 境界で `MAX_INPUT_TEXT_BYTES` を超過した場合は unavailable として、
+  HTTP 500、`api_error` / `internal_error`、`X-OCTG-Route: error:internal_error` にします。
+- Worker の HTTP 正規化で入力上限を超過した場合は RPC より前に HTTP 413、
+  `request_too_large`、`reject:request_too_large` で拒否します。
+- token budget の算術異常は HTTP 500、`api_error` / `internal_error`、公開 HTTP route は
+  `error:internal_error` とし、resource stage event の route は `error:arithmetic_error` とします。
+
+いずれも `QuotaController.reserve`、in-flight admission、upstream call は実行しません。
+TokenizerController は RPC 処理だけを行い、入力本文・API key・tokenizer state をログや
+Durable Object storage に保存しません。
+
 ここまででローカル開発環境の準備は完了です。実運用する場合は [テンプレートから新規作成（デプロイする場合）](#テンプレートから新規作成デプロイする場合) を参照してください。
 
 ---
@@ -229,7 +257,7 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動 (http://loc
    npm run setup:deploy
    ```
 
-   スクリプトは `database_id`、AI Gateway URL、Access の `Team domain` と `Audience tag` を入力として受け取り、`wrangler.jsonc` の更新、3 つの Secret の登録、remote D1 migration、Worker deploy を順番に実行します。
+   スクリプトは `database_id`、AI Gateway URL、Access の `Team domain` と `Audience tag` を入力として受け取り、`wrangler.jsonc` の更新、3 つの Secret の登録、remote D1 migration、Worker deploy を順番に実行します。Worker deploy は `TokenizerController` の binding と Durable Object migration `v2` も含めて適用します。
 
 > Template repository の留意点: フォークと異なり upstream との同期は自動で行われません。本リポジトリ側で修正が入った場合は、必要に応じて手動で取り込みます。
 
@@ -247,6 +275,23 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
 
 初回の環境構築手順は [セットアップ（開発する場合）](#セットアップ開発する場合) を参照してください。
 
+### Durable Object migration の不変条件
+
+`apps/gateway-worker/wrangler.jsonc` の migration は次の順序を維持します。
+
+```jsonc
+"migrations": [
+  { "tag": "v1", "new_sqlite_classes": ["QuotaController"] },
+  { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] }
+]
+```
+
+- 既に適用した tag を削除・改名・内容変更しないでください。
+- TokenizerController は SQLite class として登録されますが、現在の実装は
+  `ctx.storage` を使用せず、入力本文・tokenizer state を永続化しません。
+- 変更は必ず新しい migration tag の追加として行い、`apps/gateway-worker/wrangler.jsonc`
+  を使って Gateway Worker と一緒に deploy します。
+
 ## デプロイ前の必須プロビジョニング（手動）
 
 1. `wrangler d1 create octg` → 発行された `database_id` を `apps/gateway-worker/wrangler.jsonc` に設定する。
@@ -259,6 +304,36 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
    - `npx wrangler secret put OPENAI_USAGE_API_KEY --config apps/gateway-worker/wrangler.jsonc` — OpenAI Organization Usage API 読み取り用 admin key
 6. `npx wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc` で remote D1 migration を適用する。
 7. `npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc`（CI からのデプロイを推奨）。
+
+### デプロイ前の Tokenizer / quota 確認
+
+本番 credential や入力本文をログへ出さず、次の順で確認します。
+
+```bash
+npm run typecheck
+npm test
+npm test -w apps/gateway-worker
+npm test -w durable-objects/tokenizer-controller
+```
+
+少なくとも、次の条件を満たすことを確認してください。
+
+- `TokenizerController` の exact BPE success 後にだけ `quota_reserve` が発生する。
+- `work_limit` は HTTP 413 / `request_too_large` / `reject:request_too_large` となり、
+  reservation、in-flight admission、upstream call が発生しない。
+- RPC failure、malformed result、RPC preflight ceiling 超過は HTTP 500 /
+  `api_error` / `internal_error` / `error:internal_error` となり、reservation、in-flight
+  admission、upstream call が発生しない。
+- `MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536` の `inputText` UTF-8 byte 境界を確認する。
+  - `MAX_INPUT_TEXT_BYTES - 1` bytes: 受け入れる。
+  - `MAX_INPUT_TEXT_BYTES` bytes: 受け入れる。
+  - `MAX_INPUT_TEXT_BYTES + 1` bytes: Tokenizer RPC では HTTP 500 / `error:internal_error` で拒否し、
+    reservation、in-flight admission、upstream call を実行しない。Worker の HTTP 正規化経路では
+    RPC より前に HTTP 413 / `reject:request_too_large` で拒否する。
+- token budget の算術異常は HTTP 500 / `api_error` / `internal_error` となり、公開 route は
+  `error:internal_error`、resource stage route は `error:arithmetic_error` になる。
+- 74,000 token 級 fixture で tokenization 結果が安定し、success response の実 usage で settle される。
+- `apps/gateway-worker/wrangler.jsonc` の `TOKENIZER_CONTROLLER` binding と migration `v2` が残っている。
 
 ## Secret ローテーション
 
@@ -287,6 +362,25 @@ POST /admin/reconcile
 ## 既知の限界
 
 課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御（詳細は SPEC.md §15 参照）。監査ログは best-effort で配送欠損を許容する（authoritative な制御は DO が担う）。
+
+## Tokenizer の監視・運用
+
+- Tokenizer の custom stage event は request ID、revision、stage、duration、safe な byte/token 数、
+  allowlist 済み outcome だけを記録します。入力本文、Authorization、API key、encoder 例外文字列は記録しません。
+- Tokenizer RPC が利用できない場合は `500 internal_error` として fail-closed になります。
+  この場合に local BPE、未検証の byte 比率式、paid fallback を有効化しないでください。
+- 74,000 token 級 payload の canary は、同じ revision の Workers invocation outcome、CPU/wall time、
+  Tokenizer stage、quota reserve、upstream 到達を request ID で相関して確認します。
+
+### ロールバック
+
+- Durable Object migration は不可逆として扱い、適用済みの `v1` / `v2` を削除・改名・再利用しません。
+- アプリケーションを戻す場合は Cloudflare の deployment version rollback を使い、`v2` binding を含む
+  manifest を維持します。rollback のために Gateway や shared package へ local BPE を戻さないでください。
+- rollback 後は `/v1/chat/completions` または `/v1/responses` の小さい非機密 fixture で、
+  `quota_reserve` と upstream が成功すること、`/quota` の状態が不自然に減っていないことを確認します。
+- Tokenizer RPC failure が継続する場合は、原因が解消するまで再試行を増やさず fail-closed のままにし、
+  revision ID と安全な stage event だけを記録します。
 
 ## 今回のレビューで未対応とした項目
 

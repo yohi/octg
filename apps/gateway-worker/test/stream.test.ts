@@ -117,6 +117,7 @@ describe("proxy stream finalization", () => {
     const requestId = "stream-uncertainty-rejection";
     const replacementRequestId = "stream-uncertainty-replacement";
     const uncertaintyError = new Error("uncertainty marking failed");
+    await controller.reserve(requestId, 10, 10);
     const lease = await acquireLease(controller, requestId);
     vi.spyOn(controller, "markUncertain").mockRejectedValue(uncertaintyError);
     const context = createExecutionContext();
@@ -136,12 +137,54 @@ describe("proxy stream finalization", () => {
     try {
       // Then: the same failure propagates after the lease becomes available to another request.
       await expect(waitOnExecutionContext(context)).rejects.toBe(uncertaintyError);
+      expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, reservedTokens: 10 });
       const replacement = await controller.acquireInFlight(replacementRequestId, 1);
       expect(replacement).toMatchObject({ ok: true, lease: { requestId: replacementRequestId } });
       if (replacement.ok) await controller.releaseInFlight(replacementRequestId, replacement.lease.generation);
+      vi.restoreAllMocks();
+      expect(await controller.reconcileRequest(requestId, "unused")).toEqual({ ok: true, applied: true });
+      expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, reservedTokens: 0 });
     } finally {
       await controller.releaseInFlight(requestId, lease.generation);
     }
+  });
+
+  it("keeps a client-disconnect reservation recoverable when uncertainty marking fails", async () => {
+    // Given: a streamed response whose uncertainty RPC fails after client cancellation.
+    const controller = controllerFor("2026-10-14");
+    const requestId = "stream-client-disconnect-uncertainty-failure";
+    const uncertaintyError = new Error("uncertainty marking failed");
+    await controller.reserve(requestId, 10, 10);
+    const lease = await acquireLease(controller, requestId);
+    vi.spyOn(controller, "markUncertain").mockRejectedValue(uncertaintyError);
+    const context = createExecutionContext();
+    const upstream = new Response(new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode('data: {"usage":{"total_tokens":5}}\n\n'));
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+    const response = proxyStream(
+      upstream,
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+    const reader = response.body?.getReader();
+    if (!reader) throw new TypeError("Expected a streamed response body.");
+
+    // When: the client cancels after receiving the first chunk.
+    await reader.read();
+    await reader.cancel("client disconnected");
+
+    // Then: the marking failure is observable and the reserved entry remains recoverable.
+    await expect(waitOnExecutionContext(context)).rejects.toBe(uncertaintyError);
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, reservedTokens: 10 });
+    vi.restoreAllMocks();
+    expect(await controller.reconcileRequest(requestId, "unused")).toEqual({ ok: true, applied: true });
+    expect(await controller.getState()).toMatchObject({ uncertainTokens: 0, reservedTokens: 0 });
   });
 
   it("reports uncertain finalization when usage metadata is absent", async () => {
@@ -170,6 +213,44 @@ describe("proxy stream finalization", () => {
     } finally {
       await controller.releaseInFlight(requestId, lease.generation);
     }
+  });
+
+  it("marks a reservation uncertain when the client disconnects after usage was streamed", async () => {
+    // Given: a streamed response that has exposed usage but remains open.
+    const controller = controllerFor("2026-10-13");
+    const requestId = "stream-client-disconnect";
+    await controller.reserve(requestId, 10, 10);
+    const lease = await acquireLease(controller, requestId);
+    const context = createExecutionContext();
+    const upstream = new Response(new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode('data: {"usage":{"total_tokens":5}}\n\n'));
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+
+    const response = proxyStream(
+      upstream,
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+    const reader = response.body?.getReader();
+    if (!reader) throw new TypeError("Expected a streamed response body.");
+
+    // When: the client cancels after receiving the first chunk.
+    await reader.read();
+    await reader.cancel("client disconnected");
+    await waitOnExecutionContext(context);
+
+    // Then: the reservation remains fail-closed instead of settling partial usage.
+    expect(await controller.getState()).toMatchObject({
+      confirmedTokens: 0,
+      reservedTokens: 0,
+      uncertainTokens: 10,
+    });
   });
 
   it("treats audit insertion rejection as best effort while releasing the in-flight lease", async () => {

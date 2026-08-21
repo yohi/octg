@@ -3,6 +3,11 @@
 本リポジトリは GitHub の [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。
 `git clone` せずにテンプレートから新規リポジトリを生成し、独自の OCTG インスタンスを構築できます。
 
+OCTG の本番構成は Gateway Worker、`QuotaController` Durable Object、
+`TokenizerController` Durable Object で構成されます。TokenizerController は
+`tokenizer:primary` という固定 ID の RPC endpoint で exact `o200k_base` BPE を実行します。
+入力本文・API key・tokenizer state はログや Durable Object storage に保存しません。
+
 ## 1. テンプレートからリポジトリを生成
 
 1. 上部の **Use this template** バッジ（または https://github.com/yohi/octg/generate ）を開く。
@@ -191,6 +196,30 @@ npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
 
 > 初回デプロイ時、`wrangler` は `workers_dev` が明示的に設定されていないことを警告することがあります。これはデフォルトで `workers.dev` ルートが有効になることを示しており、無料枠の Gateway 用途では通常そのままで問題ありません。必要に応じて `wrangler.jsonc` に `workers_dev` を明示的に設定してください。
 
+### 4.1 Durable Object migration の確認
+
+Gateway Worker の `apps/gateway-worker/wrangler.jsonc` には、QuotaController に続いて
+TokenizerController を追加する migration `v2` が定義されています。
+
+```jsonc
+"durable_objects": {
+  "bindings": [
+    { "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" },
+    { "name": "TOKENIZER_CONTROLLER", "class_name": "TokenizerController" }
+  ]
+},
+"migrations": [
+  { "tag": "v1", "new_sqlite_classes": ["QuotaController"] },
+  { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] }
+]
+```
+
+- 適用済み migration tag は削除、改名、内容変更しないでください。
+- TokenizerController は SQLite class として登録されますが、現在は `ctx.storage` を使わない
+  RPC 専用 Durable Object です。入力本文や tokenizer state を永続化しません。
+- migration を追加・変更した場合は、D1 migration だけでなく Gateway Worker の deploy で
+  Durable Object migration も適用されることを確認してください。
+
 | Secret | 用途 | 取得場所 |
 |---|---|---|
 | `OCTG_KEY_PEPPER` | クライアントキー `key_hash` の keyed hash 用 pepper | 任意の長いランダム文字列を生成して使用 |
@@ -198,6 +227,40 @@ npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
 | `OPENAI_USAGE_API_KEY` | OpenAI Organization Usage API 読み取り用 admin key | 2.6 で作成 |
 
 > Secrets の値をコード・ログ・コミットに含めないこと。[Secret ローテーション手順](../README.md#secret-ローテーション) も参照。
+
+## 4.2 デプロイ前の検証
+
+本番 credential、入力本文、API key を出力しない環境で、少なくとも次を実行します。
+
+```bash
+npm run typecheck
+npm test
+npm test -w apps/gateway-worker
+npm test -w durable-objects/tokenizer-controller
+```
+
+次の outcome ごとの動作を確認してから deploy してください。
+
+- TokenizerController の exact BPE が成功するまで `quota_reserve`、in-flight admission、
+  upstream call が発生しない。
+- `work_limit` は HTTP `413` / `request_too_large` / `reject:request_too_large` になり、
+  reservation、in-flight admission、upstream call が発生しない。
+- malformed RPC result、RPC failure、RPC preflight ceiling 超過、Tokenizer RPC 境界の
+  `MAX_INPUT_TEXT_BYTES` 超過は HTTP `500` / `api_error` / `internal_error` /
+  `error:internal_error` になり、reservation、in-flight admission、upstream call が発生しない。
+- `MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536` の `inputText` UTF-8 byte 境界は、
+  `MAX_INPUT_TEXT_BYTES - 1` と `MAX_INPUT_TEXT_BYTES` を受け入れ、
+  `MAX_INPUT_TEXT_BYTES + 1` を Tokenizer RPC では HTTP `500` / `error:internal_error` で拒否する。
+  Worker の HTTP 正規化経路では RPC より前に HTTP `413` / `reject:request_too_large` で拒否する。
+- token budget の算術異常は HTTP `500` / `api_error` / `internal_error` になり、公開 route は
+  `error:internal_error`、resource stage route は `error:arithmetic_error` になる。
+- 74,000 token 級の fixture で exact token count と quota accounting が一致する。
+- Tokenizer stage event が request ID、revision、safe な数値、allowlist 済み outcome だけを含み、
+  payload や credential を含まない。
+- Worker から Gateway B への outbound が `cf-aig-max-attempts: 1` で、retry-delay / backoff を
+  設定していない。`Idempotency-Key` は空文字・未指定が absent、指定値が UTF-8 255 bytes 以下で、
+  trim・大小文字変換なしで reserve と Gateway B に転送され、client × pool × UTC day 単位の
+  重複排除に使われる。`clientId` は認証済みクライアントの `auth.id` から導出される。
 
 ## Custom Provider として AI Gateway 経由で公開する
 
@@ -289,8 +352,26 @@ API Key:  <発行された octg_sk_xxx>
 - クォータ状態は `/quota` で確認できます。
 - 毎日 UTC 0:05 の Cron Trigger で、OpenAI Usage API との reconciliation が実行されます。
 - D1 監査ログは best-effort で書き込まれます。課金判定は Durable Object の reservation を authoritative として扱います。
+- Tokenizer stage event は request ID、revision、stage、duration、safe な byte/token 数、
+  allowlist 済み outcome だけを記録します。入力本文、Authorization、API key、encoder 例外文字列は記録しません。
+- Tokenizer RPC が利用できない場合、Gateway は未検証の推定値で quota を予約せず、
+  `500 internal_error` を返します。local BPE、未検証の byte 比率式、paid fallback、
+  リトライ回数の増加で回避しないでください。
+- 74,000 token 級 payload の canary は、同じ revision の Workers invocation outcome、CPU/wall time、
+  Tokenizer stage、quota reserve、upstream 到達を request ID で相関して確認します。
 
 > 詳細な設計・エラー契約は [SPEC.md](../SPEC.md) を参照してください。
+
+### 6.6 ロールバック
+
+Durable Object migration は不可逆として扱います。適用済みの `v1` / `v2` を削除・改名・再利用せず、
+Cloudflare の deployment version rollback を使ってアプリケーション revision だけを戻してください。
+rollback 後も `TOKENIZER_CONTROLLER` binding と migration `v2` を含む manifest を維持し、Gateway や
+shared package に exact BPE を戻さないでください。小さい非機密 fixture で success、reservation、
+upstream 到達、`/quota` の状態を確認してから利用者へ再開を告知します。
+
+Tokenizer RPC failure が継続する場合は、原因が解消するまで再試行を増やさず fail-closed のままにし、
+revision ID と安全な stage event だけを記録します。
 
 ## Template repository 利用時の留意点
 

@@ -44,9 +44,7 @@ export async function callUpstream(
     "content-type": "application/json",
     "cf-aig-authorization": `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,
     "cf-aig-request-timeout": "25000",
-    "cf-aig-max-attempts": "2",
-    "cf-aig-retry-delay": "1000",
-    "cf-aig-backoff": "exponential",
+    "cf-aig-max-attempts": "1",
     "cf-aig-metadata": JSON.stringify(meta),
     "cf-aig-collect-log-payload": "false",
   };

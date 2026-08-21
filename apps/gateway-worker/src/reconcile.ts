@@ -108,11 +108,10 @@ export async function runReconciliation(env: Env, now: Date): Promise<Reconcilia
     const stub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(quotaIdOf(pool, day)));
     const pending = await stub.getReconcileSnapshot();
     const initialLocalTokens = local?.total ?? 0; const usage = await fetchUsageWithRetry(env, day); const registry = await loadRegistry(env); const openaiTokens = [...registry.entries()].filter(([, entry]) => entry.complimentary_pool === pool).reduce((sum, [model]) => sum + (usage.get(model) ?? 0), 0); const difference = openaiTokens - initialLocalTokens;
-    const uncertainRequests = pending.requests.filter((row) => row.state === "uncertain");
-    const reconcilableUncertainRequests = uncertainRequests.filter((row) => row.uncertaintyOrigin !== "reserve_unknown");
-    const uncertainTotal = reconcilableUncertainRequests.reduce((sum, row) => sum + row.reservedTokens, 0);
-    if (reconcilableUncertainRequests.length > 0 && difference === uncertainTotal) {
-      for (const row of reconcilableUncertainRequests) {
+    const reconcilablePendingRequests = pending.requests.filter((row) => row.uncertaintyOrigin !== "reserve_unknown");
+    const pendingTotal = reconcilablePendingRequests.reduce((sum, row) => sum + row.reservedTokens, 0);
+    if (reconcilablePendingRequests.length > 0 && difference === pendingTotal) {
+      for (const row of reconcilablePendingRequests) {
         const result = await stub.reconcileRequest(row.requestId, "consumed");
         const reconciledRequest = result.applied
           ? undefined

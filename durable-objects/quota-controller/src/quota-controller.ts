@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   nextUtcMidnight,
+  parseIdempotencyKey,
   remainingOf,
   tierOf,
 } from "@octg/shared";
@@ -87,13 +88,20 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     ) {
       throw new TypeError("Reservation tokens and upper bound must be non-negative integers.");
     }
+    const parsedIdempotencyKey = parseIdempotencyKey(idempotencyKey);
+    if (parsedIdempotencyKey.kind === "invalid") {
+      throw new TypeError("Idempotency-Key must be at most 255 UTF-8 bytes.");
+    }
+    const normalizedIdempotencyKey = parsedIdempotencyKey.kind === "valid"
+      ? parsedIdempotencyKey.value
+      : undefined;
 
     const { pool, utcDay } = this.identity;
     const resetAt = nextUtcMidnight(new Date(`${utcDay}T00:00:00Z`));
 
     return this.ctx.storage.transaction(async (storage) => {
-      const idempotencyRequestId = idempotencyKey !== undefined
-        ? await getIdempotencyRequestId(storage, idempotencyKey, clientId)
+      const idempotencyRequestId = normalizedIdempotencyKey !== undefined
+        ? await getIdempotencyRequestId(storage, normalizedIdempotencyKey, clientId)
         : undefined;
       const mappedEntry = idempotencyRequestId === undefined
         ? undefined
@@ -103,7 +111,11 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         : (idempotencyRequestId ?? requestId);
       const existing = await getEntry(storage, entryRequestId);
       if (existing) {
-        if (idempotencyRequestId !== undefined && existing.state !== "released") {
+        if (
+          idempotencyRequestId !== undefined &&
+          existing.state !== "released" &&
+          idempotencyRequestId !== requestId
+        ) {
           return {
             ok: false,
             reason: "duplicate_idempotency_key",
@@ -154,7 +166,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         tokens,
         upperBoundTokens,
         reservedTokens: tokens,
-        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        ...(normalizedIdempotencyKey === undefined ? {} : { idempotencyKey: normalizedIdempotencyKey }),
         results: { reserve: result },
         createdAt: now,
         updatedAt: now,
@@ -163,8 +175,8 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
         ...unresolved,
         reservedCount: unresolved.reservedCount + 1,
       });
-      if (idempotencyKey !== undefined) {
-        await putIdempotencyRequestId(storage, idempotencyKey, requestId, clientId);
+      if (normalizedIdempotencyKey !== undefined) {
+        await putIdempotencyRequestId(storage, normalizedIdempotencyKey, requestId, clientId);
       }
       return result;
     });

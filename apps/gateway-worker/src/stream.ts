@@ -26,6 +26,7 @@ export function proxyStream(
   const { lease, ttlMs, renewalMs } = options;
   const { generation, requestId } = lease;
   let finalized = false;
+  let clientDisconnected = false;
   let usage: Usage | undefined;
   let renewalFailed = false;
   let renewalError: unknown;
@@ -39,7 +40,10 @@ export function proxyStream(
     renewalTimer = undefined;
   };
   const finalizeUncertain = async (originalError?: unknown) => {
-    await stub.markUncertain(requestId).catch(() => undefined);
+    const markError = await stub.markUncertain(requestId).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await completeRequestAuditBestEffort(
       env,
       requestId,
@@ -51,17 +55,18 @@ export function proxyStream(
       (error: unknown) => error,
     );
     await Promise.resolve()
-      .then(() => onFinalized?.(originalError === undefined ? "uncertain" : "exception"))
+      .then(() => onFinalized?.(originalError === undefined && markError === undefined ? "uncertain" : "exception"))
       .catch(() => undefined);
     if (originalError !== undefined) throw originalError;
+    if (markError !== undefined) throw markError;
     if (releaseError !== undefined) throw releaseError;
   };
   const finalize = async () => {
     if (finalized) return;
     finalized = true;
     stopRenewal();
-    if (renewalFailed) {
-      await finalizeUncertain(renewalError);
+    if (renewalFailed || clientDisconnected) {
+      await finalizeUncertain(renewalFailed ? renewalError : undefined);
       return;
     }
     try {
@@ -155,6 +160,7 @@ export function proxyStream(
       ctx.waitUntil(finalize());
     },
     cancel() {
+      clientDisconnected = true;
       ctx.waitUntil(finalize());
     },
   }), { signal: streamAbort.signal });

@@ -20,6 +20,7 @@ import {
   nextUtcMidnight,
   normalizeChatCompletions,
   normalizeResponses,
+  parseIdempotencyKey,
   quotaIdOf,
   toPoolLower,
   utcDayOf,
@@ -212,18 +213,10 @@ function upstreamStageResult(upstream: Response): {
       fields: { route: "free_shared", quotaReserved: true, upstreamReached: true },
     };
   }
-  const isUncertain = upstream.status === 408 || upstream.status === 429 || upstream.status >= 500;
-  if (isUncertain) {
-    return {
-      isUncertain: true,
-      outcome: "uncertain",
-      fields: { route: "error:upstream_uncertain", quotaReserved: true, upstreamReached: true },
-    };
-  }
   return {
-    isUncertain: false,
-    outcome: "rejected",
-    fields: { quotaReserved: true, upstreamReached: true },
+    isUncertain: true,
+    outcome: "uncertain",
+    fields: { route: "error:upstream_uncertain", quotaReserved: true, upstreamReached: true },
   };
 }
 
@@ -245,9 +238,17 @@ export async function handleProxy(
   let upstreamStageStartedAt: number | undefined;
 
   try {
-    const idempotencyKey = request.headers.get("Idempotency-Key") ?? undefined;
     const auth = await authenticate(request, env, requestId);
     if (!("id" in auth)) return errorResponse(auth);
+    const parsedIdempotencyKey = parseIdempotencyKey(request.headers.get("Idempotency-Key"));
+    if (parsedIdempotencyKey.kind === "invalid") {
+      return errorResponse(
+        errInvalidRequest(requestId, "Idempotency-Key must be at most 255 UTF-8 bytes."),
+      );
+    }
+    const idempotencyKey = parsedIdempotencyKey.kind === "valid"
+      ? parsedIdempotencyKey.value
+      : undefined;
 
     const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
     const bodyReadStartedAt = startResourceStage(env, requestId, "body_read");
