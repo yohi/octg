@@ -52,9 +52,73 @@ AI Gateway の Run token はアカウント単位の権限であり、同一 Clo
 7. **Provider Keys** → **Add API Key** を開き、以下を設定します。
    - Provider: `octg`
    - Alias: `default`
-   - API Key: 既存の `octg_sk_*` クライアントキー
+   - API Key: 既存の `octg_sk_*` クライアントキー（Gateway A の BYOK credential。OpenAI key ではない）
 
-クライアントからのリクエストパスは `/custom-octg/v1/chat/completions` です。Custom Provider の Base URL には `/v1` やエンドポイントのパスを含めないでください。
+クライアントからのリクエストパスは `/custom-octg/v1/chat/completions` または `/custom-octg/v1/responses` です。Custom Provider の Base URL には `/v1` やエンドポイントのパスを含めないでください。
+
+## OpenCode から Responses API を利用する場合（OpenCode v2 設定形式）
+
+公式の [OpenCode v2 provider configuration](https://opencode.ai/v2/docs/providers) では、
+ローカル provider ID は
+`cloudflare-ai-gateway-octg` です。これは Cloudflare の provider slug ではありません。
+Cloudflare 側の登録用 provider slug は `octg`、呼び出し URL に現れる Custom Provider slug
+は `custom-octg` のままです。
+
+### `opencode.jsonc`
+
+次の例は、Gateway A の Provider Key を BYOK として登録済みであることを前提にします。
+OpenCode から送る provider 認証ヘッダーはなく、Gateway A の Run token だけを
+`cf-aig-authorization` として送ります。
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cloudflare-ai-gateway-octg/gpt-5.6-luna",
+  "providers": {
+    "cloudflare-ai-gateway-octg": {
+      "name": "OCTG via Cloudflare AI Gateway",
+      "package": "@opencode-ai/ai/providers/openai/responses",
+      "settings": {
+        "baseURL": "https://gateway.ai.cloudflare.com/v1/{env:CLOUDFLARE_ACCOUNT_ID}/{env:CLOUDFLARE_GATEWAY_ID}/custom-octg/v1"
+      },
+      "headers": {
+        "cf-aig-authorization": "Bearer {env:CLOUDFLARE_API_TOKEN}",
+        "cf-aig-collect-log-payload": "false",
+        "cf-aig-skip-cache": "true"
+      },
+      "body": {
+        "store": false
+      },
+      "models": {
+        "gpt-5.6-luna": {
+          "name": "gpt-5.6 Luna",
+          "modelID": "gpt-5.6-luna"
+        }
+      }
+    }
+  }
+}
+```
+
+起動前に次の環境変数を設定してください。`CLOUDFLARE_API_TOKEN` は Gateway A の
+**Run token** です。Cloudflare 管理 API 用 token や OpenAI API key は設定しません。
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID="<account_id>"
+export CLOUDFLARE_GATEWAY_ID="<gateway_a_id>"
+export CLOUDFLARE_API_TOKEN="<gateway_a_run_token>"
+```
+
+OpenCode は `{env:NAME}` を環境変数の値へ展開します。`env`、`apiKey`、
+`Authorization` はこの provider に設定しないでください。Gateway A の Provider Key に
+登録した `octg_sk_*` と Gateway B の OpenAI key は Cloudflare 側の BYOK / Secrets Store
+に保管し、OpenCode の設定・ソースコード・ログへ配布しません。
+
+`body.store` により Responses request は `store: false` になります。Responses の quota 推定は
+リクエスト本文に含まれる履歴だけを対象とするため、必要なテキスト、`function_call`、
+`function_call_output`、reasoning の `encrypted_content` を含む output item を次の
+リクエストへ再送してください。`item_reference`、`previous_response_id`、`conversation`
+には依存しないでください。
 
 ## OCTG 側の確認事項
 
@@ -137,11 +201,11 @@ Gateway A へのクライアントリクエストと、Gateway B への Worker �
 - D1 の `requests` テーブルでリクエスト到達を確認してください。
 - **Gateway A の retry と冪等性**: OCTG Worker は受信クライアントの `cf-aig-max-attempts` を Gateway B へ転送せず、Gateway B への outbound に `cf-aig-max-attempts: 1` を固定付与します。Gateway A を OCTG Worker の前段に直接公開する構成では、信頼できないクライアントが同名ヘッダーを上書きできないよう、Gateway A または trusted ingress で削除・固定してください。その境界を保証できない構成では、retry 回数の設定だけで重複配送を防げるとはみなさず、`Idempotency-Key` と reconciliation を併用してください。`Idempotency-Key` は空文字・未指定を absent とし、指定値は UTF-8 255 bytes 以下にしてください。valid な key は Worker が QuotaController の client-scoped dedupe 判定と Gateway B への upstream call に変更せず利用し、Durable Object 内（client × pool × UTC day）で重複排除します。同じ requestId の再送は保存済み reserve 結果を再返却し、異なる requestId の重複再送は `409 Conflict` で拒否されます。key が欠落した場合は新規リクエストとして処理されます。保持 TTL は Durable Object の既存ライフサイクルに従います。
 
-### OpenCode / BYOK の Responses ツール履歴
+### OpenCode / Responses API のツール履歴
 
-OpenCode を BYOK プラグイン経由で Responses API に接続する場合は、参照先をOCTGが取得できず quota 推定できないため、`store: false` を使用してください。`item_reference`、`previous_response_id`、`conversation` は送信せず、必要なテキスト・`function_call`・`function_call_output`・reasoning 履歴をリクエストへ再送します。
+OpenCode の `cloudflare-ai-gateway-octg` provider で Responses API を利用する場合は、参照先を OCTG が取得できず quota 推定できないため、`store: false` を使用してください。`item_reference`、`previous_response_id`、`conversation` は送信せず、必要なテキスト・`function_call`・`function_call_output`・reasoning 履歴をリクエストへ再送します。
 
-OCTG は、assistant の `output_text`、user/system/developer の `input_text`、文字列または `input_text` の tool output、reasoning の `summary_text` と `encrypted_content` を受理します。非テキストの `input_image`、`input_audio`、`input_file`、`image_url`、`audio`、`file`、`video` は未対応のため、予約前に拒否します。未知の item/part と参照状態も予約前に拒否します。`item_reference`、`previous_response_id`、`conversation` は送信しないでください。BYOK プラグインのデプロイ後は、実際のプラグイン／OpenCode バージョンが `store: false` と必要履歴の再送設定を使用していることを確認してください。
+OCTG は、assistant の `output_text`、user/system/developer の `input_text`、文字列または `input_text` の tool output、reasoning の `summary_text` と `encrypted_content` を受理します。非テキストの `input_image`、`input_audio`、`input_file`、`image_url`、`audio`、`file`、`video` は未対応のため、予約前に拒否します。未知の item/part と参照状態も予約前に拒否します。`item_reference`、`previous_response_id`、`conversation` は送信しないでください。OpenCode の provider 設定後は、実際の OpenCode バージョンが `store: false` と必要履歴の再送設定を使用していることを確認してください。
 
 ### ストリーミングが動作しない
 

@@ -352,7 +352,9 @@ OCTG 自体を Cloudflare AI Gateway の Custom Provider（Gateway A）として
 
 - 循環ルーティング防止のため、受信側（Gateway A）と送信側（Gateway B）で異なる AI Gateway インスタンスを使用する。
 - Gateway A → Worker への送信時、`Authorization: Bearer octg_sk_*` ヘッダーが伝送される。
-- Worker → Gateway B への送信時、`cf-aig-authorization: Bearer <Gateway B Run token>` ヘッダーを使用し、`cf-aig-collect-log-payload: true` でログペイロードを保存する。
+- Worker → Gateway B への送信時、`cf-aig-authorization: Bearer <Gateway B Run token>`
+  ヘッダーを使用し、`cf-aig-collect-log-payload: false` で prompt / response の
+  ログペイロードを保存しない。
 - 詳細な設定手順は [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照。
 
 ## 8. Reconciliation
