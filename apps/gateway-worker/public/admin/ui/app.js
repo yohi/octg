@@ -32,7 +32,7 @@ function updateLastUpdated() {
   const target = document.querySelector("#last-updated");
   if (!target) return;
   target.dateTime = timestamp.toISOString();
-  target.textContent = timestamp.toISOString().replace("T", " ").replace(".000Z", " UTC");
+  target.textContent = timestamp.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
 }
 
 function displayError(error) {
