@@ -86,7 +86,7 @@ curl https://octg-gateway.<subdomain>.workers.dev/v1/chat/completions \
 | モデル | 無料枠プール | 用途の目安 |
 |---|---|---|
 | `gpt-5.6-sol` | STANDARD | 高度な推論・複雑な処理 |
-| `gpt-5.6-terra` | STANDARD | 性能とコストのバランス |
+| `gpt-5.6-terra` | MINI | 性能とコストのバランス |
 | `gpt-5.6-luna` | MINI | 高ボリューム・低コスト |
 | `gpt-5` | STANDARD | 既存の推論・コーディング |
 | `gpt-5-mini` | MINI | 軽量な処理 |
