@@ -392,6 +392,7 @@ GET  /admin/models
 PUT  /admin/clients/:id/policy
 PUT  /admin/models/:model
 POST /admin/reconcile
+POST /admin/reconcile/:pool/:utcDay/:targetRequestId
 ```
 
 `/v1/embeddings`・`/v1/audio/*`・`/v1/images/*` は将来対応（要件第 25 章）。
@@ -419,7 +420,31 @@ POST /admin/reconcile
 
 - **`PUT /admin/models/:model`**: モデルレジストリの作成・更新。
   - ボディ型: `{ complimentary_pool: "STANDARD" | "MINI" | "NONE", enabled: boolean, fallback_model: string | null }`
-- **Admin Web UI（将来実装）**: 同一 Cloudflare Access セッションで保護された `/admin/ui/*` エンドポイントから Workers Static Assets (`public/admin/ui/*`) 経由でブラウザ UI（Pico.css + Vanilla JS）を配信する計画。配信パスとルーティング: `/admin/ui` → `public/admin/ui/index.html`（`html_handling: "auto-trailing-slash"`）、`/admin/ui/app.js`・`/admin/ui/styles.css` → Static Assets 配信、`/admin/*` → 既存 `handleAdmin` による JSON API。`not_found_handling: "none"` とし `/admin/ui/*` 配下以外は API handler に委ねる。HTML 内で CSS/JS を読み込む際は絶対パス `/admin/ui/app.js`・`/admin/ui/styles.css` を使用する。UI 構成は単一ページダッシュボード（Quota / Usage / Clients / Models セクション）で、Clients と Models はインライン編集をサポートする。エラー処理: API 取得失敗時はセクション内にエラーメッセージと再試行ボタンを表示、編集 PUT 失敗時は行内にエラーメッセージを表示、認証切れ時は Cloudflare Access がログイン画面へリダイレクト。Pico.css は `public/admin/ui/pico.min.css` として同梱し同一ドメインから配信する。
+- **状態変更の Origin 検証**: 次の 4 endpoint は、`Origin` が存在する場合に
+  request URL の origin と完全一致することを要求する。
+  - `PUT /admin/clients/:id/policy`
+  - `PUT /admin/models/:model`
+  - `POST /admin/reconcile`
+  - `POST /admin/reconcile/:pool/:utcDay/:targetRequestId`
+  不一致は 403 `permission_error` / `origin_not_allowed` とし、mutation を実行しない。
+  Origin がない有効な Access JWT request は、既存の管理 CLI との互換性のため許可する。
+- **Admin Web UI（実装済み）**: Cloudflare Access で保護された `/admin/ui/*` を
+  Worker-first の Workers Static Assets (`public/admin/ui/*`) として配信する。
+  `/admin/ui` は `html_handling: "auto-trailing-slash"` により `/admin/ui/` へ正規化し、
+  `/admin/ui/*` は `verifyAccessJwt()` 成功後にだけ `env.ASSETS.fetch(request)` へ渡す。
+  `run_worker_first` は `/admin/*` に限定し、認証前の asset fallback は持たない。
+  その他の `/admin/*` は既存 `handleAdmin` による JSON API として処理する。
+  - Static Assets は `directory: "./public"`、`binding: "ASSETS"`、
+    `not_found_handling: "none"` とする。HTML は `/admin/ui/app.js`、
+    `/admin/ui/styles.css`、`/admin/ui/pico.min.css` を同一 origin から読み込む。
+    Pico.css 2.1.1 は同梱し、外部 CDN は使用しない。
+  - UI は Vanilla HTML/CSS/JavaScript の単一ページで、Quota / Usage / Clients /
+    Models を表示する。Quota は STANDARD、MINI の固定順、Usage は `client_id` 昇順で
+    表示する。Clients と Models はインライン編集し、保存成功後に該当 GET を再取得する。
+    取得失敗は section 内の retry、保存失敗は入力値を保持した行内エラーで表示する。
+  - Admin GET は `request_id` と `utc_day` を含む。Clients の policy payload は
+    `overflow_mode`、`output_limit_mode`、`max_paid_usd_day`、`cache_enabled`、
+    `tools_mode` の 5 フィールドを必須とする。
 
 ## 10. セキュリティとプライバシー
 

@@ -109,7 +109,7 @@ explicit approval.
 - Contract: HTTP 403, `permission_error`, code `origin_not_allowed`; no sensitive
   origin value appears in the response.
 
-- [ ] **Step 1: Write the failing contract test**
+- [x] **Step 1: Write the failing contract test**
 
 ```ts
 import { errOriginNotAllowed } from "../src/errors";
@@ -129,7 +129,7 @@ it("returns a generic forbidden-origin response", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 ```bash
 npm exec vitest run packages/shared/test/errors.test.ts
@@ -137,7 +137,7 @@ npm exec vitest run packages/shared/test/errors.test.ts
 
 Expected: failure because `errOriginNotAllowed` is not exported.
 
-- [ ] **Step 3: Add the minimal error factory**
+- [x] **Step 3: Add the minimal error factory**
 
 ```ts
 export function errOriginNotAllowed(requestId: string): OctgHttpError {
@@ -152,7 +152,7 @@ export function errOriginNotAllowed(requestId: string): OctgHttpError {
 }
 ```
 
-- [ ] **Step 4: Run the focused test and typecheck**
+- [x] **Step 4: Run the focused test and typecheck**
 
 ```bash
 npm exec vitest run packages/shared/test/errors.test.ts
@@ -180,7 +180,7 @@ git commit -m "feat(admin): Origin 拒否エラー契約を追加"
 - Contract: a missing Origin remains allowed for existing authenticated CLI clients;
   a mismatched Origin returns `errOriginNotAllowed()` before D1 or reconciliation work.
 
-- [ ] **Step 1: Write one RED test per protected endpoint**
+- [x] **Step 1: Write one RED test per protected endpoint**
 
 Add a helper to `admin-api.test.ts`. Pass it a real signed Access JWT from the test file's
 existing `token()` helper; never use a fixed placeholder token.
@@ -209,7 +209,7 @@ the seeded `requests` projection before the request, then assert both remain unc
 403 response. Keep existing signed-token no-Origin and same-Origin success tests so valid
 requests can still assert their normal `200` responses.
 
-- [ ] **Step 2: Run the focused tests and confirm RED**
+- [x] **Step 2: Run the focused tests and confirm RED**
 
 ```bash
 npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
@@ -218,7 +218,7 @@ npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
 
 Expected: the requests currently reach their handlers instead of returning 403.
 
-- [ ] **Step 3: Add the guard after JWT verification and before mutation dispatch**
+- [x] **Step 3: Add the guard after JWT verification and before mutation dispatch**
 
 In `admin.ts`, import `errOriginNotAllowed`. Add:
 
@@ -241,7 +241,7 @@ POST /admin/reconcile/:pool/:utcDay/:targetRequestId
 
 Keep existing input parsing, error bodies, and reconciliation behavior unchanged.
 
-- [ ] **Step 4: Verify foreign Origin rejection and CLI compatibility**
+- [x] **Step 4: Verify foreign Origin rejection and CLI compatibility**
 
 ```bash
 npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
@@ -273,7 +273,7 @@ git commit -m "feat(admin): 状態変更に Origin 検証を追加"
 - Contract: `/admin/ui/*` returns static assets only after Access JWT verification;
   JSON Admin APIs retain `handleAdmin`; unknown `/admin/*` retains JSON 404 behavior.
 
-- [ ] **Step 1: Write RED Worker integration tests**
+- [x] **Step 1: Write RED Worker integration tests**
 
 Create `admin-ui.test.ts` using the existing JWT setup pattern. Test:
 
@@ -308,7 +308,7 @@ it("keeps an authenticated unknown admin API route as JSON 404", async () => {
 });
 ```
 
-- [ ] **Step 2: Add the asset configuration and test binding**
+- [x] **Step 2: Add the asset configuration and test binding**
 
 Add this top-level `assets` object to `wrangler.jsonc`:
 
@@ -346,7 +346,7 @@ This test double proves the Worker authentication and dispatch boundary. It does
 claim to emulate Workers Static Assets URL normalization; that behavior is checked
 against the real staging deployment in Task 6.
 
-- [ ] **Step 3: Add the route dispatch**
+- [x] **Step 3: Add the route dispatch**
 
 Extend `Env` with `readonly ASSETS: Fetcher`. In the default fetch handler,
 before calling `handleAdmin`, branch only for `/admin/ui` and paths starting
@@ -367,7 +367,7 @@ possibly undefined outer `requestId`, and do not use a non-null assertion.
 Do not route `/admin/ui` through `handleAdmin`; let configured HTML handling redirect it
 to `/admin/ui/`. Do not fetch assets for any other `/admin/*` path.
 
-- [ ] **Step 4: Add minimal temporary entrypoint fixtures, then run GREEN**
+- [x] **Step 4: Add minimal temporary entrypoint fixtures, then run GREEN**
 
 Before PR 2 supplies the dashboard, create a minimal `public/admin/ui/index.html`
 containing a title and no secrets so the route test is meaningful. Run:
@@ -408,7 +408,7 @@ git commit -m "feat(admin): Access 保護付き静的 UI 配信を追加"
   `credentials: "same-origin"`; response values are rendered with DOM nodes and
   `textContent`, never `innerHTML`.
 
-- [ ] **Step 1: Replace the temporary page with semantic dashboard markup**
+- [x] **Step 1: Replace the temporary page with semantic dashboard markup**
 
 Create `<main class="container">` with a header title `OCTG Admin`, a
 `<time id="last-updated">`, `aria-live="polite"` notification region, and four
@@ -422,7 +422,7 @@ sections with stable IDs: `quota-section`, `usage-section`, `clients-section`, a
 <script type="module" src="/admin/ui/app.js"></script>
 ```
 
-- [ ] **Step 2: Vendor Pico.css 2.1.1 without a CDN**
+- [x] **Step 2: Vendor Pico.css 2.1.1 without a CDN**
 
 Use the checked package artifact, preserving its license banner:
 
@@ -434,7 +434,7 @@ tar -xOf /tmp/picocss-pico-2.1.1.tgz package/css/pico.min.css \
 
 Verify the file begins with the upstream license comment and has no network URL.
 
-- [ ] **Step 3: Implement the API client with error normalization**
+- [x] **Step 3: Implement the API client with error normalization**
 
 `api.js` must expose this behavior:
 
@@ -467,7 +467,7 @@ export async function requestJson(path, options = {}) {
 
 Use only `/admin/quota`, `/admin/usage`, `/admin/clients`, and `/admin/models`.
 
-- [ ] **Step 4: Implement read-only renderers**
+- [x] **Step 4: Implement read-only renderers**
 
 In `render.js`, render quota cards in fixed `standard`, `mini` order and show every
 zero. Throw a displayable contract error if either pool is absent. Render usage
@@ -476,14 +476,14 @@ clients and models as tables, including client `tools_mode` and model provider.
 Show request IDs and UTC dates; do not transform `utc_day` to local time. Set the
 header timestamp from the completion time of each successful refresh.
 
-- [ ] **Step 5: Wire load, retry, and per-section failure states**
+- [x] **Step 5: Wire load, retry, and per-section failure states**
 
 `app.js` calls all four GET endpoints at startup and on each section refresh button.
 On failure, preserve other sections and put the error message plus a retry button in
 the failed section. For 401/403, show a neutral notification that Access
 authentication may need renewal; never display a token or response body verbatim.
 
-- [ ] **Step 6: Verify static assets and syntax**
+- [x] **Step 6: Verify static assets and syntax**
 
 ```bash
 node --check apps/gateway-worker/public/admin/ui/api.js
@@ -495,7 +495,7 @@ npm exec vitest run --config apps/gateway-worker/vitest.config.ts \
 
 Expected: syntax checks and route integration tests exit 0.
 
-- [ ] **Step 7: Manual read-only browser QA**
+- [x] **Step 7: Manual read-only browser QA**
 
 Run `npm run dev -w apps/gateway-worker`, authenticate through the configured
 Cloudflare Access staging route, then open `/admin/ui/` in a real browser. Confirm
@@ -525,7 +525,7 @@ git commit -m "feat(admin): 管理ダッシュボードの参照画面を追加"
 - Contract: Save sends complete API payloads; Cancel restores the original row;
   failed Save keeps all entered values and renders a row-local error.
 
-- [ ] **Step 1: Implement complete client policy form data**
+- [x] **Step 1: Implement complete client policy form data**
 
 The editor must use labelled controls for all five required fields:
 
@@ -543,7 +543,7 @@ Validate `Number.isFinite(payload.max_paid_usd_day)` and `>= 0` before PUT. Use
 select options `REJECT` / `PAID_SHARED`, `REJECT` / `CLAMP`, and `REJECT` /
 `ALLOW`; use `<input type="number" min="0" step="any">` and a checkbox.
 
-- [ ] **Step 2: Implement complete model form data**
+- [x] **Step 2: Implement complete model form data**
 
 ```js
 const payload = {
@@ -558,21 +558,21 @@ Allow only `STANDARD`, `MINI`, and `NONE` for `complimentary_pool`. Send the PUT
 `/admin/clients/${encodeURIComponent(client.id)}/policy` with
 `content-type: application/json`.
 
-- [ ] **Step 3: Handle Save, Cancel, and failure state**
+- [x] **Step 3: Handle Save, Cancel, and failure state**
 
 Disable Save while the request is pending. On success, call the applicable GET
 endpoint and replace that section from authoritative API data. On error, re-enable
 Save, retain each input value, and append a `role="alert"` message using
 `textContent`. Cancel must restore the non-edit row without making a request.
 
-- [ ] **Step 4: Update rendering and styles**
+- [x] **Step 4: Update rendering and styles**
 
 Add an `Edit` button to each client/model row. Style edit rows and errors in
 `styles.css` while preserving Pico defaults. Use responsive overflow for tables and
 visible keyboard focus. Do not add a reconcile button; it remains an explicitly
 deferred extension despite receiving server-side Origin protection in PR 1.
 
-- [ ] **Step 5: Syntax and Worker verification**
+- [x] **Step 5: Syntax and Worker verification**
 
 ```bash
 node --check apps/gateway-worker/public/admin/ui/editors.js
@@ -582,7 +582,7 @@ npm run typecheck
 
 Expected: all project tests and workspace typechecks exit 0.
 
-- [ ] **Step 6: Manual edit browser QA**
+- [x] **Step 6: Manual edit browser QA**
 
 In the authenticated staging browser, edit one seeded client policy including
 `tools_mode`, save it, reload the page, and confirm all five saved values match the
@@ -609,7 +609,7 @@ git commit -m "feat(admin): クライアントとモデルのインライン編�
 - Documents the deployed routes, same-Origin state-change rule, all five Client
   policy fields, and Cloudflare Access verification steps.
 
-- [ ] **Step 1: Correct the design specification**
+- [x] **Step 1: Correct the design specification**
 
 In the Clients edit-fields table, add:
 
@@ -621,7 +621,7 @@ State that it is included because `PUT /admin/clients/:id/policy` requires all f
 policy fields. Document the chosen compatibility rule: absent Origin is permitted
 for authenticated CLI requests; any supplied Origin must match the request origin.
 
-- [ ] **Step 2: Update `SPEC.md` and `README.md`**
+- [x] **Step 2: Update `SPEC.md` and `README.md`**
 
 Document `/admin/ui/` asset paths, Worker-first JWT validation, no external CDN,
 and the following production confirmation sequence:
@@ -636,7 +636,7 @@ and the following production confirmation sequence:
 5. A valid JWT with no Origin remains usable by the documented admin CLI flow.
 ```
 
-- [ ] **Step 3: Run final verification**
+- [x] **Step 3: Run final verification**
 
 ```bash
 npm test
@@ -649,7 +649,7 @@ Expected: all commands exit 0. If `markdownlint-cli2` is unavailable, record tha
 fact and run the repository's configured Markdown command instead; do not add a
 dependency merely for this check.
 
-- [ ] **Step 4: Complete production manual QA**
+- [x] **Step 4: Complete production manual QA**
 
 Use a real browser against the Access-protected staging deployment. Confirm `/admin/ui`
 redirects to `/admin/ui/`, all local assets load without third-party requests, all
