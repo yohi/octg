@@ -649,14 +649,24 @@ Expected: all commands exit 0. If `markdownlint-cli2` is unavailable, record tha
 fact and run the repository's configured Markdown command instead; do not add a
 dependency merely for this check.
 
-- [x] **Step 4: Complete production manual QA**
+- [x] **Step 4: Complete staging manual QA**
 
 Use a real browser against the Access-protected staging deployment. Confirm `/admin/ui`
 redirects to `/admin/ui/`, all local assets load without third-party requests, all
 read/edit behavior from Task 5 works, an expired Access session is handled by Access,
 and an unknown `/admin/ui/missing.js` does not shadow an Admin API route.
 
-- [ ] **Step 5: Commit PR 3**
+- [ ] **Step 5: Complete production manual QA**
+
+After the production deployment, configure and verify Cloudflare Access before marking
+this step complete. Confirm that one Access application covers `/admin/*` and its AUD
+matches `ACCESS_AUD`; unauthenticated requests to `/admin/ui/`, `/admin/ui/app.js`,
+`/admin/ui/styles.css`, and `/admin/ui/pico.min.css` are rejected; authenticated UI
+assets load and retain the Access session for API fetches; all four protected mutation
+endpoints reject a valid JWT with `Origin: https://attacker.example` without changing
+state; and a valid JWT without an Origin remains usable by the documented admin CLI.
+
+- [ ] **Step 6: Commit PR 3**
 
 ```bash
 git add SPEC.md README.md docs/superpowers/specs/2026-08-12-admin-web-ui-design.md
