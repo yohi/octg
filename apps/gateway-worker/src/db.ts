@@ -92,7 +92,7 @@ export async function setReservedTokens(env: Env, requestId: string, reservedTok
 
 export async function listRegistryRows(env: Env): Promise<RegistryEntry[]> {
   const result = await env.DB.prepare(
-    "SELECT model, provider, complimentary_pool, enabled, fallback_model FROM model_registry",
+    "SELECT model, provider, complimentary_pool, enabled, fallback_model, updated_at FROM model_registry",
   ).all<Omit<RegistryEntry, "enabled"> & { enabled: number }>();
   return result.results.map((row) => ({ ...row, enabled: row.enabled === 1 }));
 }

@@ -6,6 +6,7 @@ export interface RegistryEntry {
   complimentary_pool: PoolName | "NONE";
   enabled: boolean;
   fallback_model: string | null;
+  updated_at: string;
 }
 
 export function classifyModel(
