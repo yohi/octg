@@ -34,7 +34,8 @@ Vanilla HTML/CSS/JavaScript、Pico.css 2.1.1、Vitest +
 - `as any`、`@ts-ignore`、`@ts-expect-error`、non-null assertion を追加しない。
 - UI は外部 CDN を使用せず、Pico.css 2.1.1 のライセンスヘッダーを保持して同梱する。
 - E2E 自動テストは今回追加しない。Worker 統合テストと実ブラウザの手動 QA を行う。
-- Git 操作は明示的な指示がある場合だけ実行し、PR merge は人間が bottom-to-top で行う。
+- Git 操作（commit、stack の初期化・追加、push、PR 作成・submit、merge を含む）は、ユーザーの明示的な承認なしには実行しない。実装・検証が完了しても、`gh stack submit`、push、PR 作成、merge の直前には停止し、人間による明示的な承認・ハンドオフを受けてから実行する。PR merge は人間が bottom-to-top で行う。
+- 以下の `git add` / `git commit` ブロックは実行例であり、各ブロックの直前に人間の明示的な承認を取得する。承認がなければコマンドを実行せず、ハンドオフする。
 
 ## File Map
 
@@ -61,36 +62,37 @@ Vanilla HTML/CSS/JavaScript、Pico.css 2.1.1、Vitest +
 
 ## Stacked PR Delivery Strategy
 
-この変更は 1 個の PR にまとめない。以下の linear stack を**実装開始前**に作る。
+この変更は 1 個の PR にまとめない。以下の linear stack を**実装開始前**に作る。ただし、stack の作成自体が Git 操作であるため、実装者は最初に人間の明示的な承認を取得し、承認がない場合はここで停止する。
 
 ```text
-(main) <- admin-ui/security-assets <- admin-ui/dashboard <- admin-ui/editing-docs
+(master) <- admin-ui/security-assets <- admin-ui/dashboard <- admin-ui/editing-docs
 ```
 
 | PR | Branch | Base | Scope | Required gate |
 | --- | --- | --- | --- | --- |
-| 1 | `admin-ui/security-assets` | `main` | Worker-first asset routing、Access JWT、Origin guard、integration tests | focused tests + typecheck |
+| 1 | `admin-ui/security-assets` | `master` | Worker-first asset routing、Access JWT、Origin guard、integration tests | focused tests + typecheck |
 | 2 | `admin-ui/dashboard` | `admin-ui/security-assets` | vendored CSS、HTML、read-only quota/usage/clients/models dashboard | static asset test + browser read-only QA |
 | 3 | `admin-ui/editing-docs` | `admin-ui/dashboard` | inline edits、UX validation、docs、full manual QA | full test + typecheck + browser edit QA |
 
-Create and inspect the stack non-interactively:
+After the human explicitly approves stack initialization and confirms `master` as the trunk, create and inspect the stack non-interactively:
 
 ```bash
-gh stack init admin-ui/security-assets
+gh stack init --base master admin-ui/security-assets
 gh stack add admin-ui/dashboard
 gh stack add admin-ui/editing-docs
 gh stack view --json
 ```
 
-After every layer is green, create draft PRs and confirm their bases:
+After every layer is green, stop and request a new explicit human approval to push branches and create draft PRs. `gh stack submit` performs both the push and the PR creation, so do not run it before that handoff.
 
 ```bash
 gh stack submit --auto --remote origin
 gh stack view --json
 ```
 
-Do not use subagents for any task in this plan. Do not merge; a human operator merges
-the three PRs bottom-to-top.
+Do not use subagents for any task in this plan. Do not run `gh stack merge` or any other merge
+command from this plan; a human operator merges the three PRs bottom-to-top after a separate
+explicit approval.
 
 ---
 
@@ -180,24 +182,32 @@ git commit -m "feat(admin): Origin 拒否エラー契約を追加"
 
 - [ ] **Step 1: Write one RED test per protected endpoint**
 
-Add a helper to `admin-api.test.ts`:
+Add a helper to `admin-api.test.ts`. Pass it a real signed Access JWT from the test file's
+existing `token()` helper; never use a fixed placeholder token.
 
 ```ts
-function withForeignOrigin(init: RequestInit): RequestInit {
+function withForeignOrigin(accessJwt: string, init: RequestInit = {}): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set("cf-access-jwt-assertion", accessJwt);
+  headers.set("origin", "https://attacker.example");
+  headers.set("content-type", "application/json");
   return {
     ...init,
-    headers: {
-      "cf-access-jwt-assertion": "jwt",
-      origin: "https://attacker.example",
-      "content-type": "application/json",
-    },
+    headers,
   };
 }
 ```
 
-Add tests that issue valid-JWT requests to the two PUT endpoints and `POST /admin/reconcile`.
-For each response assert `403` and `error.code === "origin_not_allowed"`; for the
-two D1 endpoints, follow with an authenticated GET and assert the seeded value is unchanged.
+Add tests that issue valid-JWT foreign-Origin requests to all four state-changing endpoints:
+the two PUT endpoints, `POST /admin/reconcile`, and
+`POST /admin/reconcile/:pool/:utcDay/:targetRequestId`. Call
+`withForeignOrigin(await token(), init)` so every request passes JWT verification and reaches
+the Origin guard. For each response assert `403` and `error.code === "origin_not_allowed"`.
+For the two PUT endpoints, follow with an authenticated read and assert the seeded D1 value is
+unchanged. For both reconciliation endpoints, snapshot the relevant Durable Object state and
+the seeded `requests` projection before the request, then assert both remain unchanged after the
+403 response. Keep existing signed-token no-Origin and same-Origin success tests so valid
+requests can still assert their normal `200` responses.
 
 - [ ] **Step 2: Run the focused tests and confirm RED**
 
@@ -219,13 +229,14 @@ function isAllowedAdminOrigin(request: Request): boolean {
 }
 ```
 
-After successful `verifyAccessJwt()` and before each of these three mutation branches,
+After successful `verifyAccessJwt()` and before each of these four mutation branches,
 return `errorResponse(errOriginNotAllowed(requestId))` when the helper returns false:
 
 ```text
 PUT  /admin/clients/:id/policy
 PUT  /admin/models/:model
 POST /admin/reconcile
+POST /admin/reconcile/:pool/:utcDay/:targetRequestId
 ```
 
 Keep existing input parsing, error bodies, and reconciliation behavior unchanged.
@@ -273,15 +284,24 @@ it("rejects /admin/ui/ without an Access JWT", async () => {
 
 it("serves the authenticated dashboard entrypoint", async () => {
   const response = await SELF.fetch("https://octg.test/admin/ui/", {
-    headers: { "cf-access-jwt-assertion": "jwt" },
+    headers: { "cf-access-jwt-assertion": await token() },
   });
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toContain("text/html");
 });
 
+it("serves an authenticated non-entry asset as text/plain in the test double", async () => {
+  const response = await SELF.fetch("https://octg.test/admin/ui/app.js", {
+    headers: { "cf-access-jwt-assertion": await token() },
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/plain");
+  expect(await response.text()).toBe("asset");
+});
+
 it("keeps an authenticated unknown admin API route as JSON 404", async () => {
   const response = await SELF.fetch("https://octg.test/admin/unknown", {
-    headers: { "cf-access-jwt-assertion": "jwt" },
+    headers: { "cf-access-jwt-assertion": await token() },
   });
   expect(response.status).toBe(404);
   expect(response.headers.get("content-type")).toContain("application/json");
@@ -308,10 +328,16 @@ service binding. Return `text/html` for `/admin/ui/` and `text/plain` otherwise:
 ```ts
 miniflare: {
   serviceBindings: {
-    ASSETS: (request: Request) => new Response(
-      new URL(request.url).pathname === "/admin/ui/" ? "<title>OCTG Admin</title>" : "asset",
-      { headers: { "content-type": "text/html; charset=utf-8" } },
-    ),
+    ASSETS: (request: Request) => {
+      const isEntrypoint = new URL(request.url).pathname === "/admin/ui/";
+      return new Response(isEntrypoint ? "<title>OCTG Admin</title>" : "asset", {
+        headers: {
+          "content-type": isEntrypoint
+            ? "text/html; charset=utf-8"
+            : "text/plain; charset=utf-8",
+        },
+      });
+    },
   },
 }
 ```
@@ -327,10 +353,16 @@ before calling `handleAdmin`, branch only for `/admin/ui` and paths starting
 `/admin/ui/`:
 
 ```ts
-const access = await verifyAccessJwt(request, env, requestId);
-if (access !== true) return errorResponse(access);
-return env.ASSETS.fetch(request);
+if (url.pathname === "/admin/ui" || url.pathname.startsWith("/admin/ui/")) {
+  const uiRequestId = `req_${ulid()}`;
+  const access = await verifyAccessJwt(request, env, uiRequestId);
+  if (access !== true) return errorResponse(access);
+  return env.ASSETS.fetch(request);
+}
 ```
+
+Use the existing `ulid` import and generate `uiRequestId` inside this branch. Do not pass the
+possibly undefined outer `requestId`, and do not use a non-null assertion.
 
 Do not route `/admin/ui` through `handleAdmin`; let configured HTML handling redirect it
 to `/admin/ui/`. Do not fetch assets for any other `/admin/*` path.
@@ -598,8 +630,9 @@ and the following production confirmation sequence:
 1. One Access application covers /admin/* and its AUD equals ACCESS_AUD.
 2. Unauthenticated /admin/ui/, app.js, styles.css, and pico.min.css are rejected.
 3. Authenticated UI assets load and all API fetches retain the Access session.
-4. A valid JWT plus Origin: https://attacker.example receives 403 on all three
-   protected mutation endpoints and does not alter data.
+4. A valid JWT plus Origin: https://attacker.example receives 403 on all four
+   protected mutation endpoints, including
+   `POST /admin/reconcile/:pool/:utcDay/:targetRequestId`, and does not alter data.
 5. A valid JWT with no Origin remains usable by the documented admin CLI flow.
 ```
 
@@ -644,13 +677,16 @@ git commit -m "docs(admin): 管理 UI の運用手順を追加"
    unspecified test action.
 5. **Type/API consistency:** client JSON uses snake_case five-field policy payloads;
    model JSON uses the existing three-field payload; all paths match `admin.ts`.
-6. **Execution constraint:** all tasks explicitly prohibit subagent use and describe
-   a three-layer stacked PR delivery sequence.
+6. **Execution constraint:** all tasks explicitly prohibit subagent use, describe a three-layer
+   stacked PR delivery sequence, and require human approval immediately before Git operations,
+   branch pushes, PR creation, and merge handoff.
 
 ## Execution Handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-08-22-admin-web-ui.md`.
 
 Execute it inline only, without subagents, beginning with the bottom stacked branch
-`admin-ui/security-assets`. Do not create, merge, or push PRs unless explicitly
-requested.
+`admin-ui/security-assets` after explicit approval for the initial stack Git operations. Do not
+commit, create, push, submit, or merge PRs unless explicitly approved. After all layer checks are
+green, stop and hand off to a human for explicit approval immediately before `gh stack submit`
+or any push/PR creation; merge remains a separate human-only handoff.
