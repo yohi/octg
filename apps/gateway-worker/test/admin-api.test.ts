@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { RequestEntry } from "@octg/shared";
 import { seedClient, TEST_CLIENT_ID } from "./seed";
@@ -17,6 +17,18 @@ const admin = async (path: string, init?: RequestInit, authenticated: "jwt" | fa
   headers.set("content-type", "application/json");
   if (authenticated === "jwt") headers.set("cf-access-jwt-assertion", await token());
   return SELF.fetch(`https://octg.test${path}`, { ...init, headers });
+};
+function withForeignOrigin(accessJwt: string, init: RequestInit = {}): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set("cf-access-jwt-assertion", accessJwt);
+  headers.set("origin", "https://attacker.example");
+  headers.set("content-type", "application/json");
+  return { ...init, headers };
+}
+const foreignAdmin = async (path: string, init: RequestInit = {}) => SELF.fetch(`https://octg.test${path}`, withForeignOrigin(await token(), init));
+const expectOriginNotAllowed = async (response: Response) => {
+  expect(response.status).toBe(403);
+  expect((await response.json<{ error: { code: string } }>()).error.code).toBe("origin_not_allowed");
 };
 
 describe("admin API", () => {
@@ -240,6 +252,74 @@ describe("admin API", () => {
     expect(row?.id).toBe(TEST_CLIENT_ID);
     expect((await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: "{}" })).status).toBe(401);
     expect((await admin("/admin/models/gpt-5", { method: "PUT", body: "{}" })).status).toBe(401);
+  });
+
+  it("rejects a foreign Origin before changing a client policy", async () => {
+    const before = await env.DB.prepare("SELECT overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode FROM client_policies WHERE client_id = ?").bind(TEST_CLIENT_ID).first();
+    const response = await foreignAdmin(`/admin/clients/${TEST_CLIENT_ID}/policy`, {
+      method: "PUT",
+      body: JSON.stringify({ overflow_mode: "PAID_SHARED", output_limit_mode: "CLAMP", max_paid_usd_day: 9, cache_enabled: true, tools_mode: "ALLOW" }),
+    });
+
+    await expectOriginNotAllowed(response);
+    const after = await env.DB.prepare("SELECT overflow_mode, output_limit_mode, max_paid_usd_day, cache_enabled, tools_mode FROM client_policies WHERE client_id = ?").bind(TEST_CLIENT_ID).first();
+    expect(after).toEqual(before);
+  });
+
+  it("rejects a foreign Origin before changing a model", async () => {
+    const before = await env.DB.prepare("SELECT complimentary_pool, enabled, fallback_model FROM model_registry WHERE model = ?").bind("gpt-5").first();
+    const response = await foreignAdmin("/admin/models/gpt-5", {
+      method: "PUT",
+      body: JSON.stringify({ complimentary_pool: "MINI", enabled: false, fallback_model: "gpt-5-mini" }),
+    });
+
+    await expectOriginNotAllowed(response);
+    const after = await env.DB.prepare("SELECT complimentary_pool, enabled, fallback_model FROM model_registry WHERE model = ?").bind("gpt-5").first();
+    expect(after).toEqual(before);
+  });
+
+  it("rejects a foreign Origin before running reconciliation", async () => {
+    const day = "2026-11-08";
+    const requestId = "admin-origin-reconcile";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+    const beforeState = await controller.getState();
+    const beforeProjection = await env.DB.prepare("SELECT status, total_tokens, billing_class, reconciliation_evidence FROM requests WHERE request_id = ?").bind(requestId).first();
+    vi.stubGlobal("fetch", async () => new Response(null, { status: 500 }));
+
+    try {
+      const response = await foreignAdmin("/admin/reconcile", { method: "POST", body: "{}" });
+      await expectOriginNotAllowed(response);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(await controller.getState()).toEqual(beforeState);
+    expect(await env.DB.prepare("SELECT status, total_tokens, billing_class, reconciliation_evidence FROM requests WHERE request_id = ?").bind(requestId).first()).toEqual(beforeProjection);
+  });
+
+  it("rejects a foreign Origin before reconciling a reserve-unknown request", async () => {
+    const day = "2026-11-09";
+    const requestId = "admin-origin-reserve-unknown";
+    const controller = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+    await controller.reserve(requestId, 200, 200);
+    await controller.markReserveOutcomeUnknown(requestId);
+    await env.DB.prepare(
+      "INSERT INTO requests (request_id, utc_day, client_id, pool, reserved_tokens, total_tokens, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(requestId, day, TEST_CLIENT_ID, "STANDARD", 200, 0, "uncertain", new Date().toISOString()).run();
+    const beforeState = await controller.getState();
+    const beforeProjection = await env.DB.prepare("SELECT status, total_tokens, billing_class, reconciliation_evidence FROM requests WHERE request_id = ?").bind(requestId).first();
+    const response = await foreignAdmin(`/admin/reconcile/STANDARD/${day}/${requestId}`, {
+      method: "POST",
+      body: JSON.stringify({ disposition: "consumed", evidence: "blocked" }),
+    });
+
+    await expectOriginNotAllowed(response);
+    expect(await controller.getState()).toEqual(beforeState);
+    expect(await env.DB.prepare("SELECT status, total_tokens, billing_class, reconciliation_evidence FROM requests WHERE request_id = ?").bind(requestId).first()).toEqual(beforeProjection);
   });
 
   it("allows client policy writes with an Access JWT", async () => {

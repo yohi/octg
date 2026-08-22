@@ -1,4 +1,4 @@
-import { errorResponse, quotaIdOf, utcDayOf, type OctgHttpError, type ReconcileDisposition } from "@octg/shared";
+import { errOriginNotAllowed, errorResponse, quotaIdOf, utcDayOf, type OctgHttpError, type ReconcileDisposition } from "@octg/shared";
 import { snapshotOf } from "./proxy";
 import { verifyAccessJwt } from "./access";
 import { invalidateConfigCaches, loadRegistry } from "./policy";
@@ -62,6 +62,11 @@ function validUtcDay(value: string): boolean {
   return parsed.toISOString().slice(0, 10) === value;
 }
 
+function isAllowedAdminOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  return origin === null || origin === new URL(request.url).origin;
+}
+
 export async function handleAdmin(request: Request, env: Env, requestId: string): Promise<Response | undefined> {
   const url = new URL(request.url); if (!url.pathname.startsWith("/admin/")) return undefined;
   const verified = await verifyAccessJwt(request, env, requestId); if (verified !== true) return errorResponse(verified);
@@ -82,6 +87,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
   if (request.method === "GET" && url.pathname === "/admin/models") return json({ request_id: requestId, models: [...(await loadRegistry(env)).values()] });
   const policyMatch = url.pathname.match(/^\/admin\/clients\/([^/]+)\/policy$/);
   if (request.method === "PUT" && policyMatch) {
+    if (!isAllowedAdminOrigin(request)) return errorResponse(errOriginNotAllowed(requestId));
     const clientId = decodeURIComponent(policyMatch[1]!); if (!(await env.DB.prepare("SELECT id FROM clients WHERE id = ?").bind(clientId).first())) return errorResponse(notFound(requestId));
     const body = parseClientPolicy(await parseJson(request));
     if (!body) return errorResponse(badRequest(requestId, "Invalid client policy."));
@@ -90,6 +96,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
   }
   const modelMatch = url.pathname.match(/^\/admin\/models\/([^/]+)$/);
   if (request.method === "PUT" && modelMatch) {
+    if (!isAllowedAdminOrigin(request)) return errorResponse(errOriginNotAllowed(requestId));
     const model = decodeURIComponent(modelMatch[1]!); const body = parseModel(await parseJson(request));
     if (!body) return errorResponse(badRequest(requestId, "Invalid model configuration."));
     const result = await env.DB.prepare("UPDATE model_registry SET complimentary_pool = ?, enabled = ?, fallback_model = ?, updated_at = ? WHERE model = ?").bind(body.complimentary_pool, body.enabled ? 1 : 0, body.fallback_model, new Date().toISOString(), model).run();
@@ -97,6 +104,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
   }
   const reserveUnknownMatch = url.pathname.match(/^\/admin\/reconcile\/([^/]+)\/([^/]+)\/([^/]+)$/);
   if (request.method === "POST" && reserveUnknownMatch) {
+    if (!isAllowedAdminOrigin(request)) return errorResponse(errOriginNotAllowed(requestId));
     const pool = decodeURIComponent(reserveUnknownMatch[1] ?? "");
     const utcDay = decodeURIComponent(reserveUnknownMatch[2] ?? "");
     const targetRequestId = decodeURIComponent(reserveUnknownMatch[3] ?? "");
@@ -122,6 +130,7 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
     });
   }
   if (request.method === "POST" && url.pathname === "/admin/reconcile") {
+    if (!isAllowedAdminOrigin(request)) return errorResponse(errOriginNotAllowed(requestId));
     try { return json({ request_id: requestId, utc_day: targetUtcDay(new Date()), reports: await runReconciliation(env, new Date()) }); }
     catch { return json({ request_id: requestId, error: { message: "Reconciliation failed.", type: "api_error", param: null, code: "reconciliation_failed" } }, { status: 502 }); }
   }
