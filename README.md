@@ -161,11 +161,6 @@ OCTG 経由では非テキスト入力を拒否し、tool calling はクライ�
       "modalities": { "input": ["text"], "output": ["text"] },
       "limit": { "context": 1050000, "input": 922000, "output": 128000 }
     }
-  },
-  "models": {
-    "gpt-5.6-luna": { "name": "GPT-5.6 Luna (OCTG)" },
-    "gpt-5.6-terra": { "name": "GPT-5.6 Terra (OCTG)" },
-    "gpt-5.6-sol": { "name": "GPT-5.6 Sol (OCTG)" }
   }
 }
 ```
@@ -249,7 +244,7 @@ npm install
 cd apps/gateway-worker
 cat > .dev.vars <<'EOF'
 OCTG_KEY_PEPPER=dev-pepper
-OCTG_UPSTREAM_BASE_URL=https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>
+OCTG_UPSTREAM_BASE_URL=https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai
 OCTG_UPSTREAM_API_TOKEN=dev-token
 OPENAI_USAGE_API_KEY=dev-usage-key
 EOF
