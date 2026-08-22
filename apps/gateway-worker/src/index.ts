@@ -7,6 +7,7 @@ import { errInternal, errorResponse } from "@octg/shared";
 import { ulid } from "ulid";
 import { handleAdmin } from "./admin";
 import { runScheduled } from "./scheduled";
+import { verifyAccessJwt } from "./access";
 
 export { QuotaController, TokenizerController };
 
@@ -31,6 +32,7 @@ export interface Env {
   TEST_UPSTREAM_RESPONSE?: string;
   TEST_UPSTREAM_STATUS?: string;
   readonly ACCESS_JWT_PUBLIC_JWK?: string;
+  readonly ASSETS: Fetcher;
 }
 
 export default {
@@ -51,6 +53,12 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/quota") {
         return await handleQuota(request, env, `req_${ulid()}`);
+      }
+      if (url.pathname === "/admin/ui" || url.pathname.startsWith("/admin/ui/")) {
+        const uiRequestId = `req_${ulid()}`;
+        const access = await verifyAccessJwt(request, env, uiRequestId);
+        if (access !== true) return errorResponse(access);
+        return env.ASSETS.fetch(request);
       }
       const admin = await handleAdmin(request, env, `req_${ulid()}`);
       if (admin) return admin;

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="OCTG complimentary token gateway operations console">
+    <title>OCTG Admin</title>
+    <link rel="stylesheet" href="/admin/ui/pico.min.css">
+    <link rel="stylesheet" href="/admin/ui/styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-grid">
+        <div>
+          <p class="eyebrow">OCTG / OPERATIONS CONSOLE</p>
+          <h1>Admin</h1>
+          <p class="lede">A clear view of today’s complimentary capacity, activity, and policy.</p>
+        </div>
+        <div class="header-status" aria-label="Dashboard status">
+          <span class="status-mark" aria-hidden="true"></span>
+          <div>
+            <span class="status-label">Last successful refresh</span>
+            <time id="last-updated" datetime="">Not loaded</time>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container dashboard-shell">
+      <div id="notification" class="notification" role="status" aria-live="polite"></div>
+
+      <section id="quota-section" class="dashboard-section section-featured" aria-labelledby="quota-heading">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">01 / CAPACITY</p>
+            <h2 id="quota-heading">Quota</h2>
+          </div>
+          <button class="outline" type="button" data-refresh-section="quota">Refresh</button>
+        </div>
+        <div class="section-content" data-section-content="quota">
+          <p class="loading-state">Loading current quota…</p>
+        </div>
+      </section>
+
+      <div class="dashboard-grid">
+        <section id="usage-section" class="dashboard-section" aria-labelledby="usage-heading">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">02 / ACTIVITY</p>
+              <h2 id="usage-heading">Usage</h2>
+            </div>
+            <button class="outline" type="button" data-refresh-section="usage">Refresh</button>
+          </div>
+          <div class="section-content" data-section-content="usage">
+            <p class="loading-state">Loading usage…</p>
+          </div>
+        </section>
+
+        <section id="models-section" class="dashboard-section" aria-labelledby="models-heading">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">04 / REGISTRY</p>
+              <h2 id="models-heading">Models</h2>
+            </div>
+            <button class="outline" type="button" data-refresh-section="models">Refresh</button>
+          </div>
+          <div class="section-content" data-section-content="models">
+            <p class="loading-state">Loading models…</p>
+          </div>
+        </section>
+      </div>
+
+      <section id="clients-section" class="dashboard-section" aria-labelledby="clients-heading">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">03 / POLICY</p>
+            <h2 id="clients-heading">Clients</h2>
+          </div>
+          <button class="outline" type="button" data-refresh-section="clients">Refresh</button>
+        </div>
+        <div class="section-content" data-section-content="clients">
+          <p class="loading-state">Loading clients…</p>
+        </div>
+      </section>
+    </main>
+
+    <noscript>
+      <p class="noscript-message">JavaScript is required to load the OCTG Admin dashboard.</p>
+    </noscript>
+    <script type="module" src="/admin/ui/app.js"></script>
+  </body>
+</html>

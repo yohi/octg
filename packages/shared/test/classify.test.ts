@@ -10,6 +10,7 @@ const registry = new Map<string, RegistryEntry>([
       complimentary_pool: "STANDARD",
       enabled: true,
       fallback_model: null,
+      updated_at: "2026-08-09T00:00:00Z",
     },
   ],
   [
@@ -20,6 +21,7 @@ const registry = new Map<string, RegistryEntry>([
       complimentary_pool: "MINI",
       enabled: true,
       fallback_model: null,
+      updated_at: "2026-08-09T00:00:00Z",
     },
   ],
   [
@@ -30,6 +32,7 @@ const registry = new Map<string, RegistryEntry>([
       complimentary_pool: "NONE",
       enabled: true,
       fallback_model: null,
+      updated_at: "2026-08-09T00:00:00Z",
     },
   ],
   [
@@ -40,6 +43,7 @@ const registry = new Map<string, RegistryEntry>([
       complimentary_pool: "STANDARD",
       enabled: false,
       fallback_model: null,
+      updated_at: "2026-08-09T00:00:00Z",
     },
   ],
 ]);

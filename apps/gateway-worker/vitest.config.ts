@@ -8,11 +8,27 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
+          assets: {
+            directory: "./public",
+            binding: "TEST_STATIC_ASSETS"
+          },
           bindings: {
             OCTG_KEY_PEPPER: "test-pepper",
             OCTG_UPSTREAM_API_TOKEN: "test-upstream-token",
             OCTG_UPSTREAM_BASE_URL: "https://aigw.invalid",
             TEST_MIGRATIONS: migrations
+          },
+          serviceBindings: {
+            ASSETS: (request: Request) => {
+              const isEntrypoint = new URL(request.url).pathname === "/admin/ui/";
+              return new Response(isEntrypoint ? "<title>OCTG Admin</title>" : "asset", {
+                headers: {
+                  "content-type": isEntrypoint
+                    ? "text/html; charset=utf-8"
+                    : "text/plain; charset=utf-8",
+                },
+              });
+            },
           }
         }
       })

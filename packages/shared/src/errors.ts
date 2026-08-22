@@ -148,6 +148,10 @@ export function errInvalidApiKey(requestId: string): OctgHttpError {
   return makeError(401, requestId, "Invalid API key provided.", "authentication_error", null, "invalid_api_key");
 }
 
+export function errOriginNotAllowed(requestId: string): OctgHttpError {
+  return makeError(403, requestId, "Request origin is not allowed.", "permission_error", null, "origin_not_allowed");
+}
+
 export function errClientDisabled(requestId: string): OctgHttpError {
   return makeError(403, requestId, "This client is disabled.", "permission_error", null, "client_disabled");
 }

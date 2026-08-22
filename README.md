@@ -415,9 +415,48 @@ GET  /admin/models
 PUT  /admin/clients/:id/policy
 PUT  /admin/models/:model
 POST /admin/reconcile
+POST /admin/reconcile/:pool/:utcDay/:targetRequestId
 ```
 
 `/v1/embeddings`・`/v1/audio/*`・`/v1/images/*` は将来対応。
+
+## Admin Web UI
+
+Cloudflare Access 認証済みの運用者向けに、`/admin/ui/` から Admin API の
+ダッシュボードを利用できます。UI は Workers Static Assets として同梱され、
+外部 CDN やブラウザへ配布する秘密情報を使用しません。
+
+- `/admin/ui` は `/admin/ui/` に正規化されます。
+- `index.html`、`app.js`、`api.js`、`render.js`、`editors.js`、`styles.css`、
+  `pico.min.css` は Access JWT 検証後に Worker の `ASSETS` binding から配信されます。
+- Quota、Usage、Clients、Models を表示し、Clients と Models はインライン編集できます。
+- Usage は `client_id` 昇順、Quota は STANDARD、MINI の固定順で表示されます。
+- 保存成功時は該当 API を再取得し、取得・保存失敗時は対象 section または行に
+  エラーと再試行操作を表示します。
+
+### Admin UI のデプロイ確認
+
+本番デプロイ後、次の順序で Access と Worker の境界を確認してください。
+
+1. `/admin/*` を保護する Access application が存在し、AUD が `ACCESS_AUD` と一致する。
+2. JWT なしの `/admin/ui/`、`/admin/ui/app.js`、`/admin/ui/styles.css`、
+   `/admin/ui/pico.min.css` が拒否される。
+3. 認証済み UI が同一 origin の API を取得し、外部 CDN request が発生しない。
+4. 有効な JWT と `Origin: https://attacker.example` を付けた
+   `PUT /admin/clients/:id/policy`、`PUT /admin/models/:model`、`POST /admin/reconcile`、
+   `POST /admin/reconcile/:pool/:utcDay/:targetRequestId` が全て 403
+   `origin_not_allowed` になり、状態を変更しない。
+5. Origin なしの有効な JWT を使う既存の管理 CLI が引き続き利用できる。
+
+Worker 統合テストは次で実行できます。
+
+```bash
+npm test -w apps/gateway-worker -- test/admin-ui.test.ts
+node --check apps/gateway-worker/public/admin/ui/api.js
+node --check apps/gateway-worker/public/admin/ui/render.js
+node --check apps/gateway-worker/public/admin/ui/app.js
+node --check apps/gateway-worker/public/admin/ui/editors.js
+```
 
 ## 既知の限界
 
