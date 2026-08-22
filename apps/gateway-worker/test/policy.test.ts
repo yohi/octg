@@ -15,6 +15,11 @@ describe("policy and registry", () => {
     expect(registry.get("gpt-5-mini")?.complimentary_pool).toBe("MINI");
   });
 
+  it("assigns gpt-5.6-terra to the MINI quota pool", async () => {
+    const registry = await loadRegistry(env);
+    expect(registry.get("gpt-5.6-terra")?.complimentary_pool).toBe("MINI");
+  });
+
   it("caches registry rows until invalidated", async () => {
     await loadRegistry(env);
     await env.DB.prepare(
