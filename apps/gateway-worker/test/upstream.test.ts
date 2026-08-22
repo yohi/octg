@@ -35,6 +35,30 @@ describe("callUpstream", () => {
     expect(transport).not.toHaveBeenCalled();
   });
 
+  it("rejects an unset base URL as an upstream configuration error", async () => {
+    const transport = vi.fn<UpstreamTransport>().mockResolvedValue(new Response());
+    const invalidEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        return property === "OCTG_UPSTREAM_BASE_URL"
+          ? undefined
+          : Reflect.get(target, property, receiver);
+      },
+    });
+
+    await expect(
+      callUpstream(
+        invalidEnv,
+        "/chat/completions",
+        {},
+        meta,
+        null,
+        undefined,
+        transport,
+      ),
+    ).rejects.toBeInstanceOf(UpstreamConfigError);
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("appends the chat endpoint after the OpenAI provider path", async () => {
     let requestedUrl: string | undefined;
     const transport: UpstreamTransport = async (input) => {
