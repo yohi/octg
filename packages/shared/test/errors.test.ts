@@ -3,6 +3,7 @@ import {
   buildOctgHeaders,
   errInternal,
   errInvalidApiKey,
+  errOriginNotAllowed,
   errMaxTokensConflict,
   errModelNotAllowed,
   errModelRequiresPaid,
@@ -22,6 +23,20 @@ const snapshot: QuotaSnapshot = {
 };
 
 describe("canonical error bodies", () => {
+  it("returns a generic forbidden-origin response", async () => {
+    const response = errorResponse(errOriginNotAllowed("req_origin"));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: {
+        message: "Request origin is not allowed.",
+        type: "permission_error",
+        param: null,
+        code: "origin_not_allowed",
+      },
+      request_id: "req_origin",
+    });
+  });
+
   it("returns an internal error with quota headers and no retry hint", async () => {
     const response = errorResponse(errInternal("req_tokenizer", {
       quota: snapshot,
