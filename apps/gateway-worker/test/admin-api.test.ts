@@ -388,4 +388,20 @@ describe("admin API", () => {
     const body = await response.json<{ clients: Array<{ id: string; output_limit_mode: string }> }>();
     expect(body.clients.find((c) => c.id === TEST_CLIENT_ID)?.output_limit_mode).toBe("REJECT");
   });
+
+  it("includes the UTC day on clients and models dashboard responses", async () => {
+    const [clientsResponse, modelsResponse] = await Promise.all([
+      admin("/admin/clients", undefined, "jwt"),
+      admin("/admin/models", undefined, "jwt"),
+    ]);
+
+    expect(clientsResponse.status).toBe(200);
+    expect(modelsResponse.status).toBe(200);
+    const clientsBody = await clientsResponse.json<{ request_id: string; utc_day: string }>();
+    const modelsBody = await modelsResponse.json<{ request_id: string; utc_day: string }>();
+    expect(clientsBody.request_id).toMatch(/^req_/);
+    expect(modelsBody.request_id).toMatch(/^req_/);
+    expect(clientsBody.utc_day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(modelsBody.utc_day).toBe(clientsBody.utc_day);
+  });
 });

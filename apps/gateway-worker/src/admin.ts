@@ -82,9 +82,9 @@ export async function handleAdmin(request: Request, env: Env, requestId: string)
   if (request.method === "GET" && url.pathname === "/admin/clients") {
     const rows = await env.DB.prepare("SELECT c.id, c.name, c.enabled, c.created_at, p.overflow_mode, p.output_limit_mode, p.max_paid_usd_day, p.cache_enabled, p.tools_mode FROM clients c LEFT JOIN client_policies p ON c.id = p.client_id ORDER BY c.id").all<ClientListRow>();
     const clients = rows.results.map((row) => ({ id: row.id, name: row.name, enabled: row.enabled === 1, created_at: row.created_at, ...effectiveClientPolicy(row) }));
-    return json({ request_id: requestId, clients });
+    return json({ request_id: requestId, utc_day: day, clients });
   }
-  if (request.method === "GET" && url.pathname === "/admin/models") return json({ request_id: requestId, models: [...(await loadRegistry(env)).values()] });
+  if (request.method === "GET" && url.pathname === "/admin/models") return json({ request_id: requestId, utc_day: day, models: [...(await loadRegistry(env)).values()] });
   const policyMatch = url.pathname.match(/^\/admin\/clients\/([^/]+)\/policy$/);
   if (request.method === "PUT" && policyMatch) {
     if (!isAllowedAdminOrigin(request)) return errorResponse(errOriginNotAllowed(requestId));
