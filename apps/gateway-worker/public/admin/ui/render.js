@@ -158,7 +158,7 @@ export function renderUsage(container, payload) {
   clear(container);
   container.append(envelopeMeta(payload));
   if (clients.length === 0) {
-    container.append(element("p", "empty-state", "利用実績なし"));
+    container.append(element("p", "empty-state", "No usage recorded."));
     return;
   }
   const rows = clients.map((client) => [
