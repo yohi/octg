@@ -117,7 +117,7 @@ API Key:  <発行された octg_sk_xxx>
 
 詳細なセットアップ手順とトラブルシューティングは [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照してください。
 
-#### OpenCode の `opencode.json` / `opencode.jsonc` への追記
+#### OpenCode の `opencode.json` / `opencode.jsonc` へ追記する場合
 
 OpenCode からこの Custom Provider を使う場合は、Gateway A の Run token を
 `OCTG_CF_API_TOKEN` として環境変数へ設定し、既存の `provider` オブジェクトへ次を追加します。
@@ -161,6 +161,11 @@ OCTG 経由では非テキスト入力を拒否し、tool calling はクライ�
       "modalities": { "input": ["text"], "output": ["text"] },
       "limit": { "context": 1050000, "input": 922000, "output": 128000 }
     }
+  },
+  "models": {
+    "gpt-5.6-luna": { "name": "GPT-5.6 Luna (OCTG)" },
+    "gpt-5.6-terra": { "name": "GPT-5.6 Terra (OCTG)" },
+    "gpt-5.6-sol": { "name": "GPT-5.6 Sol (OCTG)" }
   }
 }
 ```
