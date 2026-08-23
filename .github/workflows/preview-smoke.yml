@@ -154,6 +154,8 @@ jobs:
           OCTG_KEY_PEPPER: ${{ secrets.OCTG_KEY_PEPPER }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           if [ -z "$OCTG_KEY_PEPPER" ]; then
@@ -178,8 +180,8 @@ jobs:
           ./node_modules/.bin/wrangler versions upload \
             --config "$PREVIEW_CONFIG" \
             --secrets-file "$secrets_file" \
-            --tag "pr-${{ github.event.pull_request.number }}" \
-            --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}"
+            --tag "pr-${PULL_REQUEST_NUMBER}" \
+            --message "pr-${PULL_REQUEST_NUMBER} ${PULL_REQUEST_HEAD_SHA}"
           version_id=$(jq -s -r '
             [.[] | select(.type == "version-upload") | .version_id // empty]
             | last // empty
@@ -197,11 +199,12 @@ jobs:
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           ./node_modules/.bin/wrangler versions deploy \
             "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
             --config "$PREVIEW_CONFIG" \
-            --message "PR ${{ github.event.pull_request.number }} smoke test" \
+            --message "PR ${PULL_REQUEST_NUMBER} smoke test" \
             --yes
 
       - name: Run smoke test with Version Override
