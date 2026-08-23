@@ -335,6 +335,51 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
 
 初回の環境構築手順は [セットアップ（開発する場合）](#セットアップ開発する場合) を参照してください。
 
+## CI/CD（GitHub Actions）
+
+- `deploy-production.yml`: `master` への push を受け、typecheck / test、remote D1
+  migration（冪等）、`wrangler deploy` を実行します。
+- `preview-smoke.yml`: `master` 向け PR の更新を受け、新 version を 0% traffic で
+  deployment し、production URL に Version Override header を付けて
+  `POST /v1/chat/completions` を 1 発実行します。完了後は現行 version 100% に復元します。
+
+Durable Objects を実装する Worker では Cloudflare Preview URL が生成されないため、
+PR の検証には Version Override を使用します。新 version は通常トラフィックへ流さず、
+疎通テストのリクエストだけが対象 version に到達します。
+
+### 事前に必要な設定（一度だけ）
+
+1. Cloudflare API token を発行し、権限を最小化する
+   （Account Settings Read / Workers Scripts Edit / D1 Edit）。
+2. CI 専用クライアントキーを本番 D1 に登録する:
+
+   ```bash
+   OCTG_KEY_PEPPER=<本番pepper> \
+   OCTG_CLIENT_ID=client_ci_smoke \
+   OCTG_CLIENT_NAME="CI Smoke" \
+   npm run seed:client:remote -- --tools-mode=REJECT
+   ```
+
+   `--key` を指定しない場合はキーが自動生成されます。標準出力に表示された値を
+   GitHub Secret `OCTG_SMOKE_API_KEY` へ登録し、コードやログへ記載しないでください。
+3. GitHub リポジトリの **Settings > Secrets and variables > Actions** に以下を登録する:
+   - `CLOUDFLARE_API_TOKEN` — 手順 1 の token
+   - `CLOUDFLARE_ACCOUNT_ID` — Cloudflare アカウント ID
+   - `OCTG_SMOKE_API_KEY` — 手順 2 の CI 専用クライアントキー
+4. **Variables** に以下を登録する:
+   - `OCTG_SMOKE_BASE_URL` — Version Override を付けて呼び出す production URL
+     （例: `https://octg-gateway.<subdomain>.workers.dev`）
+   - `SMOKE_MODEL` — 任意。未設定時は `gpt-5-mini`
+
+### 運用メモ
+
+- Version Override の検証は D1 / Durable Object を本番と共有するため、疎通テストは
+  本番 MINI プールを微小消費します。
+- workflow は新 version を 0% traffic で active deployment に追加し、テスト後に現行
+  version 100% へ復元します。PR 間の version deployment は直列化されます。
+- 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施します。
+- Secret 値は workflow ログへ出力されません。`octg_sk_*` や OpenAI API key をドキュメントやコードへ記載しないでください。
+
 ### Durable Object migration の不変条件
 
 `apps/gateway-worker/wrangler.jsonc` の migration は次の順序を維持します。
