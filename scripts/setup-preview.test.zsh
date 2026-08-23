@@ -59,6 +59,17 @@ fi
 exit 0
 EOF
 chmod 700 "$TEMP_DIR/wrangler"
+cat > "$TEMP_DIR/gh" <<'EOF'
+#!/usr/bin/env zsh
+print -r -- "$*" >> "$OCTG_TEST_GH_LOG"
+if [[ "$1" == secret && "$2" == set ]]; then
+  while IFS= read -r line; do
+    :
+  done
+fi
+exit 0
+EOF
+chmod 700 "$TEMP_DIR/gh"
 sed 's/^OCTG_PREVIEW_DATABASE_ID=.*/OCTG_PREVIEW_DATABASE_ID=/' \
   "$TEMP_DIR/valid.env" > "$TEMP_DIR/reuse.env"
 reuse_output="$(
@@ -80,8 +91,8 @@ wrangler_log="$(< "$TEMP_DIR/wrangler.log")"
   print -u2 "reuse flow did not apply migrations"
   exit 1
 }
-[[ "$wrangler_log" == *"secret put OCTG_KEY_PEPPER --config"* ]] || {
-  print -u2 "reuse flow did not synchronize the Worker pepper"
+[[ "$wrangler_log" != *"secret put OCTG_KEY_PEPPER"* ]] || {
+  print -u2 "reuse flow attempted an unsafe regular Worker secret update"
   exit 1
 }
 [[ "$wrangler_log" == *"d1 execute DB --remote"* ]] || {
@@ -107,6 +118,28 @@ no_match_output="$(
 no_match_log="$(< "$TEMP_DIR/no-match-wrangler.log")"
 [[ "$no_match_log" == *"d1 create octg-gateway-preview-db --binding DB"* ]] || {
   print -u2 "missing Preview D1 did not invoke create"
+  exit 1
+}
+
+github_output="$(
+  PATH="$TEMP_DIR:$PATH" \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" \
+  OCTG_PREVIEW_WRANGLER="$TEMP_DIR/wrangler" \
+  OCTG_TEST_GH_LOG="$TEMP_DIR/gh.log" \
+  OCTG_TEST_WRANGLER_LOG="$TEMP_DIR/github-wrangler.log" \
+  zsh "$SCRIPT_PATH" --github
+)"
+gh_log="$(< "$TEMP_DIR/gh.log")"
+[[ "$github_output" != *"test-pepper"* && "$github_output" != *"octg_sk_test"* ]] || {
+  print -u2 "GitHub setup output leaked a secret value"
+  exit 1
+}
+[[ "$gh_log" == *"secret set OCTG_KEY_PEPPER --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Worker pepper secret"
+  exit 1
+}
+[[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"octg_sk_test"* ]] || {
+  print -u2 "GitHub setup leaked a secret value"
   exit 1
 }
 

@@ -214,7 +214,6 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-print -r -- "$OCTG_KEY_PEPPER" | run_wrangler secret put OCTG_KEY_PEPPER --config "$PREVIEW_CONFIG"
 run_wrangler d1 migrations apply DB --remote --config "$PREVIEW_CONFIG"
 
 SEED_SQL="$TEMP_DIR/seed.sql"
@@ -244,6 +243,7 @@ if [[ "$CONFIGURE_GITHUB" == true ]]; then
   set_github_variable SMOKE_MODEL "${SMOKE_MODEL:-gpt-5-mini}"
   set_github_secret CLOUDFLARE_PREVIEW_API_TOKEN "$CLOUDFLARE_PREVIEW_API_TOKEN"
   set_github_secret OCTG_PREVIEW_SMOKE_API_KEY "$OCTG_PREVIEW_CLIENT_KEY"
+  set_github_secret OCTG_KEY_PEPPER "$OCTG_KEY_PEPPER"
 fi
 
 print "Preview D1 migrationとCI client seedが完了しました: client_id=$OCTG_PREVIEW_CLIENT_ID"
