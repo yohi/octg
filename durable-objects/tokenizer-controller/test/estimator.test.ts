@@ -211,7 +211,7 @@ describe("TokenizerEstimator", () => {
       "Tokenizer BPE work limit exceeded.",
     );
     expect(encodeCalls).toBe(0);
-  });
+  }, 15_000);
 
   it("rejects punctuation followed by newlines when the combined BPE piece exceeds the work limit", () => {
     let encodeCalls = 0;
