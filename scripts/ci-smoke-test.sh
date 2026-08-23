@@ -5,6 +5,7 @@
 #   model    : 疎通テストに使うモデル名 (例: gpt-5-mini)
 # Env:
 #   OCTG_SMOKE_API_KEY : クライアントキー (octg_sk_*)。必須。ログへ出力しないこと。
+#   OCTG_VERSION_OVERRIDE : Version Override 対象の Worker Version ID。指定時だけ header を付ける。
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
@@ -25,14 +26,25 @@ payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with
 response_file=$(mktemp)
 trap 'rm -f "$response_file"' EXIT
 
+curl_args=(
+  -sS
+  --max-time 60
+  -o "$response_file"
+  -w '%{http_code}'
+  "${base_url}/v1/chat/completions"
+  -H "Authorization: Bearer ${OCTG_SMOKE_API_KEY}"
+  -H "Content-Type: application/json"
+)
+if [ -n "${OCTG_VERSION_OVERRIDE:-}" ]; then
+  curl_args+=(
+    -H "Cloudflare-Workers-Version-Overrides: octg-gateway=\"${OCTG_VERSION_OVERRIDE}\""
+  )
+fi
+
 for attempt in 1 2 3; do
   : > "$response_file"
   status="000"
-  status=$(curl -sS --max-time 60 -o "$response_file" -w '%{http_code}' \
-    "${base_url}/v1/chat/completions" \
-    -H "Authorization: Bearer ${OCTG_SMOKE_API_KEY}" \
-    -H "Content-Type: application/json" \
-    --data "$payload") || status="000"
+  status=$(curl "${curl_args[@]}" --data "$payload") || status="000"
 
   if [ "$status" = "200" ] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
     echo "smoke test passed (attempt ${attempt})"
