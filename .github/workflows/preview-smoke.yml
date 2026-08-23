@@ -38,6 +38,9 @@ jobs:
       - name: Smoke script contract test
         run: npm run test:ci-smoke
 
+      - name: Preview workflow contract test
+        run: npm run test:preview-workflow
+
   version-smoke:
     needs: test
     environment: preview
@@ -225,8 +228,8 @@ jobs:
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
         run: |
-          ./node_modules/.bin/wrangler versions deploy \
-            "${CURRENT_VERSION_ID}@100%" \
+          ./node_modules/.bin/wrangler rollback \
+            "$CURRENT_VERSION_ID" \
             --config "$PREVIEW_CONFIG" \
             --message "Restore current version after PR smoke test" \
             --yes
