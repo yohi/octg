@@ -37,6 +37,7 @@ describe("proxy pipeline", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("X-OCTG-Pool")).toBe("standard");
     expect(response.headers.get("X-OCTG-Route")).toBe("free_shared");
+    expect(response.headers.get("X-OCTG-Worker-Version")).toBe(env.CF_VERSION_METADATA?.id ?? "local");
     const state = await todayStub().getState();
     expect(state.confirmedTokens).toBe(150);
     expect(state.reservedTokens).toBe(0);

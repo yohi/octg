@@ -339,44 +339,71 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
 
 - `deploy-production.yml`: `master` への push を受け、typecheck / test、remote D1
   migration（冪等）、`wrangler deploy` を実行します。
-- `preview-smoke.yml`: `master` 向け PR の更新を受け、新 version を 0% traffic で
-  deployment し、production URL に Version Override header を付けて
-  `POST /v1/chat/completions` を 1 発実行します。完了後は現行 version 100% に復元します。
+- `preview-smoke.yml`: `master` 向け PR の更新を受け、専用 preview Worker の新 version を
+  0% traffic で deployment し、preview URL に Version Override header を付けて
+  `POST /v1/chat/completions` を最大 3 回試行します。HTTP 200、応答本文、
+  `X-OCTG-Worker-Version` と override ID の一致を検証します。header の Worker 名は
+  `OCTG_PREVIEW_WORKER_NAME`（未設定時 `octg-gateway-preview`）から渡し、完了後は現行 version 100% に復元します。
 
 Durable Objects を実装する Worker では Cloudflare Preview URL が生成されないため、
-PR の検証には Version Override を使用します。新 version は通常トラフィックへ流さず、
-疎通テストのリクエストだけが対象 version に到達します。
+PR の検証には固定の専用 preview Worker と Version Override を使用します。Cloudflare が
+自動生成する Preview URL は使用しません。新 version は通常トラフィックへ流さず、
+疎通テストのリクエストだけが対象 version に到達します。PR checkout のコード、
+`wrangler.jsonc`、smoke script には production credential / resource を渡しません。
 
 ### 事前に必要な設定（一度だけ）
 
-1. Cloudflare API token を発行し、権限を最小化する
-   （Account Settings Read / Workers Scripts Edit / D1 Edit）。
-2. CI 専用クライアントキーを本番 D1 に登録する:
+1. production と分離した preview Worker、preview D1、preview upstream を用意し、
+   preview用 Cloudflare API tokenをpreview resourceだけへ限定します。
+2. CI 専用クライアントキーを preview D1 に登録します。preview用の
+   `OCTG_KEY_PEPPER`、`OCTG_UPSTREAM_API_TOKEN`、`OPENAI_USAGE_API_KEY` も production と
+   別の値をCloudflare側で管理します。`scripts/seed-client.mjs` でseed SQLを生成し、
+   preview D1へ適用してください。
 
    ```bash
-   OCTG_KEY_PEPPER=<本番pepper> \
-   OCTG_CLIENT_ID=client_ci_smoke \
-   OCTG_CLIENT_NAME="CI Smoke" \
-   npm run seed:client:remote -- --tools-mode=REJECT
+   printf 'Preview client key: '
+   read -r -s OCTG_PREVIEW_CLIENT_KEY
+   printf '\n'
+   node scripts/seed-client.mjs client_ci_smoke "CI Smoke" "$OCTG_PREVIEW_CLIENT_KEY" REJECT > /tmp/octg-preview-seed.sql
+   unset OCTG_PREVIEW_CLIENT_KEY
    ```
 
-   `--key` を指定しない場合はキーが自動生成されます。標準出力に表示された値を
-   GitHub Secret `OCTG_SMOKE_API_KEY` へ登録し、コードやログへ記載しないでください。
-3. GitHub リポジトリの **Settings > Secrets and variables > Actions** に以下を登録する:
-   - `CLOUDFLARE_API_TOKEN` — 手順 1 の token
-   - `CLOUDFLARE_ACCOUNT_ID` — Cloudflare アカウント ID
-   - `OCTG_SMOKE_API_KEY` — 手順 2 の CI 専用クライアントキー
-4. **Variables** に以下を登録する:
-   - `OCTG_SMOKE_BASE_URL` — Version Override を付けて呼び出す production URL
-     （例: `https://octg-gateway.<subdomain>.workers.dev`）
+   生成したSQLをpreview D1へ適用します（preview accountのcredentialだけを使用してください）。
+
+   `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、preview D1 名は、shell の環境変数または
+   Cloudflare の認証済み profile へ事前に設定し、値をコマンドラインへ直接記載しないでください。
+
+   ```bash
+   ./node_modules/.bin/wrangler d1 execute "$OCTG_PREVIEW_DATABASE_NAME" --remote \
+     --file /tmp/octg-preview-seed.sql
+   ```
+
+   `OCTG_KEY_PEPPER` と `OCTG_PREVIEW_CLIENT_KEY` は、ローカルシェル履歴やログへ残らない方法で
+   事前に環境へ設定してください。
+   GitHub Environment `preview` の `OCTG_PREVIEW_SMOKE_API_KEY` へ登録し、
+   productionのclient keyは使わないでください。
+3. GitHub Environment `preview` の Secrets に以下を登録します:
+   - `CLOUDFLARE_PREVIEW_API_TOKEN` — preview resource専用 token
+   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID` — preview Cloudflare account ID
+   - `OCTG_PREVIEW_SMOKE_API_KEY` — 手順 2 の preview client key
+4. **Actions Variables** に以下を登録します:
+   - `OCTG_PREVIEW_DATABASE_ID` — preview D1 database ID
+   - `OCTG_PREVIEW_UPSTREAM_BASE_URL` — preview upstream URL
+   - `OCTG_PREVIEW_BASE_URL` — preview Worker URL（例: `https://octg-gateway-preview.<subdomain>.workers.dev`）
+   - `OCTG_PREVIEW_WORKER_NAME` — 任意。未設定時は `octg-gateway-preview`
    - `SMOKE_MODEL` — 任意。未設定時は `gpt-5-mini`
+5. production deploy用の `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` は
+   production workflowだけへ登録し、preview environmentへ登録・参照しないでください。
 
 ### 運用メモ
 
-- Version Override の検証は D1 / Durable Object を本番と共有するため、疎通テストは
-  本番 MINI プールを微小消費します。
-- workflow は新 version を 0% traffic で active deployment に追加し、テスト後に現行
-  version 100% へ復元します。PR 間の version deployment は直列化されます。
+- preview smokeは1つの論理テストとして最大3回POSTします。各試行は独立したrequestのため、
+  preview MINI poolのquotaを最大3回分消費し得ます。
+- workflowは専用preview Workerの新 versionを0% trafficでactive deploymentに追加し、
+  テスト後に現行version 100%へ復元します。PR smokeとproduction deployは
+  `octg-deployment` concurrency groupで直列化されます。
+- smoke失敗時のログにはHTTP status、形式検証済みrequest ID、sanitize/truncate済みmessage
+  だけを出力し、response bodyやcredentialを出力しません。
 - 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施します。
 - Secret 値は workflow ログへ出力されません。`octg_sk_*` や OpenAI API key をドキュメントやコードへ記載しないでください。
 

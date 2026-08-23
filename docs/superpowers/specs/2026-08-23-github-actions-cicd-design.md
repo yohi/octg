@@ -9,25 +9,27 @@
 OCTG（OpenAI 互換 API Gateway）のデプロイと検証を GitHub Actions へ集約し、次の 2 つの自動化を実現する。
 
 1. master マージ時に production 環境へ自動デプロイする
-2. master 向け PR の更新時に Worker の新バージョンを 0% traffic で active deployment へ追加し、Version Override で実環境の疎通テストを行う
+2. master 向け PR の更新時に専用 preview Worker の新バージョンを 0% traffic で active deployment へ追加し、Version Override で preview 環境の疎通テストを行う
 
 ## 決定事項（ユーザー承認済み）
 
 | 項目 | 決定 |
 | --- | --- |
-| 環境構成 | production のみ。staging 等の名前付き wrangler 環境は作らない |
-| PR 時の Preview 方式 | Durable Objects Worker では Cloudflare Preview URL が生成されないため、`wrangler versions upload` → 新バージョン 0% / 現行バージョン 100% の `versions deploy` → `Cloudflare-Workers-Version-Overrides` ヘッダーで新バージョンを指定して検証する。通常トラフィックには新バージョンを流さない。D1 / DO は本番と共有する（疎通テストは本番 MINI プールを微小消費する）。検証後は現行バージョン 100% に戻す |
-| 疎通テスト範囲 | `POST /v1/chat/completions` 1 リクエストのみ。認証 → 分類 → Tokenizer → quota reserve → upstream → settle の全経路を通す |
+| 環境構成 | production deploy と専用 preview Worker / D1 / upstream を分離する。staging 等の名前付き wrangler environment は作らず、preview workflow が一時 config で専用 resource ID を指定する |
+| PR 時の Preview 方式 | Durable Objects Worker では Cloudflare Preview URL が生成されないため、専用 preview Worker に `wrangler versions upload` → 新バージョン 0% / 現行バージョン 100% の `versions deploy` → `Cloudflare-Workers-Version-Overrides` ヘッダーで新バージョンを指定して検証する。通常トラフィックには新バージョンを流さず、検証後は現行バージョン 100% に戻す。PR checkout のコード・`wrangler.jsonc`・smoke script は preview credential / resource のみで実行し、production secret / resource を渡さない |
+| 疎通テスト範囲 | 1 つの論理テストとして `POST /v1/chat/completions` を最大 3 回試行する。認証 → 分類 → Tokenizer → quota reserve → upstream → settle の全経路を通す。各試行は独立した request のため、preview MINI pool の quota は最大 3 回分消費し得る |
 | 疎通テスト用モデル | 既に model_registry 登録済みの MINI プールモデル `gpt-5-mini` を使用。`gpt-5-nano` 用 migration は作らない（クォータはプール単位のトークン数で管理され、モデル価格は無関係なため）。モデル名は workflow 内で変数化し差し替え可能にする |
-| Secret 管理 | GitHub Secrets に登録。生値はコード・ログへ出力しない |
+| Secret 管理 | production deploy secret と preview environment secret を分離して登録する。生値はコード・ログへ出力しない |
 | 品質ゲート | PR 時・master push 時の両方で `npm run typecheck` + `npm test` をデプロイ前に実行 |
 
 ## アーキテクチャ
 
 ```text
 PR 更新 (→ master)
-  └─ preview-smoke.yml
-       typecheck/test → versions upload → 新版 0% / 現行版 100% → Version Override で production URL に疎通テスト → 現行版 100% に復元
+  └─ preview-smoke.yml (environment: preview)
+       typecheck/test → preview config生成 → preview D1 migration → versions upload
+       → 新版 0% / 現行版 100% → Version Override で preview URL に疎通テスト
+       → 現行版 100% に復元
 
 master マージ (push)
   └─ deploy-production.yml
@@ -48,11 +50,11 @@ master マージ (push)
 | --- | --- |
 | トリガー | `pull_request` → master（types: opened, synchronize, reopened） |
 | Step 1 | Node.js 22 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
-| Step 2 | `WRANGLER_OUTPUT_FILE_PATH` を指定した `wrangler versions upload --message "pr-<number> <sha>"` で新バージョンを作成し、ND-JSON の `version-upload.version_id` を取得する。同時に `wrangler deployments status --json` から現行の 100% version ID を取得する。現行 deployment が単一の 100% version でない場合は変更せず失敗する |
-| Step 3 | `wrangler versions deploy <new>@0% <current>@100% --yes` で新バージョンを active deployment に追加する。production URL へ `Cloudflare-Workers-Version-Overrides: octg-gateway="<new>"` を付けて `POST /v1/chat/completions`（model: `gpt-5-mini`、最小 fixture）を実行し、HTTP 200 かつ応答本文に content 相当が存在することを検証する |
+| Step 2 | PR checkout の `wrangler.jsonc` を TypeScript の JSONC parser で読み、main/assets/migrations_dir を repository absolute path に変換した一時 configを生成する。preview D1 の database ID と preview upstream URL を注入し、preview credentialで `wrangler d1 migrations apply DB --remote` を実行する。その後、`WRANGLER_OUTPUT_FILE_PATH` を指定した `wrangler versions upload --message "pr-<number> <sha>"` で専用 preview Worker の新バージョンを作成し、ND-JSON の `version-upload.version_id` を取得する。同時に `wrangler deployments status --json` から現行の 100% version ID を取得する。現行 deployment が単一の 100% version でない場合は変更せず失敗する |
+| Step 3 | `wrangler versions deploy <new>@0% <current>@100% --yes` で専用 preview Worker に新バージョンを追加する。preview URL へ `Cloudflare-Workers-Version-Overrides: <preview-worker-name>="<new>"`（`OCTG_PREVIEW_WORKER_NAME`、省略時 `octg-gateway-preview`）を付けて `POST /v1/chat/completions`（model: `gpt-5-mini`、最小 fixture）を最大 3 回試行し、HTTP 200、応答本文の content 相当、`X-OCTG-Worker-Version: <new>` を検証する。失敗ログは HTTP status、形式検証済み request ID、sanitize/truncate 済み error message のみを記録し、response body は出力しない |
 | Step 4 | smoke test の成否にかかわらず `wrangler versions deploy <current>@100% --yes` を実行し、現行バージョン 100% に復元する。復元失敗も workflow 失敗とする |
 | リトライ | 最大 3 回・10 秒間隔（Worker 初期化・伝播遅延対策）、1 回あたりタイムアウト 60 秒 |
-| concurrency | group: `worker-version-smoke`、cancel-in-progress: **false**。Workers は 1 deployment に最大 2 version のため、PR 間で直列化し cleanup を必ず実行する |
+| concurrency | production deploy と同じ group: `octg-deployment`、cancel-in-progress: **false**。Workers は 1 deployment に最大 2 version のため、PR 間および production deploy を直列化し cleanup を必ず実行する |
 | permissions | `contents: read` のみ |
 
 ### deploy-production.yml（master push 時）
@@ -63,24 +65,34 @@ master マージ (push)
 | Step 1 | Node.js 22 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
 | Step 2 | `wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc`（冪等。適用済み tag はスキップされる） |
 | Step 3 | `wrangler deploy --config apps/gateway-worker/wrangler.jsonc`。DO migration v1/v2 を含む manifest でデプロイする |
-| concurrency | group: `production-deploy`、cancel-in-progress: **false**（デプロイの直列化） |
+| concurrency | group: `octg-deployment`、cancel-in-progress: **false**（preview smoke と production deploy の直列化） |
 | permissions | `contents: read` のみ |
 
 ## Secrets / 変数
 
-GitHub Secrets に以下を登録する。
+production deploy 用の GitHub Secrets と、PR preview 用の GitHub Environment `preview` Secrets を分離して登録する。
 
 | Secret 名 | 用途 | 備考 |
 | --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Workers デプロイ + D1 migration | 最小権限: Workers Scripts Edit、D1 Edit、Account Settings Read |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare アカウント ID | vars ではなく secrets 扱いでよい（機微性は低いが統一） |
-| `OCTG_SMOKE_API_KEY` | 疎通テスト用クライアントキー（`octg_sk_*`） | CI 専用キー。policy で利用可能モデルを絞ることを推奨 |
+| `CLOUDFLARE_API_TOKEN` | production Worker deploy + production D1 migration | production workflow のみ。最小権限: Workers Scripts Edit、D1 Edit、Account Settings Read |
+| `CLOUDFLARE_ACCOUNT_ID` | production Cloudflare アカウント ID | production workflow のみ |
+
+GitHub Environment `preview` の Secrets:
+
+| Secret 名 | 用途 | 備考 |
+| --- | --- | --- |
+| `CLOUDFLARE_PREVIEW_API_TOKEN` | preview Worker deploy + preview D1 migration | preview resourceだけに権限を限定する |
+| `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | preview Cloudflare アカウント ID | production accountと分離することを推奨 |
+| `OCTG_PREVIEW_SMOKE_API_KEY` | preview疎通テスト用クライアントキー（`octg_sk_*`） | preview D1に登録するCI専用キー。policyで利用可能モデルを絞る |
 
 GitHub Actions Variables に以下を登録する。
 
 | Variable 名 | 用途 | 備考 |
 | --- | --- | --- |
-| `OCTG_SMOKE_BASE_URL` | Version Override を付けて呼び出す production URL | `https://octg-gateway.<subdomain>.workers.dev` または疎通可能な production custom domain。Secret ではない |
+| `OCTG_PREVIEW_DATABASE_ID` | preview D1 database ID | production D1 IDを設定しない |
+| `OCTG_PREVIEW_UPSTREAM_BASE_URL` | preview upstream の URL | production upstreamと分離する |
+| `OCTG_PREVIEW_BASE_URL` | Version Override を付けて呼び出す preview Worker URL | 固定 preview WorkerのURL。Secretではない |
+| `OCTG_PREVIEW_WORKER_NAME` | preview Worker 名 | 任意。未設定時は `octg-gateway-preview` |
 | `SMOKE_MODEL` | 疎通テスト用モデル | 任意。未設定時は `gpt-5-mini` |
 
 取り扱い規則:
@@ -91,11 +103,11 @@ GitHub Actions Variables に以下を登録する。
 
 ### 事前手順（一度だけ実施）
 
-1. `scripts/seed-client.mjs` で CI 専用クライアントキーの seed SQL を生成する
-2. `scripts/seed-client-remote.mjs`（または `wrangler d1 execute octg --remote`）で本番 D1 へ登録する
-3. GitHub Secrets へ 3 つの値を登録する
-4. GitHub Actions Variables に `OCTG_SMOKE_BASE_URL` を登録する（`SMOKE_MODEL` は任意）
-5. Cloudflare 側で API token を発行し、権限スコープを最小化する
+1. preview Worker、preview D1、preview upstreamをproductionと分離して作成する
+2. `OCTG_KEY_PEPPER` を Preview Worker と同じ値に設定し、`scripts/seed-client.mjs` で preview専用クライアントキーの seed SQL を生成して preview D1へ登録する。production用 `seed-client-remote.mjs` をpreview resourceへ向けて実行しない
+3. GitHub Environment `preview` の Secrets と、Actions Variablesへ必要な値を登録する
+4. production用 Secretsは `deploy-production.yml` にだけ登録し、preview workflowへ渡さない
+5. Cloudflare側でpreview API tokenを発行し、preview resourceだけへ権限を限定する
 
 ## エラー処理
 
@@ -104,7 +116,7 @@ GitHub Actions Variables に以下を登録する。
 | typecheck / unit test 失敗 | 後続ステップへ進まない（workflow 失敗） |
 | Version ID / 現行 100% version の取得失敗 | deployment を変更せず workflow を失敗扱いにする |
 | Version deployment 失敗 | smoke test を実行せず workflow を失敗扱いにする |
-| 疎通テスト失敗 | PR check 失敗。必要に応じて branch protection の required check に設定できる |
+| 疎通テスト失敗 | PR check 失敗。1 つの論理テストにつき最大 3 回試行し、それでも失敗した場合に失敗扱いにする。必要に応じて branch protection の required check に設定できる |
 | 復元 deployment 失敗 | workflow を失敗扱いにする。手動で現行 version 100% の deployment を復元する |
 | 本番デプロイ失敗 | workflow 失敗。rollback は Cloudflare deployment version rollback を手動実施（README の運用手順に従う） |
 | D1 migration | 冪等なため再実行安全。適用済み tag はスキップされる |
@@ -112,13 +124,13 @@ GitHub Actions Variables に以下を登録する。
 ## テスト方針
 
 - ワークフローファイル自体は PR 作成時に実環境で検証する（初回 PR で Version Override smoke test と復元が緑になることを確認）
-- actionlint による構文チェックをローカルで任意実施する
-- 疎通テストの期待値: HTTP 200、JSON 応答、`choices[0]` 相当の本文存在。Version Override header が付与されること、quota reserve/settle は `/quota` 参照やログで別途目視確認できる（自動検証対象外）
+- actionlint がインストール済みなら両 workflowへ実行し、未インストール時だけ YAML parserへfallbackする。actionlint自体の失敗はfallbackで隠さない
+- 疎通テストの期待値: HTTP 200、JSON 応答、`choices[0]` 相当の本文存在、`X-OCTG-Worker-Version` と override ID の一致。quota reserve/settle は preview `/quota` 参照やログで別途目視確認できる（自動検証対象外）
 
 ## 対象外（Out of Scope）
 
 - staging 環境の新設
-- Cloudflare Preview URL の利用（Durable Objects Worker では URL が生成されないため Version Override を使う）
+- Cloudflare が自動生成する Preview URL の利用（Durable Objects Worker ではURLが生成されないため、固定preview WorkerとVersion Overrideを使う）
 - `gpt-5-nano` の model_registry 登録 migration
 - Admin API（Cloudflare Access 背後）の疎通テスト
 - デプロイ通知（Slack 等）

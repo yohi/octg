@@ -5,6 +5,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "npm run test --workspaces --if-present",
+    "test:ci-smoke": "bash scripts/ci-smoke-test.test.sh",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "seed:client": "node scripts/seed-client.mjs",
     "seed:client:remote": "node scripts/seed-client-remote.mjs",

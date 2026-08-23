@@ -6,6 +6,7 @@
 # Env:
 #   OCTG_SMOKE_API_KEY : クライアントキー (octg_sk_*)。必須。ログへ出力しないこと。
 #   OCTG_VERSION_OVERRIDE : Version Override 対象の Worker Version ID。指定時だけ header を付ける。
+#   OCTG_VERSION_OVERRIDE_WORKER_NAME : Version Override 対象の Worker 名。省略時は octg-gateway。
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
@@ -22,13 +23,46 @@ if [[ -z "${OCTG_SMOKE_API_KEY:-}" ]]; then
   exit 2
 fi
 
+version_override_worker_name="${OCTG_VERSION_OVERRIDE_WORKER_NAME:-octg-gateway}"
+
 payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with OK."}]}' "${model}")
 response_file=$(mktemp)
-trap 'rm -f "$response_file"' EXIT
+headers_file=$(mktemp)
+trap 'rm -f "$response_file" "$headers_file"' EXIT
+
+readonly MAX_LOG_MESSAGE_BYTES=160
+
+header_value() {
+  local header_name="$1"
+  local header_file="$2"
+  awk -v wanted="$header_name" '
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      split(line, fields, ":")
+      if (tolower(fields[1]) == tolower(wanted)) {
+        sub(/^[^:]*:[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$header_file"
+}
+
+redacted_error_message() {
+  local response_path="$1"
+  local message
+  message=$(jq -r '
+    if (.error?.message? | type) == "string" then .error.message else empty end
+  ' "$response_path" 2>/dev/null || true)
+  message=$(printf '%s' "$message" | LC_ALL=C tr -cd '\11\40-\176' | LC_ALL=C head -c "$MAX_LOG_MESSAGE_BYTES" || true)
+  printf '%s' "${message:-redacted_response}"
+}
 
 curl_args=(
   -sS
   --max-time 60
+  -D "$headers_file"
   -o "$response_file"
   -w '%{http_code}'
   "${base_url}/v1/chat/completions"
@@ -37,29 +71,43 @@ curl_args=(
 )
 if [[ -n "${OCTG_VERSION_OVERRIDE:-}" ]]; then
   curl_args+=(
-    -H "Cloudflare-Workers-Version-Overrides: octg-gateway=\"${OCTG_VERSION_OVERRIDE}\""
+    -H "Cloudflare-Workers-Version-Overrides: ${version_override_worker_name}=\"${OCTG_VERSION_OVERRIDE}\""
   )
 fi
 
 for attempt in 1 2 3; do
   : > "$response_file"
+  : > "$headers_file"
   status="000"
   status=$(curl "${curl_args[@]}" --data "$payload") || status="000"
 
+  request_id=$(header_value "X-OCTG-Request-Id" "$headers_file")
+  if [[ ! "$request_id" =~ ^req_[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+    request_id="unknown"
+  fi
+
+  passed=false
+  failure_message=$(redacted_error_message "$response_file")
   if [[ "$status" == "200" ]] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
+    if [[ -z "${OCTG_VERSION_OVERRIDE:-}" ]]; then
+      passed=true
+    elif [[ "$(header_value "X-OCTG-Worker-Version" "$headers_file")" == "$OCTG_VERSION_OVERRIDE" ]]; then
+      passed=true
+    else
+      failure_message="worker_version_mismatch"
+    fi
+  fi
+
+  if [[ "$passed" == true ]]; then
     echo "smoke test passed (attempt ${attempt})"
     exit 0
   fi
 
-  echo "attempt ${attempt}: http_status=${status}" >&2
-  if [[ -s "$response_file" ]]; then
-    cat "$response_file" >&2
-    echo "" >&2
-  fi
+  echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message}" >&2
   if [[ "$attempt" -lt 3 ]]; then
     sleep 10
   fi
 done
 
-echo "smoke test failed after 3 attempts (model=${model})" >&2
+echo "smoke test failed after 3 attempts" >&2
 exit 1

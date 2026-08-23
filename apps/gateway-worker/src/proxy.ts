@@ -50,6 +50,7 @@ import {
 import { proxyStream } from "./stream";
 import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import { assertNever } from "./exhaustiveness";
+import { workerVersionHeaders, type WorkerVersionMetadataLike } from "./version-metadata";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
@@ -80,12 +81,14 @@ function upstreamResponse(
   upstream: Response,
   requestId: string,
   snapshot: QuotaSnapshot,
+  versionMetadata: WorkerVersionMetadataLike | undefined,
 ): Response {
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {
       "content-type": upstream.headers.get("content-type") ?? "application/json",
       ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+      ...workerVersionHeaders(versionMetadata),
     },
   });
 }
@@ -638,7 +641,7 @@ export async function handleProxy(
       inFlightAcquired = false;
       inFlightLease = undefined;
       completeAudit(ctx, env, requestId, auditInserted, { status: upstreamUncertain ? "uncertain" : "failed", billingClass: "none" });
-      return upstreamResponse(upstream, requestId, snapshot);
+      return upstreamResponse(upstream, requestId, snapshot, env.CF_VERSION_METADATA);
     }
 
     let data: Record<string, unknown> & { usage?: Usage };
@@ -681,6 +684,7 @@ export async function handleProxy(
       headers: {
         "content-type": "application/json",
         ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+        ...workerVersionHeaders(env.CF_VERSION_METADATA),
       },
     });
   } catch {

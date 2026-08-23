@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-deploy
+  group: octg-deployment
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +33,9 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      - name: Smoke script contract test
+        run: npm run test:ci-smoke
 
       - name: Apply D1 migrations
         run: ./node_modules/.bin/wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc

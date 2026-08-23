@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: worker-version-smoke
+  group: octg-deployment
   cancel-in-progress: false
 
 jobs:
@@ -35,8 +35,12 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Smoke script contract test
+        run: npm run test:ci-smoke
+
   version-smoke:
     needs: test
+    environment: preview
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -52,16 +56,66 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Prepare isolated preview config
+        id: preview-config
+        env:
+          PREVIEW_DATABASE_ID: ${{ vars.OCTG_PREVIEW_DATABASE_ID }}
+          PREVIEW_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
+          PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
+          PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          PREVIEW_CONFIG_PATH: ${{ runner.temp }}/wrangler-preview.jsonc
+        run: |
+          set -euo pipefail
+          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ]; then
+            echo "::error::Preview database, Worker URL, and upstream variables must be configured"
+            exit 2
+          fi
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          import * as ts from "typescript";
+
+          const projectRoot = process.cwd();
+          const source = await readFile("apps/gateway-worker/wrangler.jsonc", "utf8");
+          const parsed = ts.parseConfigFileTextToJson("wrangler.jsonc", source);
+          if (parsed.error) {
+            throw new Error(ts.flattenDiagnosticMessageText(parsed.error.messageText, "\n"));
+          }
+          const config = parsed.config;
+          if (!Array.isArray(config.d1_databases) || config.d1_databases.length !== 1) {
+            throw new Error("Expected exactly one D1 database binding in wrangler.jsonc");
+          }
+          config.name = process.env.PREVIEW_WORKER_NAME;
+          config.main = `${projectRoot}/apps/gateway-worker/src/index.ts`;
+          config.assets.directory = `${projectRoot}/apps/gateway-worker/public`;
+          config.d1_databases[0].database_id = process.env.PREVIEW_DATABASE_ID;
+          config.d1_databases[0].database_name = `${process.env.PREVIEW_WORKER_NAME}-db`;
+          config.d1_databases[0].migrations_dir = `${projectRoot}/db/migrations`;
+          config.vars.OCTG_UPSTREAM_BASE_URL = process.env.PREVIEW_UPSTREAM_BASE_URL;
+          await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+          NODE
+          echo "config=$PREVIEW_CONFIG_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Apply preview D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+        run: |
+          ./node_modules/.bin/wrangler d1 migrations apply DB \
+            --remote \
+            --config "$PREVIEW_CONFIG"
+
       - name: Capture current 100% deployment
         id: current
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           set -euo pipefail
           current_file="$RUNNER_TEMP/current-deployment.json"
           ./node_modules/.bin/wrangler deployments status \
-            --config apps/gateway-worker/wrangler.jsonc \
+            --config "$PREVIEW_CONFIG" \
             --json > "$current_file"
           current_version_id=$(jq -r '
             [.versions[] | select(.percentage == 100) | .version_id]
@@ -76,14 +130,15 @@ jobs:
       - name: Upload worker version
         id: upload
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
         run: |
           set -euo pipefail
           rm -f "$WRANGLER_OUTPUT_FILE_PATH"
           ./node_modules/.bin/wrangler versions upload \
-            --config apps/gateway-worker/wrangler.jsonc \
+            --config "$PREVIEW_CONFIG" \
             --tag "pr-${{ github.event.pull_request.number }}" \
             --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}"
           version_id=$(jq -s -r '
@@ -98,14 +153,15 @@ jobs:
 
       - name: Add uploaded version at 0% traffic
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
         run: |
           ./node_modules/.bin/wrangler versions deploy \
             "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
-            --config apps/gateway-worker/wrangler.jsonc \
+            --config "$PREVIEW_CONFIG" \
             --message "PR ${{ github.event.pull_request.number }} smoke test" \
             --yes
 
@@ -113,13 +169,14 @@ jobs:
         id: smoke
         continue-on-error: true
         env:
-          OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_SMOKE_API_KEY }}
+          OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_PREVIEW_SMOKE_API_KEY }}
           OCTG_VERSION_OVERRIDE: ${{ steps.upload.outputs.version_id }}
-          SMOKE_BASE_URL: ${{ vars.OCTG_SMOKE_BASE_URL }}
+          OCTG_VERSION_OVERRIDE_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          SMOKE_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
           SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
         run: |
           if [ -z "$SMOKE_BASE_URL" ]; then
-            echo "::error::Repository variable OCTG_SMOKE_BASE_URL is not set"
+            echo "::error::Repository variable OCTG_PREVIEW_BASE_URL is not set"
             exit 2
           fi
           bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
@@ -127,13 +184,14 @@ jobs:
       - name: Restore current version at 100% traffic
         if: always() && steps.current.outputs.version_id != '' && steps.upload.outputs.version_id != ''
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
         run: |
           ./node_modules/.bin/wrangler versions deploy \
             "${CURRENT_VERSION_ID}@100%" \
-            --config apps/gateway-worker/wrangler.jsonc \
+            --config "$PREVIEW_CONFIG" \
             --message "Restore current version after PR smoke test" \
             --yes
 
