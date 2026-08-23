@@ -214,6 +214,7 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
+print -r -- "$OCTG_KEY_PEPPER" | run_wrangler secret put OCTG_KEY_PEPPER --config "$PREVIEW_CONFIG"
 run_wrangler d1 migrations apply DB --remote --config "$PREVIEW_CONFIG"
 
 SEED_SQL="$TEMP_DIR/seed.sql"

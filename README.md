@@ -375,7 +375,8 @@ PR の検証には固定の専用 preview Worker と Version Override を使用�
 
 2. （スクリプトを使わず手動で行う場合）CI 専用クライアントキーを preview D1 に登録します。preview用の
    `OCTG_KEY_PEPPER` と control-plane credential は production と別の値をCloudflare側で
-   管理します。upstream billing principalを共有する場合も、preview workflowへproduction
+   管理します。セットアップスクリプトは入力した `OCTG_KEY_PEPPER` をPreview Worker Secretへ
+   設定し、同じ値でCI clientをseedします。upstream billing principalを共有する場合も、preview workflowへproduction
    D1/Worker credentialやUsage API keyを渡してはいけません。`scripts/seed-client.mjs` でseed SQLを生成し、
    preview D1へ適用してください。
 

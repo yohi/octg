@@ -80,6 +80,10 @@ wrangler_log="$(< "$TEMP_DIR/wrangler.log")"
   print -u2 "reuse flow did not apply migrations"
   exit 1
 }
+[[ "$wrangler_log" == *"secret put OCTG_KEY_PEPPER --config"* ]] || {
+  print -u2 "reuse flow did not synchronize the Worker pepper"
+  exit 1
+}
 [[ "$wrangler_log" == *"d1 execute DB --remote"* ]] || {
   print -u2 "reuse flow did not seed the client"
   exit 1
