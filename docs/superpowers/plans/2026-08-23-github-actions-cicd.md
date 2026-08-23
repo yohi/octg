@@ -6,7 +6,7 @@
 
 **Architecture:** ワークフロー 2 本（`deploy-production.yml` / `preview-smoke.yml`）。Durable Objects Worker では Cloudflare Preview URL が生成されないため、PR 検証は `wrangler versions upload` → 新版 0% / 現行版 100% の deployment → Version Override header 付き production URL への疎通テスト → 現行版 100% への復元とする。疎通テストは再利用可能な bash スクリプト `scripts/ci-smoke-test.sh` に分離する。
 
-**Tech Stack:** GitHub Actions, Cloudflare Wrangler v4 (workspace devDependency), Node.js 20, npm workspaces, jq/curl (runner 同梱)
+**Tech Stack:** GitHub Actions, Cloudflare Wrangler v4 (workspace devDependency), Node.js 22, npm workspaces, jq/curl (runner 同梱)
 
 **Spec:** `docs/superpowers/specs/2026-08-23-github-actions-cicd-design.md`
 
@@ -254,7 +254,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -333,7 +333,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -355,7 +355,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies

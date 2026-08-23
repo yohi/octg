@@ -2,7 +2,7 @@
   "name": "octg",
   "private": true,
   "workspaces": ["apps/*", "durable-objects/*", "packages/*"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",

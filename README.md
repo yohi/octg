@@ -185,7 +185,7 @@ Provider Key は Gateway A の Custom Provider 側に登録済みの `octg_sk_*`
 
 ### 最短手順
 
-Node.js 20 以上を用意した後、次の 2 コマンドでローカル環境を準備できます。`.dev.vars` が既にある場合は、既存の Secret を保護するためスクリプトが停止します。
+Node.js 22 以上を用意した後、次の 2 コマンドでローカル環境を準備できます。`.dev.vars` が既にある場合は、既存の Secret を保護するためスクリプトが停止します。
 
 ```bash
 npm install
@@ -215,7 +215,7 @@ npm run setup:local
 ### 前提条件
 
 - **Node.js** `>= 20`（`engines` 参照）
-- **npm** `>= 10`（Node.js 20 同梱版で動作確認）
+- **npm** `>= 10`（Node.js 22 同梱版で動作確認）
 - **Cloudflare アカウント**（デプロイ・D1・Durable Objects・AI Gateway を利用する場合）
 - ローカル開発のみであれば Cloudflare アカウントは不要（`wrangler dev` のローカルモードで動作）
 
@@ -234,7 +234,7 @@ cd octg
 npm install
 ```
 
-> **Tip:** `engines` で Node.js 20+ を要求しています。`.nvmrc` 等の管理を推奨します。`node -v` でバージョンを確認してください。
+> **Tip:** `engines` で Node.js 22+ を要求しています。`.nvmrc` 等の管理を推奨します。`node -v` でバージョンを確認してください。
 
 ### 3. ローカル環境変数の準備（任意・ローカル開発時）
 

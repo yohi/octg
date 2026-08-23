@@ -47,7 +47,7 @@ master マージ (push)
 | 項目 | 内容 |
 | --- | --- |
 | トリガー | `pull_request` → master（types: opened, synchronize, reopened） |
-| Step 1 | Node.js 20 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
+| Step 1 | Node.js 22 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
 | Step 2 | `WRANGLER_OUTPUT_FILE_PATH` を指定した `wrangler versions upload --message "pr-<number> <sha>"` で新バージョンを作成し、ND-JSON の `version-upload.version_id` を取得する。同時に `wrangler deployments status --json` から現行の 100% version ID を取得する。現行 deployment が単一の 100% version でない場合は変更せず失敗する |
 | Step 3 | `wrangler versions deploy <new>@0% <current>@100% --yes` で新バージョンを active deployment に追加する。production URL へ `Cloudflare-Workers-Version-Overrides: octg-gateway="<new>"` を付けて `POST /v1/chat/completions`（model: `gpt-5-mini`、最小 fixture）を実行し、HTTP 200 かつ応答本文に content 相当が存在することを検証する |
 | Step 4 | smoke test の成否にかかわらず `wrangler versions deploy <current>@100% --yes` を実行し、現行バージョン 100% に復元する。復元失敗も workflow 失敗とする |
@@ -60,7 +60,7 @@ master マージ (push)
 | 項目 | 内容 |
 | --- | --- |
 | トリガー | `push` to master |
-| Step 1 | Node.js 20 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
+| Step 1 | Node.js 22 セットアップ、`npm ci`、`npm run typecheck`、`npm test` |
 | Step 2 | `wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc`（冪等。適用済み tag はスキップされる） |
 | Step 3 | `wrangler deploy --config apps/gateway-worker/wrangler.jsonc`。DO migration v1/v2 を含む manifest でデプロイする |
 | concurrency | group: `production-deploy`、cancel-in-progress: **false**（デプロイの直列化） |
