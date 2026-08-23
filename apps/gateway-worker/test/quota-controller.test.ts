@@ -158,9 +158,9 @@ describe("QuotaController.reserve", () => {
     const controller = stub("MINI", "2026-08-09");
 
     // When: nearly all of the MINI limit is reserved.
-    const result = await controller.reserve("req-m", 9_999_999, 9_999_999);
+    const result = await controller.reserve("req-m", 9_949_999, 9_949_999);
 
-    // Then: the 10,000,000-token default allows the reservation.
+    // Then: the 9,950,000-token configured limit allows the reservation.
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.remaining).toBe(1);
   });

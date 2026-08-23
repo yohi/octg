@@ -62,12 +62,18 @@ jobs:
           PREVIEW_DATABASE_ID: ${{ vars.OCTG_PREVIEW_DATABASE_ID }}
           PREVIEW_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
           PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
+          PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
+          PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
           PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           PREVIEW_CONFIG_PATH: ${{ runner.temp }}/wrangler-preview.jsonc
         run: |
           set -euo pipefail
-          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ]; then
-            echo "::error::Preview database, Worker URL, and upstream variables must be configured"
+          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ] || [ -z "$PREVIEW_QUOTA_LIMIT_STANDARD" ] || [ -z "$PREVIEW_QUOTA_LIMIT_MINI" ]; then
+            echo "::error::Preview database, Worker URL, upstream, and quota-limit variables must be configured"
+            exit 2
+          fi
+          if [[ ! "$PREVIEW_QUOTA_LIMIT_STANDARD" =~ ^(0|[1-9][0-9]*)$ ]] || [[ ! "$PREVIEW_QUOTA_LIMIT_MINI" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Preview STANDARD quota must be a non-negative integer and MINI quota must be a positive integer"
             exit 2
           fi
           node --input-type=module <<'NODE'
@@ -81,15 +87,25 @@ jobs:
             throw new Error(ts.flattenDiagnosticMessageText(parsed.error.messageText, "\n"));
           }
           const config = parsed.config;
-          if (!Array.isArray(config.d1_databases) || config.d1_databases.length !== 1) {
-            throw new Error("Expected exactly one D1 database binding in wrangler.jsonc");
+          const productionDatabase = Array.isArray(config.d1_databases)
+            ? config.d1_databases.find((entry) => entry.binding === "DB")
+            : undefined;
+          if (!productionDatabase) {
+            throw new Error("Expected a DB D1 binding in wrangler.jsonc");
           }
           config.name = process.env.PREVIEW_WORKER_NAME;
           config.main = `${projectRoot}/apps/gateway-worker/src/index.ts`;
           config.assets.directory = `${projectRoot}/apps/gateway-worker/public`;
-          config.d1_databases[0].database_id = process.env.PREVIEW_DATABASE_ID;
-          config.d1_databases[0].database_name = `${process.env.PREVIEW_WORKER_NAME}-db`;
-          config.d1_databases[0].migrations_dir = `${projectRoot}/db/migrations`;
+          config.d1_databases = [{
+            ...productionDatabase,
+            binding: "DB",
+            database_id: process.env.PREVIEW_DATABASE_ID,
+            database_name: `${process.env.PREVIEW_WORKER_NAME}-db`,
+            migrations_dir: `${projectRoot}/db/migrations`,
+            remote: true,
+          }];
+          config.vars.QUOTA_LIMIT_STANDARD = process.env.PREVIEW_QUOTA_LIMIT_STANDARD;
+          config.vars.QUOTA_LIMIT_MINI = process.env.PREVIEW_QUOTA_LIMIT_MINI;
           config.vars.OCTG_UPSTREAM_BASE_URL = process.env.PREVIEW_UPSTREAM_BASE_URL;
           await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
           NODE
@@ -98,7 +114,7 @@ jobs:
       - name: Apply preview D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           ./node_modules/.bin/wrangler d1 migrations apply DB \
@@ -109,7 +125,7 @@ jobs:
         id: current
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           set -euo pipefail
@@ -131,7 +147,7 @@ jobs:
         id: upload
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
         run: |
@@ -154,7 +170,7 @@ jobs:
       - name: Add uploaded version at 0% traffic
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
@@ -185,7 +201,7 @@ jobs:
         if: always() && steps.current.outputs.version_id != '' && steps.upload.outputs.version_id != ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
         run: |

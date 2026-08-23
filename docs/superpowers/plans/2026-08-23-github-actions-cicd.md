@@ -4,7 +4,7 @@
 
 **Goal:** master マージ時の本番自動デプロイと、PR 更新時の Worker 新バージョンを Version Override で検証する gpt-5-mini 疎通テストを GitHub Actions で実現する。
 
-**Architecture:** ワークフロー 2 本（`deploy-production.yml` / `preview-smoke.yml`）。Durable Objects Worker では Cloudflare Preview URL が生成されないため、PR 検証は専用 preview Worker / D1 / upstream を使い、`wrangler versions upload` → 新版 0% / 現行版 100% の deployment → Version Override header 付き preview URL への疎通テスト → 現行版 100% への復元とする。疎通テストは再利用可能な bash スクリプト `scripts/ci-smoke-test.sh` に分離する。
+**Architecture:** ワークフロー 2 本（`deploy-production.yml` / `preview-smoke.yml`）。Durable Objects Worker では Cloudflare Preview URL が生成されないため、PR 検証は専用 preview Worker / D1 / Durable Object / control-plane data を使い、`wrangler versions upload` → 新版 0% / 現行版 100% の deployment → Version Override header 付き preview URL への疎通テスト → 現行版 100% への復元とする。upstream billing principal は dedicated または shared を選択できるが、shared の場合は Preview quota limit と bounded coordination を必須にする。疎通テストは再利用可能な bash スクリプト `scripts/ci-smoke-test.sh` に分離する。
 
 **Tech Stack:** GitHub Actions, Cloudflare Wrangler v4 (workspace devDependency), Node.js 22, npm workspaces, jq/curl (runner 同梱)
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 本番デプロイと PR 検証を分離する。PR 検証は専用 preview Worker / D1 / upstream と専用 credential を使い、production resource / secret を参照しない
+- 本番デプロイと PR 検証を分離する。PR 検証は専用 preview Worker / D1 / Durable Object / control-plane data と preview credential を使い、production resource / secret を参照しない。upstream billing principal の共有は bounded quota coordination が設定済みの場合だけ許可する
 - PR Preview 方式は Version Override。`wrangler versions upload` で preview Worker の新版本を作成し、0% traffic で active deployment に追加して preview URL に header で新版本を指定する。通常トラフィックは現行版 100% のままにする
 - 疎通テストは 1 つの論理テストとして扱い、HTTP POST は最大 3 回試行する。各試行は独立したリクエストのため、MINI quota は最大 3 回分の token 消費になり得る。既定モデルは `gpt-5-mini`（MINI プール・registry 登録済み）
 - リトライ最大 3 回・10 秒間隔、curl `--max-time 60`
@@ -42,7 +42,7 @@ README.md                   # CI 運用手順セクション追記（Task 5）
 ## 前提作業（手動・オペレーター実施、Task 6 の前に必須）
 
 1. production deploy 用 Cloudflare API token と、preview 用に resource scope を限定した別の Cloudflare API token を発行する。preview token は preview Worker / preview D1 / preview account だけを対象にする
-2. CI 専用クライアントキーを preview D1 へ登録する。preview Worker の `OCTG_KEY_PEPPER`、`OCTG_UPSTREAM_API_TOKEN`、`OPENAI_USAGE_API_KEY` も production と別の値を設定する
+2. CI 専用クライアントキーを preview D1 へ登録する。preview Worker の `OCTG_KEY_PEPPER` と control-plane credential は production と別の値を設定する。shared upstreamを使う場合も preview workflowへ production D1/Worker credentialやUsage API keyを渡さない
    ```bash
    printf 'Preview client key: '
    read -r -s OCTG_PREVIEW_CLIENT_KEY
@@ -55,11 +55,13 @@ README.md                   # CI 運用手順セクション追記（Task 5）
    最小権限。必要なら Admin UI で利用モデルを gpt-5-mini 系のみに絞る）
 3. GitHub Environment `preview` の Secrets へ登録する:
    - `CLOUDFLARE_PREVIEW_API_TOKEN`: 手順 1 の preview token
-   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID`: preview account ID
    - `OCTG_PREVIEW_SMOKE_API_KEY`: 手順 2 で発行した preview クライアントキー
 4. GitHub Actions Variables に登録する:
+   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID`: preview account ID
    - `OCTG_PREVIEW_DATABASE_ID`: preview D1 database ID
-   - `OCTG_PREVIEW_UPSTREAM_BASE_URL`: preview upstream の URL
+   - `OCTG_PREVIEW_UPSTREAM_BASE_URL`: dedicated endpointまたはshared billing principalのendpoint
+   - `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`: Preview STANDARD poolのbounded quota上限
+   - `OCTG_PREVIEW_QUOTA_LIMIT_MINI`: Preview MINI poolのbounded quota上限
    - `OCTG_PREVIEW_BASE_URL`: preview Worker の URL
    - `OCTG_PREVIEW_WORKER_NAME`: preview Worker 名（省略時 `octg-gateway-preview`）
    - `SMOKE_MODEL`: 任意。未設定時は `gpt-5-mini`
@@ -278,7 +280,7 @@ git commit -m "feat(ci): Version Override 向け疎通テストスクリプト�
 - Create: `.github/workflows/deploy-production.yml`
 
 **Interfaces:**
-- Consumes: Global Constraints の Secret 名（`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`）
+- Consumes: Global Constraints の Secret 名（`CLOUDFLARE_API_TOKEN`）と GitHub Actions Variable（`CLOUDFLARE_ACCOUNT_ID`）
 - Produces: なし（独立ワークフロー）
 
 - [ ] **Step 1: ワークフローを作成**
@@ -329,13 +331,13 @@ jobs:
         run: ./node_modules/.bin/wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy Worker
         run: ./node_modules/.bin/wrangler deploy --config apps/gateway-worker/wrangler.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 ```
 
 補足: GitHub Actions では `CI=true` が自動設定され、`wrangler d1 migrations apply` は対話確認なしで適用される（冪等・適用済み tag はスキップ）。
@@ -369,7 +371,7 @@ git commit -m "feat(ci): master マージ時の本番自動デプロイワーク
 - Create: `.github/workflows/preview-smoke.yml`
 
 **Interfaces:**
-- Consumes: `scripts/ci-smoke-test.sh`（Task 2、引数 `<base-url> <model>` / env `OCTG_SMOKE_API_KEY`, `OCTG_VERSION_OVERRIDE`, `OCTG_VERSION_OVERRIDE_WORKER_NAME`）、GitHub Environment `preview` の Secrets（`CLOUDFLARE_PREVIEW_API_TOKEN`, `CLOUDFLARE_PREVIEW_ACCOUNT_ID`, `OCTG_PREVIEW_SMOKE_API_KEY`）、Variables（必須 `OCTG_PREVIEW_DATABASE_ID`, `OCTG_PREVIEW_BASE_URL`, `OCTG_PREVIEW_UPSTREAM_BASE_URL`、任意 `OCTG_PREVIEW_WORKER_NAME`, `SMOKE_MODEL`）
+- Consumes: `scripts/ci-smoke-test.sh`（Task 2、引数 `<base-url> <model>` / env `OCTG_SMOKE_API_KEY`, `OCTG_VERSION_OVERRIDE`, `OCTG_VERSION_OVERRIDE_WORKER_NAME`）、GitHub Environment `preview` の Secret（`CLOUDFLARE_PREVIEW_API_TOKEN`, `OCTG_PREVIEW_SMOKE_API_KEY`）、GitHub Actions Variables（`CLOUDFLARE_PREVIEW_ACCOUNT_ID`、必須 `OCTG_PREVIEW_DATABASE_ID`, `OCTG_PREVIEW_BASE_URL`, `OCTG_PREVIEW_UPSTREAM_BASE_URL`, `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`, `OCTG_PREVIEW_QUOTA_LIMIT_MINI`、任意 `OCTG_PREVIEW_WORKER_NAME`, `SMOKE_MODEL`）
 - Produces: 専用 preview Worker の `wrangler versions upload` で作成した version を 0% で active deployment に追加し、preview URL へ Version Override 付き smoke test を実行後、現行 version 100% へ復元する。Cloudflare が自動生成する Preview URL は使用しない
 
 - [ ] **Step 1: ワークフローを作成**
@@ -441,12 +443,18 @@ jobs:
           PREVIEW_DATABASE_ID: ${{ vars.OCTG_PREVIEW_DATABASE_ID }}
           PREVIEW_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
           PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
+          PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
+          PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
           PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           PREVIEW_CONFIG_PATH: ${{ runner.temp }}/wrangler-preview.jsonc
         run: |
           set -euo pipefail
-          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ]; then
-            echo "::error::Preview database, Worker URL, and upstream variables must be configured"
+          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ] || [ -z "$PREVIEW_QUOTA_LIMIT_STANDARD" ] || [ -z "$PREVIEW_QUOTA_LIMIT_MINI" ]; then
+            echo "::error::Preview database, Worker URL, upstream, and quota-limit variables must be configured"
+            exit 2
+          fi
+          if [[ ! "$PREVIEW_QUOTA_LIMIT_STANDARD" =~ ^(0|[1-9][0-9]*)$ ]] || [[ ! "$PREVIEW_QUOTA_LIMIT_MINI" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Preview STANDARD quota must be a non-negative integer and MINI quota must be a positive integer"
             exit 2
           fi
           node --input-type=module <<'NODE'
@@ -469,6 +477,8 @@ jobs:
           config.d1_databases[0].database_id = process.env.PREVIEW_DATABASE_ID;
           config.d1_databases[0].database_name = `${process.env.PREVIEW_WORKER_NAME}-db`;
           config.d1_databases[0].migrations_dir = `${projectRoot}/db/migrations`;
+          config.vars.QUOTA_LIMIT_STANDARD = process.env.PREVIEW_QUOTA_LIMIT_STANDARD;
+          config.vars.QUOTA_LIMIT_MINI = process.env.PREVIEW_QUOTA_LIMIT_MINI;
           config.vars.OCTG_UPSTREAM_BASE_URL = process.env.PREVIEW_UPSTREAM_BASE_URL;
           await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
           NODE
@@ -477,7 +487,7 @@ jobs:
       - name: Apply preview D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           ./node_modules/.bin/wrangler d1 migrations apply DB \
@@ -488,7 +498,7 @@ jobs:
         id: current
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           set -euo pipefail
@@ -510,7 +520,7 @@ jobs:
         id: upload
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
         run: |
@@ -533,7 +543,7 @@ jobs:
       - name: Add uploaded version at 0% traffic
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
@@ -563,7 +573,7 @@ jobs:
         if: always() && steps.current.outputs.version_id != '' && steps.upload.outputs.version_id != ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
         run: |
@@ -648,7 +658,7 @@ git commit -m "feat(ci): PR 時の Version Override と疎通テストワーク�
 
 ### 事前に必要な設定（一度だけ）
 
-1. production と分離した preview Worker、preview D1、preview upstream を用意し、preview API token の権限を preview resource だけに限定する。
+1. production と分離した preview Worker、preview D1、preview Durable Object、client/policy/model registry、監査・reconciliation state を用意し、preview API token の権限を preview control-plane resource だけに限定する。upstreamはdedicatedまたはshared billing principalを選択する。
 2. CI 専用クライアントキーを preview D1 に登録する。`scripts/seed-client.mjs` で seed SQL を生成し、preview D1 へ適用する:
 
    ```bash
@@ -658,14 +668,14 @@ git commit -m "feat(ci): PR 時の Version Override と疎通テストワーク�
    node scripts/seed-client.mjs client_ci_smoke "CI Smoke" <preview-client-key> REJECT > /tmp/octg-preview-seed.sql
    ```
 
-3. GitHub Environment `preview` の Secrets に `CLOUDFLARE_PREVIEW_API_TOKEN`、`CLOUDFLARE_PREVIEW_ACCOUNT_ID`、`OCTG_PREVIEW_SMOKE_API_KEY` を登録する。
-4. Actions Variables に `OCTG_PREVIEW_DATABASE_ID`、`OCTG_PREVIEW_UPSTREAM_BASE_URL`、`OCTG_PREVIEW_BASE_URL` を登録する。`OCTG_PREVIEW_WORKER_NAME` は任意で、未設定時は `octg-gateway-preview` とする。
+3. GitHub Environment `preview` の Secrets に `CLOUDFLARE_PREVIEW_API_TOKEN`、`OCTG_PREVIEW_SMOKE_API_KEY` を登録する。
+4. Actions Variables に `CLOUDFLARE_PREVIEW_ACCOUNT_ID`、`OCTG_PREVIEW_DATABASE_ID`、`OCTG_PREVIEW_UPSTREAM_BASE_URL`、`OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`、`OCTG_PREVIEW_QUOTA_LIMIT_MINI`、`OCTG_PREVIEW_BASE_URL` を登録する。`OCTG_PREVIEW_WORKER_NAME` は任意で、未設定時は `octg-gateway-preview` とする。
 5. （任意）Variables に `SMOKE_MODEL` を設定すると疎通テスト用モデルを差し替えられる（未設定時は `gpt-5-mini`）。production用 Secretsはpreview workflowへ渡さない。
 
 ### 運用メモ
 
-- Durable Objects Worker ではCloudflareが自動生成するPreview URLを使えないため、専用preview Workerの固定URLへVersion Overrideで新versionを指定する。D1 / Durable Object / upstreamはproductionと分離する。
-- workflowは新versionを0% trafficでactive deploymentに追加し、最大3回のsmoke試行後に現行version 100%へ復元する。PR workflowとproduction deployは`octg-deployment`で直列化する。各試行は独立requestのため、preview MINI poolを最大3回分消費し得る。
+- Durable Objects Worker ではCloudflareが自動生成するPreview URLを使えないため、専用preview Workerの固定URLへVersion Overrideで新versionを指定する。D1 / Durable Object / control-plane dataはproductionと分離する。upstream billing principalを共有する場合は、Preview上限とProduction配分の合計がprovider quotaを超えないようにする。
+- workflowは新versionを0% trafficでactive deploymentに追加し、最大3回のsmoke試行後に現行version 100%へ復元する。PR workflowとproduction deployは`octg-deployment`で直列化する。各試行は独立requestのため、preview MINI poolを最大3回分消費し得る。quota limit未設定時はconfig生成でfail-closedする。
 - 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施する（[Tokenizer の監視・運用](#tokenizer-の監視運用) 参照）。
 - Secret 値は workflow ログへ出力されない。`octg_sk_*` をドキュメントやコードへ記載しないこと。
 ```
@@ -699,7 +709,7 @@ git commit -m "docs(readme): CI/CD ワークフローの運用手順を追加"
 - Create: なし（PR 操作と実環境検証）
 
 **Interfaces:**
-- Consumes: production deploy用 Secrets、GitHub Environment `preview` の3つの preview Secrets、preview resource用 Actions Variables
+- Consumes: production deploy用 Secrets、GitHub Environment `preview` の2つの preview Secrets、preview resource用 Actions Variables（`OCTG_PREVIEW_DATABASE_ID`、`OCTG_PREVIEW_UPSTREAM_BASE_URL`、`OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`、`OCTG_PREVIEW_QUOTA_LIMIT_MINI` を含む）
 - Produces: PR（マージは人間が実施）
 
 - [ ] **Step 1: ブランチを push**
@@ -744,6 +754,6 @@ PR URL をユーザーへ報告する。**マージはユーザーが行う**（
 
 ## Self-Review 結果
 
-1. **Spec coverage:** production deployと専用preview resourceの分離 ✓ / DO Worker の自動Preview URL制約反映 ✓ / preview config生成・D1 migration・versions upload + 0% deployment + Version Override ✓ / preview URL variable ✓ / chat completions 最大3試行 ✓ / gpt-5-mini 変数化（`vars.SMOKE_MODEL` フォールバック） ✓ / productionとpreviewのcredential分離 ✓ / 両ワークフローで typecheck+test ✓ / production deployを含むconcurrency直列化 ✓ / permissions contents:read ✓ / response bodyを出さないredacted error logging ✓ / `X-OCTG-Worker-Version` 検証 ✓ / README 運用手順 ✓ / rollback は手動（対象外） ✓
+1. **Spec coverage:** production deployとpreview control-plane resourceの分離 ✓ / shared upstream時のbounded quota limit ✓ / DO Worker の自動Preview URL制約反映 ✓ / preview config生成・D1 migration・versions upload + 0% deployment + Version Override ✓ / preview URL variable ✓ / chat completions 最大3試行 ✓ / gpt-5-mini 変数化（`vars.SMOKE_MODEL` フォールバック） ✓ / productionとpreviewのcredential分離 ✓ / 両ワークフローで typecheck+test ✓ / production deployを含むconcurrency直列化 ✓ / permissions contents:read ✓ / response bodyを出さないredacted error logging ✓ / `X-OCTG-Worker-Version` 検証 ✓ / README 運用手順 ✓ / rollback は手動（対象外） ✓
 2. **Placeholder scan:** TBD/TODO なし。全コードステップに実コード記載 ✓
 3. **Type consistency:** スクリプト呼び出し署名 `scripts/ci-smoke-test.sh <base-url> <model>` と env `OCTG_VERSION_OVERRIDE` を Task 2（定義）と Task 4（使用）で一致 ✓ / Wrangler ND-JSON の `version-upload.version_id` と current deployment の `versions[].version_id` を Version Override / restore で一致 ✓ / preview config はJSONC parser、絶対パス、preview D1 binding `DB` を使用 ✓

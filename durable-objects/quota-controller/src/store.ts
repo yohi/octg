@@ -64,7 +64,9 @@ export interface QuotaIdentity {
 export function resolveLimit(env: QuotaEnvLike, pool: PoolName): number {
   const raw = pool === "STANDARD" ? env.QUOTA_LIMIT_STANDARD : env.QUOTA_LIMIT_MINI;
   const configured = Number(raw);
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : POOL_LIMITS[pool];
+  return raw?.trim() !== "" && Number.isSafeInteger(configured) && configured >= 0
+    ? configured
+    : POOL_LIMITS[pool];
 }
 
 export async function loadPool(

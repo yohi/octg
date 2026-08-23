@@ -353,11 +353,30 @@ PR の検証には固定の専用 preview Worker と Version Override を使用�
 
 ### 事前に必要な設定（一度だけ）
 
-1. production と分離した preview Worker、preview D1、preview upstream を用意し、
-   preview用 Cloudflare API tokenをpreview resourceだけへ限定します。
-2. CI 専用クライアントキーを preview D1 に登録します。preview用の
-   `OCTG_KEY_PEPPER`、`OCTG_UPSTREAM_API_TOKEN`、`OPENAI_USAGE_API_KEY` も production と
-   別の値をCloudflare側で管理します。`scripts/seed-client.mjs` でseed SQLを生成し、
+1. production と分離した preview Worker、preview D1、preview Durable Object、
+   client/policy/model registry、監査・reconciliation state を用意し、preview用
+   Cloudflare API tokenをpreview control-plane resourceだけへ限定します。upstream billing
+   principal は共有できますが、その場合は Preview の利用上限、quota coordination、監視、
+   coordination 未設定時の fail-closed 条件を先に定義してください。
+   D1作成・migration・CI client seed・GitHub Environment設定は、次のスクリプトで一括実行できます。
+   `preview.env.example` を `.env.preview` へコピーして実値を入力し、まずdry-runで確認してください。
+
+   ```bash
+   cp preview.env.example .env.preview
+   zsh scripts/setup-preview.zsh --dry-run
+   zsh scripts/setup-preview.zsh
+   zsh scripts/setup-preview.zsh --github
+   ```
+
+   `--github` は `preview` Environment の Variables と、
+   `CLOUDFLARE_PREVIEW_API_TOKEN` / `OCTG_PREVIEW_SMOKE_API_KEY` Secretsを更新します。
+   Scriptはcanonical configの`DB` bindingだけを使った一時configを生成するため、
+   canonical configに複数のD1 bindingがあってもProduction D1を変更しません。
+
+2. （スクリプトを使わず手動で行う場合）CI 専用クライアントキーを preview D1 に登録します。preview用の
+   `OCTG_KEY_PEPPER` と control-plane credential は production と別の値をCloudflare側で
+   管理します。upstream billing principalを共有する場合も、preview workflowへproduction
+   D1/Worker credentialやUsage API keyを渡してはいけません。`scripts/seed-client.mjs` でseed SQLを生成し、
    preview D1へ適用してください。
 
    ```bash
@@ -384,21 +403,27 @@ PR の検証には固定の専用 preview Worker と Version Override を使用�
    productionのclient keyは使わないでください。
 3. GitHub Environment `preview` の Secrets に以下を登録します:
    - `CLOUDFLARE_PREVIEW_API_TOKEN` — preview resource専用 token
-   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID` — preview Cloudflare account ID
    - `OCTG_PREVIEW_SMOKE_API_KEY` — 手順 2 の preview client key
 4. **Actions Variables** に以下を登録します:
+   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID` — preview Cloudflare account ID
    - `OCTG_PREVIEW_DATABASE_ID` — preview D1 database ID
-   - `OCTG_PREVIEW_UPSTREAM_BASE_URL` — preview upstream URL
+   - `OCTG_PREVIEW_UPSTREAM_BASE_URL` — preview upstream URL（dedicated endpointまたは共有billing principalのendpoint）
+   - `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` — Preview STANDARD poolのbounded quota上限。`0`で無効化
+   - `OCTG_PREVIEW_QUOTA_LIMIT_MINI` — Preview MINI poolのbounded quota上限（正の整数）
    - `OCTG_PREVIEW_BASE_URL` — preview Worker URL（例: `https://octg-gateway-preview.<subdomain>.workers.dev`）
    - `OCTG_PREVIEW_WORKER_NAME` — 任意。未設定時は `octg-gateway-preview`
    - `SMOKE_MODEL` — 任意。未設定時は `gpt-5-mini`
-5. production deploy用の `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` は
+5. production deploy用のSecret `CLOUDFLARE_API_TOKEN` とVariable `CLOUDFLARE_ACCOUNT_ID` は
    production workflowだけへ登録し、preview environmentへ登録・参照しないでください。
 
 ### 運用メモ
 
 - preview smokeは1つの論理テストとして最大3回POSTします。各試行は独立したrequestのため、
-  preview MINI poolのquotaを最大3回分消費し得ます。
+  preview MINI poolのquotaを最大3回分消費し得ます。上限値はActions Variablesから一時
+  configへ注入し、共有upstreamを使う場合はProduction側のquota配分からPreview分を差し引きます。
+- Preview D1/DOのquota stateはProductionと共有しません。同じupstream billing principalを使う場合でも、
+  D1共有はquota coordinationの代替になりません。coordination上限を超えるrequestはupstreamへ送らず、
+  fail-closedにしてください。
 - workflowは専用preview Workerの新 versionを0% trafficでactive deploymentに追加し、
   テスト後に現行version 100%へ復元します。PR smokeとproduction deployは
   `octg-deployment` concurrency groupで直列化されます。
