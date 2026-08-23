@@ -1,0 +1,140 @@
+name: Preview Smoke Test
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-version-smoke
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+  version-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Capture current 100% deployment
+        id: current
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          current_file="$RUNNER_TEMP/current-deployment.json"
+          npx wrangler deployments status \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --json > "$current_file"
+          current_version_id=$(jq -r '
+            [.versions[] | select(.percentage == 100) | .version_id]
+            | if length == 1 then .[0] else empty end
+          ' "$current_file")
+          if [ -z "$current_version_id" ]; then
+            echo "::error::Current deployment is not a single 100% version; refusing to change traffic"
+            exit 1
+          fi
+          echo "version_id=$current_version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload worker version
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: |
+          set -euo pipefail
+          rm -f "$WRANGLER_OUTPUT_FILE_PATH"
+          npx wrangler versions upload \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --tag "pr-${{ github.event.pull_request.number }}" \
+            --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}"
+          version_id=$(jq -s -r '
+            [.[] | select(.type == "version-upload") | .version_id // empty]
+            | last // empty
+          ' "$WRANGLER_OUTPUT_FILE_PATH")
+          if [ -z "$version_id" ]; then
+            echo "::error::Worker Version ID not found in Wrangler output"
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Add uploaded version at 0% traffic
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+          NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          npx wrangler versions deploy \
+            "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --message "PR ${{ github.event.pull_request.number }} smoke test" \
+            --yes
+
+      - name: Run smoke test with Version Override
+        id: smoke
+        continue-on-error: true
+        env:
+          OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_SMOKE_API_KEY }}
+          OCTG_VERSION_OVERRIDE: ${{ steps.upload.outputs.version_id }}
+          SMOKE_BASE_URL: ${{ vars.OCTG_SMOKE_BASE_URL }}
+          SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
+        run: |
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::Repository variable OCTG_SMOKE_BASE_URL is not set"
+            exit 2
+          fi
+          bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
+
+      - name: Restore current version at 100% traffic
+        if: always() && steps.current.outputs.version_id != '' && steps.upload.outputs.version_id != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+        run: |
+          npx wrangler versions deploy \
+            "${CURRENT_VERSION_ID}@100%" \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --message "Restore current version after PR smoke test" \
+            --yes
+
+      - name: Fail when smoke test failed
+        if: steps.smoke.outcome != 'success'
+        run: exit 1
