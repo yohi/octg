@@ -26,7 +26,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Typecheck
         run: npm run typecheck
@@ -48,7 +48,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Capture current 100% deployment
         id: current
@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           current_file="$RUNNER_TEMP/current-deployment.json"
-          npx wrangler deployments status \
+          ./node_modules/.bin/wrangler deployments status \
             --config apps/gateway-worker/wrangler.jsonc \
             --json > "$current_file"
           current_version_id=$(jq -r '
@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -f "$WRANGLER_OUTPUT_FILE_PATH"
-          npx wrangler versions upload \
+          ./node_modules/.bin/wrangler versions upload \
             --config apps/gateway-worker/wrangler.jsonc \
             --tag "pr-${{ github.event.pull_request.number }}" \
             --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}"
@@ -101,7 +101,7 @@ jobs:
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
         run: |
-          npx wrangler versions deploy \
+          ./node_modules/.bin/wrangler versions deploy \
             "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
             --config apps/gateway-worker/wrangler.jsonc \
             --message "PR ${{ github.event.pull_request.number }} smoke test" \
@@ -129,7 +129,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
         run: |
-          npx wrangler versions deploy \
+          ./node_modules/.bin/wrangler versions deploy \
             "${CURRENT_VERSION_ID}@100%" \
             --config apps/gateway-worker/wrangler.jsonc \
             --message "Restore current version after PR smoke test" \

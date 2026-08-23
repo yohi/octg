@@ -9,7 +9,7 @@
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
+if [[ "$#" -ne 2 ]]; then
   echo "usage: $0 <base-url> <model>" >&2
   exit 2
 fi
@@ -17,7 +17,7 @@ fi
 base_url="${1%/}"
 model="$2"
 
-if [ -z "${OCTG_SMOKE_API_KEY:-}" ]; then
+if [[ -z "${OCTG_SMOKE_API_KEY:-}" ]]; then
   echo "error: OCTG_SMOKE_API_KEY is not set" >&2
   exit 2
 fi
@@ -35,7 +35,7 @@ curl_args=(
   -H "Authorization: Bearer ${OCTG_SMOKE_API_KEY}"
   -H "Content-Type: application/json"
 )
-if [ -n "${OCTG_VERSION_OVERRIDE:-}" ]; then
+if [[ -n "${OCTG_VERSION_OVERRIDE:-}" ]]; then
   curl_args+=(
     -H "Cloudflare-Workers-Version-Overrides: octg-gateway=\"${OCTG_VERSION_OVERRIDE}\""
   )
@@ -46,17 +46,17 @@ for attempt in 1 2 3; do
   status="000"
   status=$(curl "${curl_args[@]}" --data "$payload") || status="000"
 
-  if [ "$status" = "200" ] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
+  if [[ "$status" == "200" ]] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
     echo "smoke test passed (attempt ${attempt})"
     exit 0
   fi
 
   echo "attempt ${attempt}: http_status=${status}" >&2
-  if [ -s "$response_file" ]; then
+  if [[ -s "$response_file" ]]; then
     cat "$response_file" >&2
     echo "" >&2
   fi
-  if [ "$attempt" -lt 3 ]; then
+  if [[ "$attempt" -lt 3 ]]; then
     sleep 10
   fi
 done
