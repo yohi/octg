@@ -1,10 +1,10 @@
 # GitHub Actions CI/CD Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. This plan is executed inline without subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** master マージ時の本番自動デプロイと、PR 更新時の Worker Preview URL へのデプロイ + gpt-5-mini による疎通テストを GitHub Actions で実現する。
+**Goal:** master マージ時の本番自動デプロイと、PR 更新時の Worker 新バージョンを Version Override で検証する gpt-5-mini 疎通テストを GitHub Actions で実現する。
 
-**Architecture:** ワークフロー 2 本（`deploy-production.yml` / `preview-smoke.yml`）。Preview 検証は `wrangler versions upload`（本番トラフィック非影響、D1/DO は共有）。疎通テストは再利用可能な bash スクリプト `scripts/ci-smoke-test.sh` に分離し、workflow から呼び出す。
+**Architecture:** ワークフロー 2 本（`deploy-production.yml` / `preview-smoke.yml`）。Durable Objects Worker では Cloudflare Preview URL が生成されないため、PR 検証は `wrangler versions upload` → 新版 0% / 現行版 100% の deployment → Version Override header 付き production URL への疎通テスト → 現行版 100% への復元とする。疎通テストは再利用可能な bash スクリプト `scripts/ci-smoke-test.sh` に分離する。
 
 **Tech Stack:** GitHub Actions, Cloudflare Wrangler v4 (workspace devDependency), Node.js 20, npm workspaces, jq/curl (runner 同梱)
 
@@ -13,11 +13,12 @@
 ## Global Constraints
 
 - 環境は production のみ。staging 等の名前付き wrangler 環境は作らない
-- PR Preview 方式は `wrangler versions upload`。`versions deploy` や本番影響のある操作を PR 時に実行しない
+- PR Preview 方式は Version Override。`wrangler versions upload` で新版本を作成し、0% traffic で active deployment に追加して production URL に header で新版本を指定する。通常トラフィックは現行版 100% のままにする
 - 疎通テストは `POST /v1/chat/completions` 1 リクエスト。既定モデル `gpt-5-mini`（MINI プール・registry 登録済み）
 - リトライ最大 3 回・10 秒間隔、curl `--max-time 60`
 - 全 workflow の `permissions` は `contents: read` のみ
-- Secret 値（`octg_sk_*`、API token）を echo・コミット・ログ出力しない。curl へは env 経由で渡す
+- Secret 値（`octg_sk_*`、API token）を echo・コミット・ログ出力しない。curl へは env 経由で渡す。production URL は GitHub Actions Variable `OCTG_SMOKE_BASE_URL` から渡す
+- Preview smoke workflow は PR 間で `worker-version-smoke` concurrency group により直列化し、smoke 終了後に現行 version 100% へ必ず復元する
 - `apps/gateway-worker/wrangler.jsonc` の DO migrations v1/v2 を削除・改名・変更しない
 - **master ブランチへ直接 commit / push しない**。全作業は Task 1 で作成する feature ブランチ上で行う
 - コミットメッセージは日本語 Conventional Commits（例: `feat(ci): ...`）
@@ -28,7 +29,7 @@
 ```text
 .github/workflows/
 ├── deploy-production.yml   # on: push(master) → test → d1 migrate → deploy
-└── preview-smoke.yml       # on: pull_request(master) → test → versions upload → smoke
+└── preview-smoke.yml       # on: pull_request(master) → test → upload/0% deploy → override smoke → restore
 scripts/
 └── ci-smoke-test.sh        # 疎通テスト本体（引数: base-url, model / env: OCTG_SMOKE_API_KEY）
 docs/superpowers/specs/
@@ -39,18 +40,19 @@ README.md                   # CI 運用手順セクション追記（Task 5）
 ## 前提作業（手動・オペレーター実施、Task 6 の前に必須）
 
 1. Cloudflare API token 発行（最小権限: Account Settings Read / Workers Scripts Edit / D1 Edit）
-2. GitHub リポジトリ Secrets へ登録:
-   - `CLOUDFLARE_API_TOKEN`: 上記 token
-   - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare アカウント ID
-   - `OCTG_SMOKE_API_KEY`: 手順 3 で発行したクライアントキー
-3. CI 専用クライアントキーを本番 D1 へ登録:
+2. CI 専用クライアントキーを本番 D1 へ登録:
    ```bash
    OCTG_KEY_PEPPER=<本番pepper> \
    OCTG_CLIENT_ID=client_ci_smoke \
    OCTG_CLIENT_NAME="CI Smoke" \
    npm run seed:client:remote -- --tools-mode=REJECT
    ```
-   （`--key` 未指定なら `octg_sk_remote_<hex>` が自動生成され標準出力に表示される。表示された値を `OCTG_SMOKE_API_KEY` に登録する。tools-mode 既定 REJECT = 最小権限。必要なら Admin UI で利用モデルを gpt-5-mini 系のみに絞る）
+   （`--key` 未指定なら `octg_sk_remote_<hex>` が自動生成され標準出力に表示される。表示された値を手順 3 の `OCTG_SMOKE_API_KEY` に登録する。tools-mode 既定 REJECT = 最小権限。必要なら Admin UI で利用モデルを gpt-5-mini 系のみに絞る）
+3. GitHub リポジトリ Secrets へ登録:
+   - `CLOUDFLARE_API_TOKEN`: 手順 1 の token
+   - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare アカウント ID
+   - `OCTG_SMOKE_API_KEY`: 手順 2 で発行したクライアントキー
+4. GitHub Actions Variables に `OCTG_SMOKE_BASE_URL` を登録する（`SMOKE_MODEL` は任意）
 
 ---
 
@@ -95,7 +97,7 @@ Expected: `docs(specs): ...` のコミットが HEAD にあり、spec ファイ�
 
 **Interfaces:**
 - Consumes: なし
-- Produces: `scripts/ci-smoke-test.sh <base-url> <model>` — 成功時 exit 0 / 引数不足・env 不足 exit 2 / 3 回リトライ後失敗 exit 1。環境変数 `OCTG_SMOKE_API_KEY` 必須。Task 4 の preview-smoke.yml から呼び出す
+- Produces: `scripts/ci-smoke-test.sh <base-url> <model>` — 成功時 exit 0 / 引数不足・env 不足 exit 2 / 3 回リトライ後失敗 exit 1。環境変数 `OCTG_SMOKE_API_KEY` 必須。任意の `OCTG_VERSION_OVERRIDE` がある場合は `octg-gateway` Worker への Version Override header を追加する。Task 4 の preview-smoke.yml から呼び出す
 
 - [ ] **Step 1: スクリプトを作成**
 
@@ -109,6 +111,7 @@ Expected: `docs(specs): ...` のコミットが HEAD にあり、spec ファイ�
 #   model    : 疎通テストに使うモデル名 (例: gpt-5-mini)
 # Env:
 #   OCTG_SMOKE_API_KEY : クライアントキー (octg_sk_*)。必須。ログへ出力しないこと。
+#   OCTG_VERSION_OVERRIDE : Version Override 対象の Worker Version ID。指定時だけ header を付ける。
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
@@ -129,13 +132,25 @@ payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with
 response_file=$(mktemp)
 trap 'rm -f "$response_file"' EXIT
 
+curl_args=(
+  -sS
+  --max-time 60
+  -o "$response_file"
+  -w '%{http_code}'
+  "${base_url}/v1/chat/completions"
+  -H "Authorization: Bearer ${OCTG_SMOKE_API_KEY}"
+  -H "Content-Type: application/json"
+)
+if [ -n "${OCTG_VERSION_OVERRIDE:-}" ]; then
+  curl_args+=(
+    -H "Cloudflare-Workers-Version-Overrides: octg-gateway=\"${OCTG_VERSION_OVERRIDE}\""
+  )
+fi
+
 for attempt in 1 2 3; do
+  : > "$response_file"
   status="000"
-  status=$(curl -sS --max-time 60 -o "$response_file" -w '%{http_code}' \
-    "${base_url}/v1/chat/completions" \
-    -H "Authorization: Bearer ${OCTG_SMOKE_API_KEY}" \
-    -H "Content-Type: application/json" \
-    --data "$payload") || status="000"
+  status=$(curl "${curl_args[@]}" --data "$payload") || status="000"
 
   if [ "$status" = "200" ] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
     echo "smoke test passed (attempt ${attempt})"
@@ -197,7 +212,7 @@ Expected: `smoke test passed (attempt 1)`、`exit=0`
 
 ```bash
 git add scripts/ci-smoke-test.sh
-git commit -m "feat(ci): Preview URL 向け疎通テストスクリプトを追加"
+git commit -m "feat(ci): Version Override 向け疎通テストスクリプトを追加"
 ```
 
 ---
@@ -286,8 +301,8 @@ git commit -m "feat(ci): master マージ時の本番自動デプロイワーク
 - Create: `.github/workflows/preview-smoke.yml`
 
 **Interfaces:**
-- Consumes: `scripts/ci-smoke-test.sh`（Task 2、引数 `<base-url> <model>` / env `OCTG_SMOKE_API_KEY`）、Secrets（`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `OCTG_SMOKE_API_KEY`）、任意 repo variable `SMOKE_MODEL`（未設定時 `gpt-5-mini`）
-- Produces: job `upload-preview` の output `preview_url`（job `smoke-test` が消費）
+- Consumes: `scripts/ci-smoke-test.sh`（Task 2、引数 `<base-url> <model>` / env `OCTG_SMOKE_API_KEY`, `OCTG_VERSION_OVERRIDE`）、Secrets（`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `OCTG_SMOKE_API_KEY`）、Variables（必須 `OCTG_SMOKE_BASE_URL`、任意 `SMOKE_MODEL`）
+- Produces: `wrangler versions upload` で作成した version を 0% で active deployment に追加し、smoke test 後に現行 version 100% へ復元する。Preview URL は生成・使用しない
 
 - [ ] **Step 1: ワークフローを作成**
 
@@ -305,8 +320,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: worker-version-smoke
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -330,11 +345,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
-  upload-preview:
+  version-smoke:
     needs: test
     runs-on: ubuntu-latest
-    outputs:
-      preview_url: ${{ steps.upload.outputs.preview_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -348,45 +361,101 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Upload worker version (preview, no live traffic impact)
-        id: upload
+      - name: Capture current 100% deployment
+        id: current
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          output=$(npx wrangler versions upload --config apps/gateway-worker/wrangler.jsonc \
-            --tag "pr-${{ github.event.pull_request.number }}" \
-            --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}" 2>&1) || {
-            echo "$output"
-            echo "::error::wrangler versions upload failed"
-            exit 1
-          }
-          echo "$output"
-          url=$(printf '%s' "$output" | grep -Eo 'https://[a-z0-9-]+-octg-gateway\.[a-z0-9.-]+\.workers\.dev' | tail -1)
-          if [ -z "$url" ]; then
-            echo "::error::Preview URL not found in wrangler output"
+          set -euo pipefail
+          current_file="$RUNNER_TEMP/current-deployment.json"
+          npx wrangler deployments status \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --json > "$current_file"
+          current_version_id=$(jq -r '
+            [.versions[] | select(.percentage == 100) | .version_id]
+            | if length == 1 then .[0] else empty end
+          ' "$current_file")
+          if [ -z "$current_version_id" ]; then
+            echo "::error::Current deployment is not a single 100% version; refusing to change traffic"
             exit 1
           fi
-          echo "preview_url=${url}" >> "$GITHUB_OUTPUT"
+          echo "version_id=$current_version_id" >> "$GITHUB_OUTPUT"
 
-  smoke-test:
-    needs: upload-preview
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Upload worker version
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: |
+          set -euo pipefail
+          rm -f "$WRANGLER_OUTPUT_FILE_PATH"
+          npx wrangler versions upload \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --tag "pr-${{ github.event.pull_request.number }}" \
+            --message "pr-${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}"
+          version_id=$(jq -s -r '
+            [.[] | select(.type == "version-upload") | .version_id // empty]
+            | last // empty
+          ' "$WRANGLER_OUTPUT_FILE_PATH")
+          if [ -z "$version_id" ]; then
+            echo "::error::Worker Version ID not found in Wrangler output"
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
 
-      - name: Run smoke test against preview URL
+      - name: Add uploaded version at 0% traffic
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+          NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          npx wrangler versions deploy \
+            "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --message "PR ${{ github.event.pull_request.number }} smoke test" \
+            --yes
+
+      - name: Run smoke test with Version Override
+        id: smoke
+        continue-on-error: true
         env:
           OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_SMOKE_API_KEY }}
-          SMOKE_BASE_URL: ${{ needs.upload-preview.outputs.preview_url }}
+          OCTG_VERSION_OVERRIDE: ${{ steps.upload.outputs.version_id }}
+          SMOKE_BASE_URL: ${{ vars.OCTG_SMOKE_BASE_URL }}
           SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
-        run: bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
+        run: |
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::Repository variable OCTG_SMOKE_BASE_URL is not set"
+            exit 2
+          fi
+          bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
+
+      - name: Restore current version at 100% traffic
+        if: always() && steps.current.outputs.version_id != '' && steps.upload.outputs.version_id != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+        run: |
+          npx wrangler versions deploy \
+            "${CURRENT_VERSION_ID}@100%" \
+            --config apps/gateway-worker/wrangler.jsonc \
+            --message "Restore current version after PR smoke test" \
+            --yes
+
+      - name: Fail when smoke test failed
+        if: steps.smoke.outcome != 'success'
+        run: exit 1
 ```
 
 補足:
-- `versions upload` はバージョンのアップロードのみでライブトラフィックには影響しない。アップロード済みバージョンは本番の Secret を引き継ぐ
-- Preview URL 抽出は worker 名 `octg-gateway` を含む workers.dev ホスト名の正規表現。抽出不能時は `::error::` で明示失敗
+- `WRANGLER_OUTPUT_FILE_PATH` の ND-JSON から `version-upload.version_id` を取得する。Preview URL の stdout 抽出は行わない
+- `deployments status --json` で現行 deployment を確認し、単一の 100% version でない場合は安全のため変更しない
+- `versions deploy` は新バージョンを 0% にするため通常トラフィックへ流れない。Version Override header 付きの smoke request だけが新バージョンへ到達する
+- smoke test 後は `if: always()` の復元 step を実行する。Workers は 1 deployment に最大 2 version のため、全 PR を `worker-version-smoke` で直列化する
 - 疎通テスト消費は MINI プールの 1 リクエスト数十トークン程度
 
 - [ ] **Step 2: YAML 構文検証**
@@ -394,24 +463,28 @@ jobs:
 Run: `actionlint .github/workflows/preview-smoke.yml 2>/dev/null || python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1])); print('YAML OK')" .github/workflows/preview-smoke.yml`
 Expected: actionlint 警告ゼロ、または `YAML OK` 表示
 
-- [ ] **Step 3: Preview URL 抽出正規表現の単体検証**
+- [ ] **Step 3: Wrangler output / Version Override のローカル検証**
 
 Run:
 
 ```bash
-sample='✨ Success! Uploaded version abc123
-🚀 Preview URL: https://abc123-octg-gateway.yohi.workers.dev'
-url=$(printf '%s' "$sample" | grep -Eo 'https://[a-z0-9-]+-octg-gateway\.[a-z0-9.-]+\.workers\.dev' | tail -1)
-test "$url" = "https://abc123-octg-gateway.yohi.workers.dev" && echo "regex OK"
+tmp_output=$(mktemp)
+printf '%s\n' \
+  '{"type":"wrangler-session","version":1}' \
+  '{"type":"version-upload","version":1,"version_id":"11111111-2222-3333-4444-555555555555"}' \
+  > "$tmp_output"
+version_id=$(jq -s -r '[.[] | select(.type == "version-upload") | .version_id // empty] | last // empty' "$tmp_output")
+rm -f "$tmp_output"
+test "$version_id" = "11111111-2222-3333-4444-555555555555" && echo "version output OK"
 ```
 
-Expected: `regex OK`
+Expected: `version output OK`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add .github/workflows/preview-smoke.yml
-git commit -m "feat(ci): PR 時の Preview デプロイと疎通テストワークフローを追加"
+git commit -m "feat(ci): PR 時の Version Override と疎通テストワークフローを追加"
 ```
 
 ---
@@ -435,7 +508,7 @@ git commit -m "feat(ci): PR 時の Preview デプロイと疎通テストワー�
 | ワークフロー | トリガー | 内容 |
 | --- | --- | --- |
 | `deploy-production.yml` | `push` to `master` | typecheck / test → D1 migration（remote、冪等）→ `wrangler deploy` |
-| `preview-smoke.yml` | `pull_request` → `master` | typecheck / test → `wrangler versions upload`（Preview URL、本番トラフィック非影響）→ Preview URL に対し `POST /v1/chat/completions` 1 発の疎通テスト（既定モデル `gpt-5-mini`） |
+| `preview-smoke.yml` | `pull_request` → `master` | typecheck / test → 新 version を 0% traffic で deployment → production URL に Version Override header を付けて `POST /v1/chat/completions` 1 発の疎通テスト → 現行 version 100% に復元（既定モデル `gpt-5-mini`） |
 
 ### 事前に必要な設定（一度だけ）
 
@@ -453,11 +526,13 @@ git commit -m "feat(ci): PR 時の Preview デプロイと疎通テストワー�
    - `CLOUDFLARE_API_TOKEN` — 手順 1 の token
    - `CLOUDFLARE_ACCOUNT_ID` — Cloudflare アカウント ID
    - `OCTG_SMOKE_API_KEY` — 手順 2 のクライアントキー
-4. （任意）Variables に `SMOKE_MODEL` を設定すると疎通テスト用モデルを差し替えられる（未設定時は `gpt-5-mini`）。
+4. Variables に `OCTG_SMOKE_BASE_URL` として production URL を登録する（例: `https://octg-gateway.<subdomain>.workers.dev`）。
+5. （任意）Variables に `SMOKE_MODEL` を設定すると疎通テスト用モデルを差し替えられる（未設定時は `gpt-5-mini`）。
 
 ### 運用メモ
 
-- Preview 検証は D1 / Durable Object を本番と共有するため、疎通テストは本番 MINI プールを微小消費する。
+- Durable Objects Worker では Cloudflare Preview URL が生成されないため、Version Override で production URL に新 version を指定する。D1 / Durable Object は本番と共有するため、疎通テストは本番 MINI プールを微小消費する。
+- workflow は新 version を 0% traffic で active deployment に追加し、テスト後に現行 version 100% へ復元する。PR workflow は version deployment を直列化する。
 - 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施する（[Tokenizer の監視・運用](#tokenizer-の監視運用) 参照）。
 - Secret 値は workflow ログへ出力されない。`octg_sk_*` をドキュメントやコードへ記載しないこと。
 ```
@@ -482,7 +557,7 @@ git commit -m "docs(readme): CI/CD ワークフローの運用手順を追加"
 - Create: なし（PR 操作と実環境検証）
 
 **Interfaces:**
-- Consumes: 前提作業で登録済みの 3 つの GitHub Secrets
+- Consumes: 前提作業で登録済みの 3 つの GitHub Secrets と `OCTG_SMOKE_BASE_URL` GitHub Actions Variable
 - Produces: PR（マージは人間が実施）
 
 - [ ] **Step 1: ブランチを push**
@@ -496,12 +571,12 @@ git push -u origin feature/github-actions-cicd
 ```bash
 gh pr create \
   --base master \
-  --title "ci: GitHub Actions による本番デプロイと PR Preview 疎通テスト" \
+  --title "ci: GitHub Actions による本番デプロイと PR Version Override 疎通テスト" \
   --body "$(cat <<'EOF'
 ## Summary
 - master マージ時に production へ自動デプロイ（typecheck/test → D1 migration → deploy）
-- PR 更新時に Worker Preview URL へ versions upload し、gpt-5-mini で疎通テスト
-- 疎通テストスクリプト scripts/ci-smoke-test.sh を追加
+- PR 更新時に Worker の新 version を 0% traffic で deployment し、Version Override と gpt-5-mini で疎通テスト
+- 疎通テストスクリプト scripts/ci-smoke-test.sh を追加（Version Override header 対応）
 - README に運用手順を追記
 
 ## Spec
@@ -509,7 +584,7 @@ gh pr create \
 
 ## Test plan
 - [ ] preview-smoke ワークフローが緑になる（初回実環境検証）
-- [ ] 疎通テストの Preview URL で curl 手動確認（任意）
+- [ ] smoke 後に現行 version が 100% に復元されることを Cloudflare deployment で確認
 EOF
 )"
 ```
@@ -517,7 +592,7 @@ EOF
 - [ ] **Step 3: preview-smoke ワークフローの実行確認**
 
 Run: `gh pr checks --watch`（または Actions ページを確認）
-Expected: `test` / `upload-preview` / `smoke-test` の全ジョブが success。失敗した場合はログを確認して原因を修正し、push し直す（synchronize イベントで再実行される）
+Expected: `test` / `version-smoke` の全ジョブが success。失敗した場合はログを確認して原因を修正し、push し直す（synchronize イベントで再実行される）
 
 - [ ] **Step 4: レビュー依頼**
 
@@ -527,6 +602,6 @@ PR URL をユーザーへ報告する。**マージはユーザーが行う**（
 
 ## Self-Review 結果
 
-1. **Spec coverage:** 環境構成 production のみ ✓ / versions upload ✓ / chat completions 1 発 ✓ / gpt-5-mini 変数化（`vars.SMOKE_MODEL` フォールバック） ✓ / GitHub Secrets ✓ / 両ワークフローで typecheck+test ✓ / concurrency 設定 ✓ / permissions contents:read ✓ / エラー処理（URL 抽出失敗・リトライ） ✓ / README 運用手順 ✓ / rollback は手動（対象外） ✓
+1. **Spec coverage:** 環境構成 production のみ ✓ / DO Worker の Preview URL 制約反映 ✓ / versions upload + 0% deployment + Version Override ✓ / production URL variable ✓ / chat completions 1 発 ✓ / gpt-5-mini 変数化（`vars.SMOKE_MODEL` フォールバック） ✓ / GitHub Secrets ✓ / 両ワークフローで typecheck+test ✓ / PR 間 concurrency 直列化 ✓ / permissions contents:read ✓ / エラー処理（current 100% でない場合の fail-safe・version ID 欠落・復元・リトライ） ✓ / README 運用手順 ✓ / rollback は手動（対象外） ✓
 2. **Placeholder scan:** TBD/TODO なし。全コードステップに実コード記載 ✓
-3. **Type consistency:** スクリプト呼び出し署名 `scripts/ci-smoke-test.sh <base-url> <model>` を Task 2（定義）と Task 4（使用）で一致 ✓ / output 名 `preview_url` を定義・参照で一致 ✓
+3. **Type consistency:** スクリプト呼び出し署名 `scripts/ci-smoke-test.sh <base-url> <model>` と env `OCTG_VERSION_OVERRIDE` を Task 2（定義）と Task 4（使用）で一致 ✓ / Wrangler ND-JSON の `version-upload.version_id` と current deployment の `versions[].version_id` を Version Override / restore で一致 ✓
