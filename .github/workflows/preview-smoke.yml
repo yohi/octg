@@ -5,15 +5,14 @@ on:
     branches: [master]
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: read
-
 concurrency:
   group: octg-deployment
   cancel-in-progress: false
 
 jobs:
   test:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -44,6 +43,8 @@ jobs:
   version-smoke:
     needs: test
     if: ${{ github.event.pull_request.head.repo.fork != true }}
+    permissions:
+      contents: read
     environment: preview
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -256,6 +257,7 @@ jobs:
   version-smoke-fork:
     needs: test
     if: ${{ github.event.pull_request.head.repo.fork == true }}
+    permissions: {}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

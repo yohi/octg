@@ -5,20 +5,24 @@ curl() {
   local headers_file=""
   local response_file=""
   local override_header=""
+  local option=""
+  local value=""
 
   while [[ "$#" -gt 0 ]]; do
-    case "$1" in
+    option="$1"
+    value="${2:-}"
+    case "$option" in
       -D)
-        headers_file="$2"
+        headers_file="$value"
         shift 2
         ;;
       -o)
-        response_file="$2"
+        response_file="$value"
         shift 2
         ;;
       -H)
-        if [[ "$2" == Cloudflare-Workers-Version-Overrides:* ]]; then
-          override_header="$2"
+        if [[ "$value" == Cloudflare-Workers-Version-Overrides:* ]]; then
+          override_header="$value"
         fi
         shift 2
         ;;
