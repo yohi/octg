@@ -63,5 +63,26 @@ if (!deployRun.includes('--message "PR ${PULL_REQUEST_NUMBER} smoke test"')) {
   throw new Error("traffic deployment must use the env-backed pull request number for its message");
 }
 
+const forkStart = workflow.indexOf("  version-smoke-fork:");
+if (forkStart < 0) throw new Error("workflow block not found: version-smoke-fork");
+const forkValidation = workflow.slice(forkStart);
+if (!forkValidation.includes("github.event.pull_request.head.repo.fork == true")) {
+  throw new Error("fork PRs must use an explicit secret-free validation path");
+}
+if (!forkValidation.includes("Secret-free fork validation")) {
+  throw new Error("fork PR validation must report a successful secret-free result");
+}
+if (forkValidation.includes("environment: preview")) {
+  throw new Error("fork PR validation must not request the preview environment");
+}
+
+const versionSmoke = blockBetween("  version-smoke:", "  version-smoke-fork:");
+if (!versionSmoke.includes("github.event.pull_request.head.repo.fork != true")) {
+  throw new Error("credential-bearing version smoke must skip fork PRs");
+}
+if (!versionSmoke.includes("assertPreviewQuotaAllocation")) {
+  throw new Error("preview config must enforce the quota allocation ceiling");
+}
+
 console.log("preview workflow contract: ok");
 NODE

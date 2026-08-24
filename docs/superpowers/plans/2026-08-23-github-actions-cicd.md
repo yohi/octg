@@ -109,7 +109,7 @@ Expected: `docs(specs): ...` のコミットが HEAD にあり、spec ファイ�
 
 **Interfaces:**
 - Consumes: なし
-- Produces: `scripts/ci-smoke-test.sh <base-url> <model>` — 成功時 exit 0 / 引数不足・env 不足 exit 2 / 3 回リトライ後失敗 exit 1。環境変数 `OCTG_SMOKE_API_KEY` 必須。任意の `OCTG_VERSION_OVERRIDE` がある場合は `OCTG_VERSION_OVERRIDE_WORKER_NAME`（省略時 `octg-gateway`）で指定した Worker への Version Override header を追加する。Task 4 の preview-smoke.yml からは `OCTG_PREVIEW_WORKER_NAME` を渡して呼び出す
+- Produces: `scripts/ci-smoke-test.sh <base-url> <model>` — 成功時 exit 0 / 引数不足・env 不足 exit 2 / 3 回リトライ後失敗 exit 1。環境変数 `OCTG_SMOKE_API_KEY` 必須。任意の `OCTG_VERSION_OVERRIDE` がある場合は `OCTG_VERSION_OVERRIDE_WORKER_NAME`（省略時 `octg-gateway`）で指定した Worker への Version Override header を追加する。Task 4 の preview-smoke.yml からは `OCTG_PREVIEW_WORKER_NAME` を `OCTG_VERSION_OVERRIDE_WORKER_NAME` として渡して呼び出す
 
 - [ ] **Step 1: スクリプトを作成**
 
@@ -124,6 +124,7 @@ Expected: `docs(specs): ...` のコミットが HEAD にあり、spec ファイ�
 # Env:
 #   OCTG_SMOKE_API_KEY : クライアントキー (octg_sk_*)。必須。ログへ出力しないこと。
 #   OCTG_VERSION_OVERRIDE : Version Override 対象の Worker Version ID。指定時だけ header を付ける。
+#   OCTG_VERSION_OVERRIDE_WORKER_NAME : Version Override 対象の Worker 名。省略時は octg-gateway。
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
@@ -145,8 +146,6 @@ response_file=$(mktemp)
 headers_file=$(mktemp)
 trap 'rm -f "$response_file" "$headers_file"' EXIT
 
-readonly MAX_LOG_MESSAGE_BYTES=160
-
 header_value() {
   local header_name="$1"
   local header_file="$2"
@@ -165,13 +164,7 @@ header_value() {
 }
 
 redacted_error_message() {
-  local response_path="$1"
-  local message
-  message=$(jq -r '
-    if (.error?.message? | type) == "string" then .error.message else empty end
-  ' "$response_path" 2>/dev/null || true)
-  message=$(printf '%s' "$message" | LC_ALL=C tr -cd '\11\40-\176' | LC_ALL=C head -c "$MAX_LOG_MESSAGE_BYTES" || true)
-  printf '%s' "${message:-redacted_response}"
+  printf '%s' "redacted_response"
 }
 
 curl_args=(
@@ -186,7 +179,7 @@ curl_args=(
 )
 if [[ -n "${OCTG_VERSION_OVERRIDE:-}" ]]; then
   curl_args+=(
-    -H "Cloudflare-Workers-Version-Overrides: octg-gateway=\"${OCTG_VERSION_OVERRIDE}\""
+    -H "Cloudflare-Workers-Version-Overrides: ${OCTG_VERSION_OVERRIDE_WORKER_NAME:-octg-gateway}=\"${OCTG_VERSION_OVERRIDE}\""
   )
 fi
 
@@ -202,7 +195,7 @@ for attempt in 1 2 3; do
   fi
 
   passed=false
-  failure_message=$(redacted_error_message "$response_file")
+  failure_message=$(redacted_error_message)
   if [[ "$status" == "200" ]] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
     if [[ -z "${OCTG_VERSION_OVERRIDE:-}" ]]; then
       passed=true
@@ -236,7 +229,17 @@ chmod +x scripts/ci-smoke-test.sh
 
 - [ ] **Step 3: 構文検証**
 
-Run: `bash -n scripts/ci-smoke-test.sh`; 次に `command -v shellcheck >/dev/null && shellcheck scripts/ci-smoke-test.sh || true`
+Run:
+
+```bash
+bash -n scripts/ci-smoke-test.sh
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck scripts/ci-smoke-test.sh
+else
+  echo "(shellcheck 未導入のためスキップ)"
+fi
+```
+
 Expected: `bash -n` は成功。shellcheck がインストール済みなら警告ゼロ、未インストールなら明示的にスキップする。指摘が出た場合は修正してから次へ
 
 - [ ] **Step 4: 異常系テスト（引数不足 → exit 2）**
@@ -369,6 +372,7 @@ git commit -m "feat(ci): master マージ時の本番自動デプロイワーク
 
 **Files:**
 - Create: `.github/workflows/preview-smoke.yml`
+- Create: `scripts/preview-quota-validator.mjs`
 
 **Interfaces:**
 - Consumes: `scripts/ci-smoke-test.sh`（Task 2、引数 `<base-url> <model>` / env `OCTG_SMOKE_API_KEY`, `OCTG_VERSION_OVERRIDE`, `OCTG_VERSION_OVERRIDE_WORKER_NAME`）、GitHub Environment `preview` の Secret（`CLOUDFLARE_PREVIEW_API_TOKEN`, `OCTG_PREVIEW_SMOKE_API_KEY`）、GitHub Actions Variables（`CLOUDFLARE_PREVIEW_ACCOUNT_ID`、必須 `OCTG_PREVIEW_DATABASE_ID`, `OCTG_PREVIEW_BASE_URL`, `OCTG_PREVIEW_UPSTREAM_BASE_URL`, `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`, `OCTG_PREVIEW_QUOTA_LIMIT_MINI`、任意 `OCTG_PREVIEW_WORKER_NAME`, `SMOKE_MODEL`）
@@ -421,6 +425,7 @@ jobs:
 
   version-smoke:
     needs: test
+    if: ${{ github.event.pull_request.head.repo.fork != true }}
     environment: preview
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -460,6 +465,7 @@ jobs:
           node --input-type=module <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
           import * as ts from "typescript";
+          import { assertPreviewQuotaAllocation } from "./scripts/preview-quota-validator.mjs";
 
           const projectRoot = process.cwd();
           const source = await readFile("apps/gateway-worker/wrangler.jsonc", "utf8");
@@ -471,6 +477,16 @@ jobs:
           if (!Array.isArray(config.d1_databases) || config.d1_databases.length !== 1) {
             throw new Error("Expected exactly one D1 database binding in wrangler.jsonc");
           }
+          assertPreviewQuotaAllocation({
+            production: {
+              STANDARD: Number(config.vars?.QUOTA_LIMIT_STANDARD),
+              MINI: Number(config.vars?.QUOTA_LIMIT_MINI),
+            },
+            preview: {
+              STANDARD: Number(process.env.PREVIEW_QUOTA_LIMIT_STANDARD),
+              MINI: Number(process.env.PREVIEW_QUOTA_LIMIT_MINI),
+            },
+          });
           config.name = process.env.PREVIEW_WORKER_NAME;
           config.main = `${projectRoot}/apps/gateway-worker/src/index.ts`;
           config.assets.directory = `${projectRoot}/apps/gateway-worker/public`;
@@ -560,6 +576,7 @@ jobs:
         env:
           OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_PREVIEW_SMOKE_API_KEY }}
           OCTG_VERSION_OVERRIDE: ${{ steps.upload.outputs.version_id }}
+          OCTG_VERSION_OVERRIDE_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           SMOKE_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
           SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
         run: |
@@ -586,6 +603,17 @@ jobs:
       - name: Fail when smoke test failed
         if: steps.smoke.outcome != 'success'
         run: exit 1
+
+  version-smoke-fork:
+    needs: test
+    if: ${{ github.event.pull_request.head.repo.fork == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Secret-free fork validation
+        run: |
+          set -euo pipefail
+          echo "Fork pull request detected; preview deployment skipped because pull_request workflows do not receive preview credentials."
 ```
 
 補足:

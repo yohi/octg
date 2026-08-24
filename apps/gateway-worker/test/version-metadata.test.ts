@@ -15,4 +15,10 @@ describe("worker version response headers", () => {
       "X-OCTG-Worker-Version": "local",
     });
   });
+
+  it("uses a local marker when the version ID is empty", () => {
+    expect(workerVersionHeaders({ id: "" })).toEqual({
+      "X-OCTG-Worker-Version": "local",
+    });
+  });
 });

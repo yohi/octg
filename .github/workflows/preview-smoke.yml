@@ -43,6 +43,7 @@ jobs:
 
   version-smoke:
     needs: test
+    if: ${{ github.event.pull_request.head.repo.fork != true }}
     environment: preview
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -82,6 +83,7 @@ jobs:
           node --input-type=module <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
           import * as ts from "typescript";
+          import { assertPreviewQuotaAllocation } from "./scripts/preview-quota-validator.mjs";
 
           const projectRoot = process.cwd();
           const source = await readFile("apps/gateway-worker/wrangler.jsonc", "utf8");
@@ -96,6 +98,16 @@ jobs:
           if (!productionDatabase) {
             throw new Error("Expected a DB D1 binding in wrangler.jsonc");
           }
+          assertPreviewQuotaAllocation({
+            production: {
+              STANDARD: Number(config.vars?.QUOTA_LIMIT_STANDARD),
+              MINI: Number(config.vars?.QUOTA_LIMIT_MINI),
+            },
+            preview: {
+              STANDARD: Number(process.env.PREVIEW_QUOTA_LIMIT_STANDARD),
+              MINI: Number(process.env.PREVIEW_QUOTA_LIMIT_MINI),
+            },
+          });
           config.name = process.env.PREVIEW_WORKER_NAME;
           config.main = `${projectRoot}/apps/gateway-worker/src/index.ts`;
           config.assets.directory = `${projectRoot}/apps/gateway-worker/public`;
@@ -240,3 +252,14 @@ jobs:
       - name: Fail when smoke test failed
         if: steps.smoke.outcome != 'success'
         run: exit 1
+
+  version-smoke-fork:
+    needs: test
+    if: ${{ github.event.pull_request.head.repo.fork == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Secret-free fork validation
+        run: |
+          set -euo pipefail
+          echo "Fork pull request detected; preview deployment skipped because pull_request workflows do not receive preview credentials."

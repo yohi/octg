@@ -214,7 +214,7 @@ npm run setup:local
 
 ### 前提条件
 
-- **Node.js** `>= 20`（`engines` 参照）
+- **Node.js** `>= 22`（`engines` 参照）
 - **npm** `>= 10`（Node.js 22 同梱版で動作確認）
 - **Cloudflare アカウント**（デプロイ・D1・Durable Objects・AI Gateway を利用する場合）
 - ローカル開発のみであれば Cloudflare アカウントは不要（`wrangler dev` のローカルモードで動作）

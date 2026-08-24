@@ -30,8 +30,6 @@ response_file=$(mktemp)
 headers_file=$(mktemp)
 trap 'rm -f "$response_file" "$headers_file"' EXIT
 
-readonly MAX_LOG_MESSAGE_BYTES=160
-
 header_value() {
   local header_name="$1"
   local header_file="$2"
@@ -50,13 +48,7 @@ header_value() {
 }
 
 redacted_error_message() {
-  local response_path="$1"
-  local message
-  message=$(jq -r '
-    if (.error?.message? | type) == "string" then .error.message else empty end
-  ' "$response_path" 2>/dev/null || true)
-  message=$(printf '%s' "$message" | LC_ALL=C tr -cd '\11\40-\176' | LC_ALL=C head -c "$MAX_LOG_MESSAGE_BYTES" || true)
-  printf '%s' "${message:-redacted_response}"
+  printf '%s' "redacted_response"
 }
 
 curl_args=(
@@ -87,7 +79,7 @@ for attempt in 1 2 3; do
   fi
 
   passed=false
-  failure_message=$(redacted_error_message "$response_file")
+  failure_message=$(redacted_error_message)
   if [[ "$status" == "200" ]] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
     if [[ -z "${OCTG_VERSION_OVERRIDE:-}" ]]; then
       passed=true
