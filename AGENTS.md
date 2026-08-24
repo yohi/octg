@@ -1,53 +1,35 @@
 # OCTG — Agent Guide
 
-OCTG は、OpenAI Data Sharing Program（Tier 3）の無料枠を複数クライアントで共有する
-OpenAI 互換 API Gateway です。
+OCTG is an OpenAI-compatible API gateway that shares the OpenAI Data Sharing Program (Tier 3) complimentary token quota across multiple clients.
 
-## 技術スタック
+## Stack & Workspace
 
-- TypeScript（strict）
-- Cloudflare Workers + Durable Objects（SQLite-backed）+ D1
+- TypeScript (strict)
+- Cloudflare Workers + Durable Objects (SQLite-backed) + D1
 - npm workspaces
 - Vitest + `@cloudflare/vitest-pool-workers`
 
-## 基本コマンド
+## Essential Commands
 
 ```bash
 npm install
-npm test            # 全ワークスペースでテスト実行
-npm run typecheck   # 全ワークスペースで型検査
+npm test            # all workspaces
+npm run typecheck   # all workspaces
 npm run dev -w apps/gateway-worker
 ```
 
-## プロジェクト構造
+## Universal Guardrails
 
-```text
-octg/
-├── apps/gateway-worker/      # Worker エントリ（認証・プロキシ・Admin API）
-├── durable-objects/
-│   └── quota-controller/    # QuotaController Durable Object
-├── packages/shared/         # 型定義・モデル分類・推定ロジック
-├── db/migrations/           # D1 マイグレーション
-└── docs/                    # 運用・設計ドキュメント
-```
+- **Quota authority lives in Durable Objects.** D1 is audit-only. Never make quota decisions depend on D1 writes.
+- **Never mix Production and Preview control planes.** Worker, D1, Durable Objects, client/policy/model registry, and reconciliation state must stay separate.
+- **Shared upstream billing is allowed only with bounded coordination.** Preview must not consume Production quota unboundedly.
+- **Store credentials as keyed hashes.** Never put raw `octg_sk_*` or OpenAI API keys in source, logs, or client configs.
+- **Audit writes are best-effort.** Fail-closed quota behavior must not depend on audit log delivery.
+- **Gateway A (Cloudflare AI Gateway Custom Provider) and Gateway B (upstream provider-native endpoint) are separate.** Do not confuse the OpenCode provider ID, the registered provider slug, and the URL slug.
 
-## 重要な制約
+## Where to Look Next
 
-- authoritative なクォータ制御は Durable Object が担う。D1 は監査・証跡用途のみ。
-- Production と Preview の Worker、D1、Durable Object、client/policy/model registry、監査・reconciliation state は共有しない。D1 の分離は upstream billing principal の分離を意味しない。
-- upstream billing principal は共有可能だが、Preview が Production の無料枠を無制限に消費しないよう、明示的で bounded な quota coordination、利用上限、監視、fail-closed 条件を設定する。`CLOUDFLARE_PREVIEW_ACCOUNT_ID` は Preview の deployment account であり、upstream billing account/principal と同一視しない。
-- `octg_sk_*` などの認証素材は keyed hash で保存し、生値をコード・ログに残さない。
-- 監査ログの D1 書き込みは best-effort。課金判定を監査ログ到達に依存させない。
-- Cloudflare AI Gateway の受信側 Custom Provider（Gateway A）と送信側
-  provider-native endpoint（Gateway B）は分離する。OpenCode の provider ID
-  `cloudflare-ai-gateway-octg`、登録時の provider slug `octg`、URL の Custom
-  Provider slug `custom-octg` を混同しない。
-- `OCTG_SK_REMOTE` と OpenAI API key は Cloudflare 側の credential / BYOK 保管領域で
-  管理し、OpenCode の設定・ソースコード・ログへ配布しない。
-
-## 詳細ドキュメント
-
-- アーキテクチャ・API 仕様・エラー契約: [SPEC.md](./SPEC.md)
-- デプロイ・Secret 管理・ローテーション・運用手順: [README.md](./README.md)
-- Cloudflare AI Gateway Custom Provider / Responses API 経由の公開手順: [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md)
-- テンプレートからの新規構築手順: [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md)
+- Architecture, API contracts, error semantics: [SPEC.md](./SPEC.md)
+- Deployment, secrets, rotation, and operations: [README.md](./README.md)
+- Cloudflare AI Gateway Custom Provider setup: [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md)
+- Template-based new-instance setup: [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md)
