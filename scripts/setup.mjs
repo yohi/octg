@@ -83,7 +83,7 @@ async function setupLocal() {
   }
 
   const pepper = process.env.OCTG_KEY_PEPPER || "dev-pepper";
-  const upstream = process.env.OCTG_UPSTREAM_BASE_URL || "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>";
+  const upstream = process.env.OCTG_UPSTREAM_BASE_URL || "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai";
   const clientId = process.env.OCTG_CLIENT_ID || "client_demo";
   const clientName = process.env.OCTG_CLIENT_NAME || "Demo";
   const clientKey = process.env.OCTG_CLIENT_KEY || `octg_sk_local_${randomBytes(18).toString("hex")}`;

@@ -40,6 +40,9 @@ export async function callUpstream(
   transport: UpstreamTransport = fetch,
 ): Promise<Response> {
   if (!env.OCTG_UPSTREAM_API_TOKEN) throw new UpstreamConfigError("OCTG_UPSTREAM_API_TOKEN is not configured");
+  if (!env.OCTG_UPSTREAM_BASE_URL?.endsWith("/openai")) {
+    throw new UpstreamConfigError("OCTG_UPSTREAM_BASE_URL must end with /openai");
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "cf-aig-authorization": `Bearer ${env.OCTG_UPSTREAM_API_TOKEN}`,

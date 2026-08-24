@@ -15,7 +15,7 @@ export default defineConfig(async () => {
           bindings: {
             OCTG_KEY_PEPPER: "test-pepper",
             OCTG_UPSTREAM_API_TOKEN: "test-upstream-token",
-            OCTG_UPSTREAM_BASE_URL: "https://aigw.invalid",
+            OCTG_UPSTREAM_BASE_URL: "https://aigw.invalid/openai",
             TEST_MIGRATIONS: migrations
           },
           serviceBindings: {
