@@ -704,7 +704,7 @@ git commit -m "feat(ci): PR 時の Version Override と疎通テストワーク�
 
 - Durable Objects Worker ではCloudflareが自動生成するPreview URLを使えないため、専用preview Workerの固定URLへVersion Overrideで新versionを指定する。D1 / Durable Object / control-plane dataはproductionと分離する。upstream billing principalを共有する場合は、Preview上限とProduction配分の合計がprovider quotaを超えないようにする。
 - workflowは新versionを0% trafficでactive deploymentに追加し、最大3回のsmoke試行後に現行version 100%へ復元する。PR workflowとproduction deployは`octg-deployment`で直列化する。各試行は独立requestのため、preview MINI poolを最大3回分消費し得る。quota limit未設定時はconfig生成でfail-closedする。
-- 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施する（[Tokenizer の監視・運用](#tokenizer-の監視運用) 参照）。
+- 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施する（[Tokenizer の監視・運用](README.md#tokenizer-の監視運用) 参照）。
 - Secret 値は workflow ログへ出力されない。`octg_sk_*` をドキュメントやコードへ記載しないこと。
 ```
 
