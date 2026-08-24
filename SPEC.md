@@ -355,6 +355,10 @@ OCTG 自体を Cloudflare AI Gateway の Custom Provider（Gateway A）として
 - Worker → Gateway B への送信時、`cf-aig-authorization: Bearer <Gateway B Run token>`
   ヘッダーを使用し、`cf-aig-collect-log-payload: false` で prompt / response の
   ログペイロードを保存しない。
+- Production と Preview の Worker、D1、Durable Object、client/policy/model registry、
+  監査・reconciliation state は分離する。Preview D1 の分離は upstream billing principal
+  の分離を意味しない。billing principal を共有する場合は、Preview quota上限、Production
+  配分、bounded coordination、監視、coordination障害時の fail-closed 条件を別途設定する。
 - 詳細な設定手順は [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) を参照。
 
 ## 8. Reconciliation
@@ -363,7 +367,7 @@ OCTG 自体を Cloudflare AI Gateway の Custom Provider（Gateway A）として
 
 OpenAI Organization Usage API（および対応する project スコープの usage 集約）で得られるのは **project × モデル × 時刻帯の集約値**であり、OCTG 内部の `request_id` を直接突合できる粒度ではない。MVP では以下のどちらかの方式を運用として選択できるよう設計する：
 
-- **方式 A（推奨・標準）**: route（`FREE_SHARED` / `PAID_SHARED`）ごとに OpenAI Project / API キーを分離する（要件第 18 章の Project A/B 分離を必須化する）。これにより Usage API の project 単位集約と route が 1:1 で対応し、再現性のある突合が可能となる。
+- **方式 A（推奨・標準）**: route（`FREE_SHARED` / `PAID_SHARED`）ごとに OpenAI Project / API キーを分離する（要件第 18 章の Project A/B 分離）。これにより Usage API の project 単位集約と route が 1:1 で対応し、再現性のある突合が可能となる。Production と Preview の control-plane 分離とは別の軸であり、同じ FREE_SHARED billing principal を使う場合でも、Preview quota上限と bounded coordination を必須とする。
 - **方式 B（許容・縮退運用）**: 単一 Project の集約突合に留める。ただし後述の不確実性ルールにより、`uncertain` は**個別に確定できない限り解放しない**（fail-closed 維持）。
 
 ### 8.2 実行スケジュールと UTC 境界

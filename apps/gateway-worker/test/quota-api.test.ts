@@ -1,9 +1,16 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import { usagePercentOf } from "../src/quota-api";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 beforeEach(async () => seedClient());
 const getQuota = (key?: string) => SELF.fetch("https://octg.test/quota", { headers: key ? { authorization: `Bearer ${key}` } : {} });
+
+describe("usagePercentOf", () => {
+  it("reports zero for a disabled pool", () => {
+    expect(usagePercentOf(0, 0)).toBe(0);
+  });
+});
 
 describe("GET /quota", () => {
   it("requires authentication and rejects disabled clients", async () => {
@@ -24,7 +31,7 @@ describe("GET /quota", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { pools: { standard: { confirmed: number; reserved: number; remaining: number; usage_percent: number }; mini: { remaining: number; usage_percent: number } } };
     expect(body.pools.standard).toMatchObject({ confirmed: 200_000, reserved: 100_000, remaining: 700_000, usage_percent: 30 });
-    expect(body.pools.mini).toMatchObject({ remaining: 5_000_000, usage_percent: 50 });
+    expect(body.pools.mini).toMatchObject({ remaining: 4_950_000, usage_percent: 50.25 });
     expect(JSON.stringify(body)).not.toContain("client");
   });
 });

@@ -18,6 +18,11 @@ OCTG の本番構成は Gateway Worker、`QuotaController` Durable Object、
 
 OCTG を本番動作させるには、Cloudflare アカウント上に **D1 データベース**、**AI Gateway**、**Cloudflare Access アプリケーション**、および Wrangler 用 **API トークン** を作成してください。
 
+Production と Preview を運用する場合、Worker、D1、Durable Object、client/policy/model registry、
+監査・reconciliation state は control-plane data として分離します。upstream billing principal は
+共有できますが、その場合は Preview quota上限、Production配分、bounded coordination、監視、
+coordination障害時の fail-closed 条件を設定してください。D1共有はquota coordinationの代替ではありません。
+
 ### 2.1 必要な Cloudflare サービスと権限
 
 | リソース | 用途 | 必要な権限（API トークン） |
@@ -92,6 +97,11 @@ npx wrangler d1 create octg
      カウンターでも authoritative な制御でもありません。実際のトークン
      上限は Durable Object の reservation が管理します。
 
+   - Preview と Production が同じ upstream billing principal を使う場合、AI Gateway の
+     Spend Limitだけで合算quotaを保護してはいけません。Preview の
+     `QUOTA_LIMIT_STANDARD` / `QUOTA_LIMIT_MINI` と Production側の配分を合算してprovider
+     quota以下にし、coordinationが未設定・不明な場合はupstream送信をfail-closedにしてください。
+
 ### 2.5 Cloudflare Access アプリケーションの作成
 
 Admin API（`/admin/*`）を保護するため、Cloudflare Zero Trust Access の Self-hosted アプリケーションを作成します。
@@ -139,6 +149,10 @@ Admin API（`/admin/*`）を保護するため、Cloudflare Zero Trust Access �
 4. 発行されたキーをコピー（二度と表示されないので注意）。
 
 このキーが `OPENAI_USAGE_API_KEY` として使用します。
+
+shared billing principalをPreviewとProductionで使用する場合、Usage APIはproject・モデル・時間帯の
+集約値しか返さないため、集約値だけでrequest単位の環境帰属を断定しないでください。未確定requestは
+fail-closedのまま保持し、Preview/Productionのcontrol-plane auditを混在させないでください。
 
 ## 3. 自動セットアップスクリプトの実行
 

@@ -34,6 +34,8 @@ octg/
 ## 重要な制約
 
 - authoritative なクォータ制御は Durable Object が担う。D1 は監査・証跡用途のみ。
+- Production と Preview の Worker、D1、Durable Object、client/policy/model registry、監査・reconciliation state は共有しない。D1 の分離は upstream billing principal の分離を意味しない。
+- upstream billing principal は共有可能だが、Preview が Production の無料枠を無制限に消費しないよう、明示的で bounded な quota coordination、利用上限、監視、fail-closed 条件を設定する。`CLOUDFLARE_PREVIEW_ACCOUNT_ID` は Preview の deployment account であり、upstream billing account/principal と同一視しない。
 - `octg_sk_*` などの認証素材は keyed hash で保存し、生値をコード・ログに残さない。
 - 監査ログの D1 書き込みは best-effort。課金判定を監査ログ到達に依存させない。
 - Cloudflare AI Gateway の受信側 Custom Provider（Gateway A）と送信側

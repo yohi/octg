@@ -686,6 +686,11 @@ Data Sharing = OFF
 
 これは必須要件ではなく推奨構成とする。
 
+OpenAI Project/API key の分離は Data Sharing と paid/private route の境界であり、Production と
+Preview の環境境界とは別の概念である。Preview の Worker、D1、Durable Object、client/policy/model
+registry、監査・reconciliation state は Production と共有しない。billing principal を共有する場合は、
+Preview の利用上限、Production 配分、bounded quota coordination、監視、fail-closed 条件を必須とする。
+
 ---
 
 # 19. Cloudflare AI Gateway
@@ -1306,6 +1311,9 @@ Data Sharing ON。
 Data Sharing OFF の別 OpenAI Project。
 
 これによりコスト管理とデータ共有ポリシーを分離する。
+
+この privacy route の分類は、Production/Preview の control-plane 分離や upstream billing principal の
+共有可否とは別軸で扱う。共有principalを使う場合も、D1共有によってquota coordinationを代替してはならない。
 
 ---
 

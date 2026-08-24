@@ -3,6 +3,7 @@ import type { QuotaController } from "@octg/quota-controller";
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
 import type { ResourceStageOutcome } from "./resource-observation";
+import { workerVersionHeaders } from "./version-metadata";
 
 type Stub = DurableObjectStub<QuotaController>;
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
@@ -122,6 +123,7 @@ export function proxyStream(
       headers: {
         "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
         ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+        ...workerVersionHeaders(env.CF_VERSION_METADATA),
       },
     });
   }
@@ -172,6 +174,7 @@ export function proxyStream(
     headers: {
       "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
       ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
+      ...workerVersionHeaders(env.CF_VERSION_METADATA),
     },
   });
 }

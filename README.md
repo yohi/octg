@@ -185,7 +185,7 @@ Provider Key は Gateway A の Custom Provider 側に登録済みの `octg_sk_*`
 
 ### 最短手順
 
-Node.js 20 以上を用意した後、次の 2 コマンドでローカル環境を準備できます。`.dev.vars` が既にある場合は、既存の Secret を保護するためスクリプトが停止します。
+Node.js 22 以上を用意した後、次の 2 コマンドでローカル環境を準備できます。`.dev.vars` が既にある場合は、既存の Secret を保護するためスクリプトが停止します。
 
 ```bash
 npm install
@@ -214,8 +214,8 @@ npm run setup:local
 
 ### 前提条件
 
-- **Node.js** `>= 20`（`engines` 参照）
-- **npm** `>= 10`（Node.js 20 同梱版で動作確認）
+- **Node.js** `>= 22`（`engines` 参照）
+- **npm** `>= 10`（Node.js 22 同梱版で動作確認）
 - **Cloudflare アカウント**（デプロイ・D1・Durable Objects・AI Gateway を利用する場合）
 - ローカル開発のみであれば Cloudflare アカウントは不要（`wrangler dev` のローカルモードで動作）
 
@@ -234,7 +234,7 @@ cd octg
 npm install
 ```
 
-> **Tip:** `engines` で Node.js 20+ を要求しています。`.nvmrc` 等の管理を推奨します。`node -v` でバージョンを確認してください。
+> **Tip:** `engines` で Node.js 22+ を要求しています。`.nvmrc` 等の管理を推奨します。`node -v` でバージョンを確認してください。
 
 ### 3. ローカル環境変数の準備（任意・ローカル開発時）
 
@@ -334,6 +334,105 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
 ```
 
 初回の環境構築手順は [セットアップ（開発する場合）](#セットアップ開発する場合) を参照してください。
+
+## CI/CD（GitHub Actions）
+
+- `deploy-production.yml`: `master` への push を受け、typecheck / test、remote D1
+  migration（冪等）、`wrangler deploy` を実行します。
+- `preview-smoke.yml`: `master` 向け PR の更新を受け、専用 preview Worker の新 version を
+  0% traffic で deployment し、preview URL に Version Override header を付けて
+  `POST /v1/chat/completions` を最大 3 回試行します。HTTP 200、応答本文、
+  `X-OCTG-Worker-Version` と override ID の一致を検証します。header の Worker 名は
+  `OCTG_PREVIEW_WORKER_NAME`（未設定時 `octg-gateway-preview`）から渡し、完了後は現行 version 100% に復元します。
+
+Durable Objects を実装する Worker では Cloudflare Preview URL が生成されないため、
+PR の検証には固定の専用 preview Worker と Version Override を使用します。Cloudflare が
+自動生成する Preview URL は使用しません。新 version は通常トラフィックへ流さず、
+疎通テストのリクエストだけが対象 version に到達します。PR checkout のコード、
+`wrangler.jsonc`、smoke script には production credential / resource を渡しません。
+
+### 事前に必要な設定（一度だけ）
+
+1. production と分離した preview Worker、preview D1、preview Durable Object、
+   client/policy/model registry、監査・reconciliation state を用意し、preview用
+   Cloudflare API tokenをpreview control-plane resourceだけへ限定します。upstream billing
+   principal は共有できますが、その場合は Preview の利用上限、quota coordination、監視、
+   coordination 未設定時の fail-closed 条件を先に定義してください。
+   D1作成・migration・CI client seed・GitHub Environment設定は、次のスクリプトで一括実行できます。
+   `preview.env.example` を `.env.preview` へコピーして実値を入力し、まずdry-runで確認してください。
+
+   ```bash
+   cp preview.env.example .env.preview
+   zsh scripts/setup-preview.zsh --dry-run
+   zsh scripts/setup-preview.zsh
+   zsh scripts/setup-preview.zsh --github
+   ```
+
+   `--github` は `preview` Environment の Variables と、
+   `CLOUDFLARE_PREVIEW_API_TOKEN` / `OCTG_PREVIEW_SMOKE_API_KEY` / `OCTG_KEY_PEPPER` Secretsを更新します。
+   Scriptはcanonical configの`DB` bindingだけを使った一時configを生成するため、
+   canonical configに複数のD1 bindingがあってもProduction D1を変更しません。
+
+2. （スクリプトを使わず手動で行う場合）CI 専用クライアントキーを preview D1 に登録します。preview用の
+   `OCTG_KEY_PEPPER` と control-plane credential は production と別の値をCloudflare側で
+   管理します。セットアップスクリプトは入力した `OCTG_KEY_PEPPER` をGitHub preview Environment
+   Secretへ設定し、workflowの対象version uploadとCI client seedで同じ値を使用します。upstream billing principalを共有する場合も、preview workflowへproduction
+   D1/Worker credentialやUsage API keyを渡してはいけません。`scripts/seed-client.mjs` でseed SQLを生成し、
+   preview D1へ適用してください。
+
+   ```bash
+   printf 'Preview client key: '
+   read -r -s OCTG_PREVIEW_CLIENT_KEY
+   printf '\n'
+   node scripts/seed-client.mjs client_ci_smoke "CI Smoke" "$OCTG_PREVIEW_CLIENT_KEY" REJECT > /tmp/octg-preview-seed.sql
+   unset OCTG_PREVIEW_CLIENT_KEY
+   ```
+
+   生成したSQLをpreview D1へ適用します（preview accountのcredentialだけを使用してください）。
+
+   `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、preview D1 名は、shell の環境変数または
+   Cloudflare の認証済み profile へ事前に設定し、値をコマンドラインへ直接記載しないでください。
+
+   ```bash
+   ./node_modules/.bin/wrangler d1 execute "$OCTG_PREVIEW_DATABASE_NAME" --remote \
+     --file /tmp/octg-preview-seed.sql
+   ```
+
+   `OCTG_KEY_PEPPER` と `OCTG_PREVIEW_CLIENT_KEY` は、ローカルシェル履歴やログへ残らない方法で
+   事前に環境へ設定してください。
+   GitHub Environment `preview` の `OCTG_PREVIEW_SMOKE_API_KEY` へ登録し、
+   productionのclient keyは使わないでください。
+3. GitHub Environment `preview` の Secrets に以下を登録します:
+   - `CLOUDFLARE_PREVIEW_API_TOKEN` — preview resource専用 token
+   - `OCTG_PREVIEW_SMOKE_API_KEY` — 手順 2 の preview client key
+   - `OCTG_KEY_PEPPER` — Preview WorkerとCI version uploadで共有するkey pepper
+4. **Actions Variables** に以下を登録します:
+   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID` — preview Cloudflare account ID
+   - `OCTG_PREVIEW_DATABASE_ID` — preview D1 database ID
+   - `OCTG_PREVIEW_UPSTREAM_BASE_URL` — preview upstream URL（dedicated endpointまたは共有billing principalのendpoint）
+   - `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` — Preview STANDARD poolのbounded quota上限。`0`で無効化
+   - `OCTG_PREVIEW_QUOTA_LIMIT_MINI` — Preview MINI poolのbounded quota上限（正の整数）
+   - `OCTG_PREVIEW_BASE_URL` — preview Worker URL（例: `https://octg-gateway-preview.<subdomain>.workers.dev`）
+   - `OCTG_PREVIEW_WORKER_NAME` — 任意。未設定時は `octg-gateway-preview`
+   - `SMOKE_MODEL` — 任意。未設定時は `gpt-5-mini`
+5. production deploy用のSecret `CLOUDFLARE_API_TOKEN` とVariable `CLOUDFLARE_ACCOUNT_ID` は
+   production workflowだけへ登録し、preview environmentへ登録・参照しないでください。
+
+### 運用メモ
+
+- preview smokeは1つの論理テストとして最大3回POSTします。各試行は独立したrequestのため、
+  preview MINI poolのquotaを最大3回分消費し得ます。上限値はActions Variablesから一時
+  configへ注入し、共有upstreamを使う場合はProduction側のquota配分からPreview分を差し引きます。
+- Preview D1/DOのquota stateはProductionと共有しません。同じupstream billing principalを使う場合でも、
+  D1共有はquota coordinationの代替になりません。coordination上限を超えるrequestはupstreamへ送らず、
+  fail-closedにしてください。
+- workflowは専用preview Workerの新 versionを0% trafficでactive deploymentに追加し、
+  テスト後に現行version 100%へ復元します。PR smokeとproduction deployは
+  `octg-deployment` concurrency groupで直列化されます。
+- smoke失敗時のログにはHTTP status、形式検証済みrequest ID、sanitize/truncate済みmessage
+  だけを出力し、response bodyやcredentialを出力しません。
+- 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施します。
+- Secret 値は workflow ログへ出力されません。`octg_sk_*` や OpenAI API key をドキュメントやコードへ記載しないでください。
 
 ### Durable Object migration の不変条件
 

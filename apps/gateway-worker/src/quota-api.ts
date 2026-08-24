@@ -2,6 +2,11 @@ import { errorResponse, nextUtcMidnight, quotaIdOf, utcDayOf } from "@octg/share
 import { authenticate } from "./auth";
 import type { Env } from "./index";
 
+export function usagePercentOf(used: number, limit: number): number {
+  if (limit <= 0) return 0;
+  return Math.round((used / limit) * 10_000) / 100;
+}
+
 export async function handleQuota(request: Request, env: Env, requestId: string): Promise<Response> {
   const auth = await authenticate(request, env, requestId);
   if (!("id" in auth)) return errorResponse(auth);
@@ -18,7 +23,7 @@ export async function handleQuota(request: Request, env: Env, requestId: string)
       reserved: state.reservedTokens,
       uncertain: state.uncertainTokens,
       remaining: state.remaining,
-      usage_percent: Math.round((used / state.limit) * 10_000) / 100,
+      usage_percent: usagePercentOf(used, state.limit),
       reset_at: resetAt,
     };
   };
