@@ -16,6 +16,15 @@ const tokenizerSources = (import.meta as ImportMeta & { readonly glob: RawGlob }
   ["../../../durable-objects/tokenizer-controller/src/**/*.ts"],
   { eager: true, import: "default", query: "?raw" },
 );
+const packageManifests = (import.meta as ImportMeta & { readonly glob: RawGlob }).glob<string>(
+  [
+    "../package.json",
+    "../../../apps/gateway-worker/package.json",
+    "../../../durable-objects/tokenizer-controller/package.json",
+    "../../../package-lock.json",
+  ],
+  { eager: true, import: "default", query: "?raw" },
+);
 
 describe("Tokenizer dependency isolation", () => {
   it("keeps BPE ownership out of shared and Gateway production source", () => {
@@ -37,5 +46,22 @@ describe("Tokenizer dependency isolation", () => {
   it("does not export estimateInputTokens from shared", async () => {
     const shared = await import("../src/index");
     expect(Object.hasOwn(shared, "estimateInputTokens")).toBe(false);
+  });
+
+  it("keeps tiktoken package ownership in TokenizerController manifests", () => {
+    const sharedManifest = packageManifests["../package.json"];
+    const gatewayManifest = packageManifests["../../../apps/gateway-worker/package.json"];
+    const tokenizerManifest = packageManifests["../../../durable-objects/tokenizer-controller/package.json"];
+    const lockfile = packageManifests["../../../package-lock.json"];
+    if (sharedManifest === undefined || gatewayManifest === undefined || tokenizerManifest === undefined || lockfile === undefined) {
+      throw new TypeError("Expected package manifests to be available to the dependency-boundary test.");
+    }
+
+    expect(sharedManifest).not.toMatch(/"tiktoken"\s*:/);
+    expect(gatewayManifest).not.toMatch(/"tiktoken"\s*:/);
+    expect(tokenizerManifest).toMatch(/"tiktoken"\s*:\s*"1\.0\.22"/);
+    expect(lockfile).toMatch(
+      /"durable-objects\/tokenizer-controller":\s*\{[\s\S]*?"dependencies":\s*\{\s*"tiktoken":\s*"1\.0\.22"/,
+    );
   });
 });

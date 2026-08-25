@@ -546,7 +546,13 @@ upstreamReached = false
 
 ## FR-12. Local BPE fallback 禁止
 
-以下は禁止する。
+`TokenizerController` 内で exact BPE の初期化または encode が通常の `Error` で
+失敗した場合に限り、同じ DO 内の conservative bytes path（UTF-8 byte 数を
+base とする）へ切り替えてよい。この fallback は RPC failure、malformed RPC
+result、算術異常、入力上限超過には適用しない。
+
+Gateway Worker と `@octg/shared` は encoder を import / 実行してはならず、以下の
+local BPE fallback を禁止する。
 
 ```text
 TokenizerDO failure
@@ -555,6 +561,9 @@ Gateway Workerで local BPE
     ↓
 1102再発
 ```
+
+Tokenizer RPC failure は必ず fail-closed とし、reservation、in-flight admission、
+upstream call に進めない。
 
 ---
 
@@ -667,7 +676,8 @@ tokenizer_encode finish
 
 ## FR-17. Exact BPE の責務移動
 
-`@octg/shared` は encoder に依存しない。
+`@octg/shared` は encoder に依存しない。`tiktoken` 依存は
+`@octg/tokenizer-controller` にだけ置く。
 
 本変更では原則として、
 
@@ -692,14 +702,20 @@ tokenizer_encode finish
 
 @octg/tokenizer-controller
     └─ tiktoken/lite（同梱 WASM）
+    └─ exact BPE / conservative bytes estimation の実装を所有
     └─ @octg/shared には依存しない
-        (必要な型のみを含む contracts-only package を新設する場合は別途検討)
+    └─ `./contracts` export は Gateway Worker の RPC 型・上限定数専用
 
 gateway-worker
     ├─ @octg/shared
     ├─ @octg/quota-controller
-    └─ @octg/tokenizer-controller
+    └─ @octg/tokenizer-controller/contracts（RPC 契約のみ）
 ```
+
+`apps/gateway-worker` の Worker entrypoint と `packages/shared` は `tiktoken` または
+tokenizer WASM を bundle に含めない。`@octg/tokenizer-controller` の Durable Object
+entrypoint だけが encoder/WASM を bundle に含める。package manifest、
+`package-lock.json`、および Wrangler entrypoint の境界をこの ownership と一致させる。
 
 `packages/shared/src/index.ts` は現在 `estimate.ts` をre-exportしているため、BPE処理とquota
 arithmeticを分離する。

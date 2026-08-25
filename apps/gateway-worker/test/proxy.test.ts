@@ -49,7 +49,7 @@ describe("proxy pipeline", () => {
   it("normalizes upstream output and sends AI Gateway controls", async () => {
     let upstreamBody: Record<string, unknown> | undefined;
     let upstreamHeaders: Headers | undefined;
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
       upstreamBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       upstreamHeaders = new Headers(init?.headers);
       return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
@@ -416,6 +416,70 @@ describe("proxy pipeline", () => {
     expect(after.confirmedTokens).toBeGreaterThan(before.confirmedTokens);
     expect(after.reservedTokens).toBe(before.reservedTokens);
     expect(after.uncertainTokens).toBe(before.uncertainTokens);
+  });
+
+  it("normalizes generic Responses text parts before upstream processing", async () => {
+    let upstreamBody: unknown;
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const response = await authedResponses({
+      model: "gpt-5",
+      input: [
+        { role: "user", content: [{ type: "text", text: "user-marker" }] },
+        { role: "system", content: [{ type: "text", text: "system-marker" }] },
+        { role: "developer", content: [{ type: "text", text: "developer-marker" }] },
+        { role: "assistant", content: [{ type: "text", text: "assistant-marker" }] },
+      ],
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamBody).toMatchObject({
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "user-marker" }] },
+        { role: "system", content: [{ type: "input_text", text: "system-marker" }] },
+        { role: "developer", content: [{ type: "input_text", text: "developer-marker" }] },
+        { role: "assistant", content: [{ type: "output_text", text: "assistant-marker" }] },
+      ],
+    });
+  });
+
+  it("settles on the reserve-time UTC day when upstream crosses midnight", async () => {
+    vi.useFakeTimers();
+    const reserveDay = "2027-01-31";
+    const currentDay = "2027-02-01";
+    const reserveStub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${reserveDay}`));
+    const currentStub = env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${currentDay}`));
+    const beforeReserveDay = await reserveStub.getState();
+    const beforeCurrentDay = await currentStub.getState();
+    vi.setSystemTime(new Date(`${reserveDay}T23:59:59.900Z`));
+    vi.stubGlobal("fetch", async () => {
+      vi.setSystemTime(new Date(`${currentDay}T00:00:00.100Z`));
+      return new Response(JSON.stringify({ usage: { total_tokens: 10 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    try {
+      const response = await authed({ model: "gpt-5", messages: [{ role: "user", content: "midnight-marker" }] });
+
+      expect(response.status).toBe(200);
+      expect((await reserveStub.getState()).confirmedTokens).toBeGreaterThan(beforeReserveDay.confirmedTokens);
+      expect(await currentStub.getState()).toMatchObject({
+        confirmedTokens: beforeCurrentDay.confirmedTokens,
+        reservedTokens: beforeCurrentDay.reservedTokens,
+        uncertainTokens: beforeCurrentDay.uncertainTokens,
+        requestCount: beforeCurrentDay.requestCount,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects unsupported Responses tool output and external references before reservation", async () => {

@@ -565,8 +565,9 @@ node --check apps/gateway-worker/public/admin/ui/editors.js
 
 ## Tokenizer の監視・運用
 
-- `MAX_INPUT_BYTES` は raw body と正規化済み入力の両方に適用されます。未設定・不正値時と
-  現行 deployment の既定値は 1 MiB で、超過時は JSON parse / Tokenizer RPC / reservation /
+- `MAX_INPUT_BYTES` は二段階で適用されます。raw body は JSON parse 前に、正規化済み入力は
+  JSON parse・正規化後かつ Tokenizer RPC 前に検査します。未設定・不正値時と現行 deployment
+  の既定値は 1 MiB です。いずれかの段階で超過した場合は reservation / in-flight admission /
   upstream の前に HTTP 413 で拒否されます。
 - `MAX_IN_FLIGHT_REQUESTS` は pool ごとの upstream 同時実行上限です。既定値は 2 で、上限到達時は
   reservation を解放して HTTP 429 `worker_concurrency_exceeded` を返します。SSE の lease は

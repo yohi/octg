@@ -25,7 +25,10 @@ npm run dev -w apps/gateway-worker
 - **Shared upstream billing is allowed only with bounded coordination.** Preview must not consume Production quota unboundedly.
 - **Store credentials as keyed hashes.** Never put raw `octg_sk_*` or OpenAI API keys in source, logs, or client configs.
 - **Audit writes are best-effort.** Fail-closed quota behavior must not depend on audit log delivery.
-- **Gateway A (Cloudflare AI Gateway Custom Provider) and Gateway B (upstream provider-native endpoint) are separate.** Do not confuse the OpenCode provider ID, the registered provider slug, and the URL slug.
+- **Gateway A (Cloudflare AI Gateway Custom Provider) and Gateway B (a separate
+  upstream Cloudflare AI Gateway instance used by the Worker) are separate.** Do
+  not confuse the OpenCode provider ID, the registered provider slug, the URL
+  slug, or the two gateway instances.
 
 ## Where to Look Next
 

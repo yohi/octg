@@ -347,4 +347,50 @@ describe("proxy stream finalization", () => {
     await response.body?.cancel().catch(() => undefined);
   });
 
+  it.each([
+    ["stale generation", "2026-10-15", { ok: false, reason: "stale_generation" }],
+    ["expired TTL", "2026-10-16", { ok: false, reason: "lease_not_found" }],
+  ] as const)("aborts and finalizes exactly once when renewal reports %s", async (_label, day, renewalResult) => {
+    vi.useFakeTimers();
+    const controller = controllerFor(day);
+    const requestId = `stream-renewal-${renewalResult.reason}`;
+    await controller.reserve(requestId, 10, 10);
+    const lease = await acquireLease(controller, requestId);
+    const renew = vi.spyOn(controller, "renewInFlight").mockResolvedValue(renewalResult);
+    const markUncertain = vi.spyOn(controller, "markUncertain");
+    const releaseInFlight = vi.spyOn(controller, "releaseInFlight");
+    const settle = vi.spyOn(controller, "settle");
+    const abort = vi.spyOn(AbortController.prototype, "abort");
+    const context = createExecutionContext();
+    const waitUntil = context.waitUntil.bind(context);
+    context.waitUntil = (promise) => {
+      void promise.catch(() => undefined);
+      waitUntil(promise);
+    };
+    const response = proxyStream(
+      new Response(new ReadableStream<Uint8Array>(), {
+        headers: { "content-type": "text/event-stream" },
+      }),
+      controller,
+      streamOptions(lease, 10),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(waitOnExecutionContext(context)).rejects.toThrow("In-flight lease renewal failed.");
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(markUncertain).toHaveBeenCalledTimes(1);
+    expect(markUncertain).toHaveBeenCalledWith(requestId);
+    expect(releaseInFlight).toHaveBeenCalledTimes(1);
+    expect(releaseInFlight).toHaveBeenCalledWith(requestId, lease.generation);
+    expect(settle).not.toHaveBeenCalled();
+    expect(markUncertain).toHaveBeenCalledTimes(1);
+    expect(releaseInFlight).toHaveBeenCalledTimes(1);
+  });
+
 });
