@@ -1,4 +1,4 @@
-import type { PoolNameLower } from "@octg/shared";
+import { normalizeResponsesUpstreamBody, type PoolNameLower } from "@octg/shared";
 import type { Env } from "./index";
 
 export class UpstreamConfigError extends Error {}
@@ -26,7 +26,7 @@ export function buildUpstreamBody(
       ...(body.stream === true ? { stream_options: { include_usage: true } } : {}),
     };
   }
-  const { max_output_tokens: _output, ...rest } = body;
+  const { max_output_tokens: _output, ...rest } = normalizeResponsesUpstreamBody(body);
   return { ...rest, max_output_tokens: maxOutputTokens };
 }
 

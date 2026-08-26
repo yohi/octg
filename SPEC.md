@@ -1,7 +1,8 @@
 # OCTG MVP 設計書
 
-**Version:** 1.1
+**Version:** 1.2
 **作成日:** 2026-08-09
+**更新日:** 2026-08-24
 **基盤要件:** [REQUIREMENTS.md](./REQUIREMENTS.md) v1.0
 **スコープ:** Phase 1 (MVP) のみ。Phase 2 / Phase 3 は本書では実装対象外とし、拡張を妨げない設計上の配慮のみ記述する。
 
@@ -176,7 +177,8 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 要件第 11 章の二段階方式を、Gateway Worker と TokenizerController の責務に分けて実行する。
 
 - Worker は入力を正規化し、`inputText`、`opaqueInputBytes`、`messageCount` を作る。`/v1/chat/completions` の `max_completion_tokens` は内部の `max_output_tokens` へ変換する。互換入力 `max_tokens` も同様に変換する。`max_tokens` と `max_completion_tokens` の両方が指定された場合は `max_completion_tokens` を優先し、**値が異なる場合は `invalid_request`（400, `param: "max_tokens"`）で拒否**して予約へ進まない。
-- `quota_get_state` の後、Worker は `TokenizerController` Durable Object を固定 ID `tokenizer:primary` で 1 回だけ RPC 呼び出しする。TokenizerController は `o200k_base` の exact BPE を実行し、次の式で最終的な推定入力 token 数を返す：
+- `MAX_INPUT_BYTES` は raw body と正規化済み入力に共通して適用する上限である。未設定・不正値時の既定値、および現行 deployment の値はともに 1,048,576 bytes（1 MiB）とする。解決値は `MAX_INPUT_TEXT_BYTES`（16 MiB - 65,536 bytes）を超えず、raw body は JSON parse 前に、正規化済み入力は Tokenizer RPC 前に検査する。超過時は HTTP 413 とし、reservation、in-flight admission、upstream を実行しない。
+- `quota_get_state` の後、Worker は `TokenizerController` Durable Object を固定 ID `tokenizer:primary` で 1 回だけ RPC 呼び出しする。TokenizerController は同梱 WASM を使う `tiktoken/lite` で `o200k_base` の exact BPE を実行し、次の式で最終的な推定入力 token 数を返す：
 
   ```text
   base = o200k_base.encode(inputText).length
@@ -192,7 +194,13 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 - 予約量 = `estimated_input + max_output_tokens + safety_margin`。
 - **max_output_tokens の既定値と上流フィールド**: クライアントが max output を指定しない場合、`DEFAULT_MAX_OUTPUT_TOKENS = 4096` を既定値として適用する。`/v1/chat/completions` では内部値を上流の `max_completion_tokens` として、`/v1/responses` では上流の `max_output_tokens` として必ず注入する（未指定 = 実質無制限の出力は reservation 不可能なため、MVP では fail-closed 側に倒す）。予約値に使用する `max_output_tokens` と上流へ送信する出力上限値は、既定値および CLAMP 適用後を含め、両 endpoint で一致させる。テストでは両 endpoint についてこの一致と endpoint 固有のフィールド名を検証する。
 - **非テキスト入力の扱い（MVP）**: `/v1/responses` および `/v1/chat/completions` の予約処理で `input_image`・`input_audio` など非テキストのモダリティを検出した場合、tokenizer 推定が成立しないため**予約前に明示的に拒否**する（エラー契約は 5.7 の `invalid_request` を使用）。将来対応としてモダリティ別の保守的上限を `estimated_input` へ加算する方式を採る場合は、モダリティごとの上限表を本書に追加し、過少計上を防ぐ。
-- **Responses のテキスト・ツール履歴（OpenCode互換）**: `/v1/responses` は `input` の message item（`type` 省略または `message`）について、user/system/developer の `input_text` と assistant の `output_text` を受理する。`function_call` の `call_id`・`name`・`arguments`、`function_call_output` の `call_id`・文字列または `input_text` 配列の `output`、および reasoning の `summary_text` 配列と `encrypted_content` を受理する。これらの prompt-bearing な可視文字列は input token 推定へ含め、encrypted reasoning state は `opaqueInputBytes` として UTF-8 byte 数を保守的に加算する。複数 reasoning item の opaque bytes は合算する。
+- **Responses のテキスト・ツール履歴（OpenCode互換）**: `/v1/responses` は `input` の message item（`type` 省略または `message`）について、user/system/developer の `input_text` または汎用 `text`、assistant の `output_text` または汎用 `text` を受理する。`function_call` の `call_id`・`name`・`arguments`、`function_call_output` の `call_id`・文字列または `input_text` / `text` 配列の `output`、および reasoning の `summary_text` 配列と `encrypted_content` を受理する。これらの prompt-bearing な可視文字列は input token 推定へ含め、encrypted reasoning state は `opaqueInputBytes` として UTF-8 byte 数を保守的に加算する。複数 reasoning item の opaque bytes は合算する。
+- **Responses の upstream wire normalization**: 受理した汎用 `text` content part は
+  Gateway B へ転送する前に role 別の wire type へ正規化する。user/system/developer
+  message は `input_text`、assistant message は `output_text`、
+  `function_call_output.output` は `input_text` とする。したがって Gateway B へ
+  generic `text` をそのまま送らず、token estimation と upstream body が同じ意味の
+  入力を扱う。既知の unsupported nested part は従来どおり予約前に HTTP 400 で拒否する。
 - **Responses の参照状態**: `item_reference`、`previous_response_id`、`conversation`、未知の top-level item、未知または不正な nested part は、参照先を取得して token 推定できないため、予約前に HTTP 400 (`invalid_request`, `param: null`) で拒否する。BYOK/OpenCode 側は `store: false` と必要履歴の再送を使用する。
 
 ### 5.5 Output 制御（要件第 12 章）
@@ -219,15 +227,23 @@ Admin API (`PUT /admin/clients/:id/policy`) で `tools_mode` を変更できる�
 2. `QuotaController.reserve(requestId: string, tokens: number, upperBoundTokens: number, idempotencyKey?: string, clientId?: string)` 成功後にのみ AI Gateway REST へ転送する（BYOK、Project A「shared-free」向け。認証は 7.1）。Worker は認証済みクライアントの `auth.id` を `clientId` として渡す。
    - Worker は有効な非空の受信 `Idempotency-Key` を `QuotaController.reserve()` および Gateway B への upstream 呼び出しへ、trim・大小文字変換なしで変更せず転送する。空文字・未指定は absent としてヘッダーを転送せず、新規リクエストとして扱う。255 UTF-8 bytes を超える値は reserve や upstream の前に HTTP 400 で拒否する。
    - 同一 key に対する再送は client × pool × UTC day 単位で Durable Object 内で重複排除され、同じ requestId の再送だけは保存済み reserve 結果を再返却する。異なる requestId による既存 entry への再送は、完了済み key を含めて `409 Conflict` で拒否する。
-3. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する。OCTG の Worker outbound は単一試行とし、隠れた再試行による usage の二重計上を防ぐ：
+3. `reserve` 成功後、upstream 呼び出し前に pool 単位の in-flight lease を取得する。
+   `MAX_IN_FLIGHT_REQUESTS` は未設定・不正値時に 2 を既定とし、現行 deployment も 2 とする。
+   上限到達時は reservation を release して HTTP 429 `worker_concurrency_exceeded`
+   （route `reject:worker_concurrency`）を返し、upstream へ到達しない。lease は generation
+   と有効期限を持ち、release と renewal は両方が一致する場合だけ有効とする。SSE 中継では
+   lease を定期更新し、`stale_generation` または `lease_not_found` を含む更新失敗時は
+   stream を abort し、`markUncertain` と `releaseInFlight` を各1回だけ実行して `settle` は
+   実行せず、fail-closed の精算経路へ進む。
+4. 上流へ送出する際は、AI Gateway の request handling ヘッダーを以下の既定値で付与する。OCTG の Worker outbound は単一試行とし、隠れた再試行による usage の二重計上を防ぐ：
    - `cf-aig-request-timeout: 25000`（本リクエストの単一試行タイムアウト。ストリーミングは最初のチャンク受信までをタイムアウト判定とする AI Gateway 側の仕様に従う）
    - `cf-aig-max-attempts: 1`（Worker が固定して付与し、受信クライアントの同名ヘッダーは転送しない）
    - `cf-aig-collect-log-payload: false`
    - `Idempotency-Key` は受信値を変更せず、valid な場合のみ転送する。自動 retry は行わず、クライアント切断・usage 取得不能・upstream 通信失敗は `markUncertain` とする。
-4. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
-5. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。upstream が HTTP 4xx を返した場合も、上流で token 使用がなかったことを保証できない限り `markUncertain` とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。`markUncertain` の配送に失敗した `reserved` entry は、後続 reconciliation が `consumed` / `unused` の証跡で解決できる状態として保持する。
-6. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
-7. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
+5. レスポンス / ストリームから最終 usage を抽出して `settle(request_id, actual)`。
+6. 失敗・クライアント切断・usage 取得不能なら `markUncertain(request_id)`。**設定した全 attempt を使い切った後、または usage を信頼して取得できない場合は必ず `markUncertain`** とする。upstream が HTTP 4xx を返した場合も、上流で token 使用がなかったことを保証できない限り `markUncertain` とする。`release`（予約解放）は、AI Gateway への送信前エラー（例: request 構築失敗、認証前エラー）など、upstream 到達前と確定的に判明する場合に限る（要件第 36 章）。AI Gateway の最終 attempt は完了まで待機する挙動のため、タイムアウト後の成否は不確実として `uncertain` 側に倒す。`markUncertain` の配送に失敗した `reserved` entry は、後続 reconciliation が `consumed` / `unused` の証跡で解決できる状態として保持する。
+7. streaming 中継でも reserve → SSE pass-through → final usage → settle の順序を維持する（要件第 13 章）。
+8. settle の対象 DO は **reserve 時点の UTC 日**から解決する（settle 時に現在日付から再解決しない。UTC 0 時跨ぎのロングリクエストで quota を誤計上しないため）。
 
 ### 5.7 レスポンスとエラー
 
@@ -381,6 +397,7 @@ OpenAI Organization Usage API（および対応する project スコープの us
 - **解放の条件**: `released` への遷移は、該当 request が実際には無料枠で消費されていないことを Usage API 上で **request に相当する単位で肯定的に裏付けられる場合に限る**（方式 A で project/route 単位の集約が他の証拠と整合する場合の帰納的判断、または将来 OpenAI が request 粒度の usage を提供した場合）。**集約値の一致のみを根拠に uncertain を解放しない**（Usage API の遅延・欠損による見かけ上の一致を信じて解放することを防ぐ）。
 - 裏付けが取れない `uncertain` は、4.5 の保持期限まで `uncertain` 状態を維持し、最終的に `reconciled`（confirmed 側）へ確定させて日次 quota を確定する。
 - `FREE_SHARED` と `PAID_SHARED` は課金・データ共有ポリシーが異なるため、Usage 突合・`reconciliations` 記録ともに route 単位で分離して扱う。混合集約による見かけ上の整合に依存しない。
+- `reserve` RPC の結果を確認できず `reserve_unknown` となった request は、集約 Usage API の差分から自動推論しない。Cloudflare Access で保護された `POST /admin/reconcile/:pool/:utcDay/:targetRequestId` で、canonical な QuotaController の `uncertain` かつ `reserve_unknown` entry だけを明示的に処理する。body は `{ "disposition": "consumed" | "unused", "evidence"?: string }` とし、`unused` には空白以外で 512 文字以下の evidence を必須とする。`consumed` は evidence を省略できる。同じ disposition の再送は冪等、異なる disposition または対象外 entry は変更せず 409、対象 request がない場合は 404 とする。
 
 ## 9. エンドポイント一覧（MVP）
 
@@ -525,3 +542,90 @@ octg/
 ## 15. 既知の限界
 
 要件第 43 章の通り、課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御を採用する。
+
+## 16. Worker リソース制限の観測と条件付き対策（設計済み・未実装）
+
+Cloudflare Worker のリソース制限（CPU / memory / 並行負荷）による Error 1102 発生時に、原因確定前に恒久対策を導入しないための観測ゲートと、確認された原因に対応する最小限の対策を設計している。現状では観測結果が得られていないため、以下の対策は実装していない。
+
+### 16.1 観測ゲート
+
+恒久対策を選ぶ前に、対象リクエストについて次を同じ request ID と revision に関連付ける。
+
+- Worker deployment/version ID または commit SHA
+- Workers プランと実効 `limits.cpu_ms` / memory limit
+- raw body bytes、normalized input bytes、text bytes、opaque bytes
+- exact BPE / conservative byte estimation の推定経路
+- body read、parse、normalize、tokenize、Durable Object RPC、upstream の処理時間
+- CPU time、wall time、invocation outcome
+- canary 実行時の concurrency
+- quota reserve の有無と upstream 到達有無
+
+入力本文、tokenizer 対象文字列、認証素材は記録しない。D1 への監査書き込みは best-effort を維持し、書き込み失敗で quota 判定を変更しない。
+
+対策の選択条件：
+
+| 観測結果 | 適用候補 |
+| --- | --- |
+| `exceededCpu`、tokenize が主要因 | BPE cutoff と conservative byte estimation |
+| `exceededMemory`、一時 allocation が主要因 | raw / normalized limit の分離 |
+| 単発では成功し、並行時だけ失敗 | BPE 前 tokenization admission |
+| 複数条件が確認された | 確認された分岐だけを組み合わせる |
+
+### 16.2 CPU 対策（BPE cutoff）
+
+CPU profiling で同期 BPE が主要因と確認された場合、normalized total bytes に対する `BPE_MAX_INPUT_BYTES` を導入する。
+
+- `inputBytes < BPE_MAX_INPUT_BYTES` では、従来どおり `o200k_base` の exact BPE を使う。
+- `inputBytes >= BPE_MAX_INPUT_BYTES` かつ hard limit 未満では、BPE を実行せず、`inputTextBytes` を text tokenizer token 数の保守的上限として使う。
+- `opaqueInputBytes` と message overhead は一度だけ加算する。
+- `inputBytes` は cutoff 判定に使えるが、byte-based 経路の text base としては使わない（Responses の `inputBytes` は opaque bytes を既に含むため）。
+
+`BPE_MAX_INPUT_BYTES` は任意の固定値ではなく、入力サイズ別 CPU profile と concurrency 試験から決定する。
+
+### 16.3 Memory 対策（raw / normalized limit の分離）
+
+`exceededMemory` と memory profile が原因を示した場合、現在同じ値を共有している raw body と normalized input の上限を独立させる。
+
+- raw body limit は body の読み取りと JSON parse 前の保護を担当する。
+- normalized input limit は text と opaque data の正規化後サイズを保護する。
+- 各 limit は同じ workload の memory profile と canary 結果から決定する。
+- limit 超過は HTTP 413 `request_too_large` とし、reserve と upstream を実行しない。
+
+加えて、request stream chunks、結合後 buffer、decoded string、JSON object、normalized text、encoded token 配列の生存期間を計測する。同時に保持する必要がない中間表現を早期に解放し、変更前後の peak allocation を比較する。
+
+### 16.4 並行負荷対策（tokenization admission lease）
+
+単発では成功し、複数リクエストが BPE へ同時進入した場合だけ失敗することが確認された場合、pool 単位の tokenization admission lease を追加する。
+
+- model、policy、pool の解決後、BPE 前に lease を取得する。
+- lease は quota reservation と別の state とし、取得・拒否で quota token を変更しない。
+- lease state は少なくとも `{ requestId, leaseId, expiresAt }` を持ち、`leaseId` は acquire ごとに一意な値または単調増加する owner generation とする。
+- 有効期限内に同じ `requestId` で再取得した場合だけ、同じ lease の保存済み結果を返す。
+- release は `requestId` と取得時に返された `leaseId` / generation の両方が一致する場合だけ、期限確認と削除を同一 transaction 内で行う。
+- Worker が Error 1102 で中断し解放処理を実行できない場合に備え、lease は期限を持つ。次回 acquire 時に期限切れ lease を除去する。
+- TTL は受理する最大 payload の実測 BPE wall time より長く設定する。
+
+admission を採用する場合は `MAX_TOKENIZATION_REQUESTS` と `TOKENIZATION_LEASE_TTL_MS` を導入する。production 値は単発の推測で決めず、受理する最大入力の tokenize wall time と concurrency profile から決定する。
+
+tokenization admission の上限到達時は HTTP 429 `rate_limit_error`、code `tokenization_concurrency_exceeded`、route `reject:tokenization_concurrency` を返す。quota reserve と upstream 呼び出しは実行しない。
+
+### 16.5 エラー契約（条件付き対策用）
+
+| 条件 | HTTP / code | Quota | Upstream |
+| --- | --- | --- | --- |
+| raw / normalized hard limit 超過 | 413 / `request_too_large` | 予約しない | 到達しない |
+| 未検証 payload 形状 | 400 / `invalid_request` | 予約しない | 到達しない |
+| tokenization admission 飽和 | 429 / admission code | 予約しない | 到達しない |
+| 推定処理の予期しない失敗 | 500 / `internal_error` | 予約しない | 到達しない |
+
+### 16.6 解決判定
+
+次の条件をすべて満たした場合だけ、インシデントを解決済みとする。
+
+1. canary の deployment revision と実効 CPU / memory limit が記録されている。
+2. 約 74,000-token 級の確認済み payload が想定 concurrency で成功する。
+3. 対象 canary に `exceededCpu` と `exceededMemory` がない。
+4. CPU time、wall time、memory profile が採用した limit 内に収まる。
+5. 許可した全 payload 形状で、`estimatedInput + output.maxOutputTokens + margin` が upstream `usage.total_tokens` を下回らない。
+6. 拒否経路で quota reserve と upstream 呼び出しが発生しない。
+7. upstream 到達後の settle / uncertain / release 契約に回帰がない。

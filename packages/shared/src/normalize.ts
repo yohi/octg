@@ -35,6 +35,8 @@ const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text", "text"]);
 const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text", "text"]);
 const UTF8_ENCODER = new TextEncoder();
 
+type ResponseTextPartType = "input_text" | "output_text";
+
 type ContentWalk = { ok: true; text: string } | { ok: false; error: NormalizeError };
 
 function walkContent(content: unknown, allowedTypes: ReadonlySet<string>, unknownError: NormalizeError): ContentWalk {
@@ -138,7 +140,7 @@ export function normalizeResponses(
   maxInputBytes = MAX_NORMALIZED_INPUT_BYTES,
 ): NormalizeResult {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid_body" };
-  const value = body as Record<string, unknown>;
+  const value = normalizeResponsesUpstreamBody(body as Record<string, unknown>);
   if (typeof value.model !== "string" || value.model.length === 0 || value.input === undefined) {
     return { ok: false, error: "invalid_body" };
   }
@@ -267,4 +269,38 @@ export function normalizeResponses(
       opaqueInputBytes,
     },
   };
+}
+
+export function normalizeResponsesUpstreamBody(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.input)) return { ...body };
+  return {
+    ...body,
+    input: body.input.map((item) => normalizeResponsesInputItem(item)),
+  };
+}
+
+function normalizeResponsesInputItem(item: unknown): unknown {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return item;
+  const value = item as Record<string, unknown>;
+  if (value.type === undefined || value.type === "message") {
+    const role = value.role;
+    if (role !== "assistant" && role !== "developer" && role !== "system" && role !== "user") return item;
+    return {
+      ...value,
+      content: normalizeResponsesTextParts(value.content, role === "assistant" ? "output_text" : "input_text"),
+    };
+  }
+  if (value.type === "function_call_output") {
+    return { ...value, output: normalizeResponsesTextParts(value.output, "input_text") };
+  }
+  return item;
+}
+
+function normalizeResponsesTextParts(content: unknown, textPartType: ResponseTextPartType): unknown {
+  if (!Array.isArray(content)) return content;
+  return content.map((part) => {
+    if (typeof part !== "object" || part === null || Array.isArray(part)) return part;
+    const value = part as Record<string, unknown>;
+    return value.type === "text" ? { ...value, type: textPartType } : part;
+  });
 }

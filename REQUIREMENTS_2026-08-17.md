@@ -67,7 +67,7 @@ upstream
 
 ことを原因として確定する。
 
-現行実装では `tokenize` stage 内で `estimateInputTokens()` を実行しており、その中で `js-tiktoken` の
+移行前の実装では `tokenize` stage 内で `estimateInputTokens()` を実行しており、その中で `js-tiktoken` の
 `o200k_base` encoding を用いている。
 
 現行 Gateway は token estimation 後に safety margin、output upper bound を算出し、その後初めて
@@ -546,15 +546,24 @@ upstreamReached = false
 
 ## FR-12. Local BPE fallback 禁止
 
-以下は禁止する。
+`TokenizerController` 内で exact BPE の初期化または encode が通常の `Error` で
+失敗した場合に限り、同じ DO 内の conservative bytes path（UTF-8 byte 数を
+base とする）へ切り替えてよい。この fallback は RPC failure、malformed RPC
+result、算術異常、入力上限超過には適用しない。
+
+Gateway Worker と `@octg/shared` は encoder を import / 実行してはならず、以下の
+local BPE fallback を禁止する。
 
 ```text
 TokenizerDO failure
     ↓
-Gateway Workerでjs-tiktoken
+Gateway Workerで local BPE
     ↓
 1102再発
 ```
+
+Tokenizer RPC failure は必ず fail-closed とし、reservation、in-flight admission、
+upstream call に進めない。
 
 ---
 
@@ -631,19 +640,7 @@ tokenizer_encode finish
 }
 ```
 
-これにより将来、
-
-```text
-getEncoding
-```
-
-と
-
-```text
-encoding.encode
-```
-
-のCPU負荷を分離できるようにする。
+これにより、WASM 初期化と exact BPE encode の CPU 負荷を分離できるようにする。
 
 ---
 
@@ -677,9 +674,10 @@ encoding.encode
 
 # 14. Dependency isolation
 
-## FR-17. js-tiktoken の責務移動
+## FR-17. Exact BPE の責務移動
 
-現在 `@octg/shared` が `js-tiktoken` に依存している。
+`@octg/shared` は encoder に依存しない。`tiktoken` 依存は
+`@octg/tokenizer-controller` にだけ置く。
 
 本変更では原則として、
 
@@ -700,18 +698,24 @@ encoding.encode
 ```text
 @octg/shared
     └─ types / normalize / quota arithmetic
-    └─ (js-tiktoken を依存から除去する)
+    └─ (encoder 依存を持たない)
 
 @octg/tokenizer-controller
-    └─ js-tiktoken
+    └─ tiktoken/lite（同梱 WASM）
+    └─ exact BPE / conservative bytes estimation の実装を所有
     └─ @octg/shared には依存しない
-        (必要な型のみを含む contracts-only package を新設する場合は別途検討)
+    └─ `./contracts` export は Gateway Worker の RPC 型・上限定数専用
 
 gateway-worker
     ├─ @octg/shared
     ├─ @octg/quota-controller
-    └─ @octg/tokenizer-controller
+    └─ @octg/tokenizer-controller/contracts（RPC 契約のみ）
 ```
+
+`apps/gateway-worker` の Worker entrypoint と `packages/shared` は `tiktoken` または
+tokenizer WASM を bundle に含めない。`@octg/tokenizer-controller` の Durable Object
+entrypoint だけが encoder/WASM を bundle に含める。package manifest、
+`package-lock.json`、および Wrangler entrypoint の境界をこの ownership と一致させる。
 
 `packages/shared/src/index.ts` は現在 `estimate.ts` をre-exportしているため、BPE処理とquota
 arithmeticを分離する。
@@ -1131,7 +1135,7 @@ package-lock.json                    MODIFY
 ## Phase 1 — Tokenizer package
 
 1. `@octg/tokenizer-controller` workspace作成
-2. `js-tiktoken` 依存移動
+2. `tiktoken/lite` 依存を Tokenizer package に限定
 3. `TokenizerController` 実装
 4. RPC request / response validation実装
 5. exact BPE実装

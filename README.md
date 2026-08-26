@@ -41,7 +41,7 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 3. actual usage で reservation を精算する
 4. 不確実な request は消費済みとして扱う（fail-closed）
 5. Paid fallback は明示的 opt-in がない限り発生させない
-6. exact BPE は TokenizerController に隔離し、Gateway と shared package に encoder を依存させない
+6. exact BPE は `tiktoken/lite` を使う TokenizerController に隔離し、Gateway と shared package に encoder を依存させない
 7. TokenizerController は RPC 専用で、入力本文や tokenizer state を Durable Object storage に保存しない
 8. `Idempotency-Key` は client × pool × UTC 日単位で重複排除し、空文字を absent、指定値を UTF-8 255 bytes 以下として扱う。Worker の upstream 自動 retry は無効化する
 
@@ -343,7 +343,9 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
   0% traffic で deployment し、preview URL に Version Override header を付けて
   `POST /v1/chat/completions` を最大 3 回試行します。HTTP 200、応答本文、
   `X-OCTG-Worker-Version` と override ID の一致を検証します。header の Worker 名は
-  `OCTG_PREVIEW_WORKER_NAME`（未設定時 `octg-gateway-preview`）から渡し、完了後は現行 version 100% に復元します。
+  `OCTG_PREVIEW_WORKER_NAME`（未設定時 `octg-gateway-preview`）から渡し、完了後は
+  `wrangler rollback <current-version-id> --config <preview-config> --yes` で現行 version
+  100% に復元します。
 
 Durable Objects を実装する Worker では Cloudflare Preview URL が生成されないため、
 PR の検証には固定の専用 preview Worker と Version Override を使用します。Cloudflare が
@@ -563,6 +565,13 @@ node --check apps/gateway-worker/public/admin/ui/editors.js
 
 ## Tokenizer の監視・運用
 
+- `MAX_INPUT_BYTES` は二段階で適用されます。raw body は JSON parse 前に、正規化済み入力は
+  JSON parse・正規化後かつ Tokenizer RPC 前に検査します。未設定・不正値時と現行 deployment
+  の既定値は 1 MiB です。いずれかの段階で超過した場合は reservation / in-flight admission /
+  upstream の前に HTTP 413 で拒否されます。
+- `MAX_IN_FLIGHT_REQUESTS` は pool ごとの upstream 同時実行上限です。既定値は 2 で、上限到達時は
+  reservation を解放して HTTP 429 `worker_concurrency_exceeded` を返します。SSE の lease は
+  generation と TTL で保護され、定期更新に失敗した場合は fail-closed で終了します。
 - Tokenizer の custom stage event は request ID、revision、stage、duration、safe な byte/token 数、
   allowlist 済み outcome だけを記録します。入力本文、Authorization、API key、encoder 例外文字列は記録しません。
 - Tokenizer RPC が利用できない場合は `500 internal_error` として fail-closed になります。
