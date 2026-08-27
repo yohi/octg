@@ -464,7 +464,7 @@ Deno.test("requires a non-empty dedicated auth token", () => {
 
 Deno.test("derives the raw envelope ceiling from resolved input bytes", () => {
   const values = new Map([
-    ["DENO_TOKENIZER_AUTH_TOKEN", "test-secret"],
+    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
     ["MAX_INPUT_BYTES", "2"],
   ]);
   assertEquals(resolveServiceConfig((name) => values.get(name)), {
@@ -728,11 +728,30 @@ negative/fractional/unsafe counts, and a response body larger than 1 KiB.
 
 - [ ] **Step 2: Add a separate stalled-200-body timeout test**
 
-Use fake timers and a never-closing stream:
+Use fake timers and a never-closing stream. Track when its read starts and when
+the client cancels it:
 
 ```typescript
 vi.useFakeTimers();
-const stalled = new ReadableStream<Uint8Array>({ start() {} });
+let resolveReadStarted!: () => void;
+const readStarted = new Promise<void>((resolve) => {
+  resolveReadStarted = resolve;
+});
+let resolveBodyProcessingFinished!: () => void;
+const bodyProcessingFinished = new Promise<void>((resolve) => {
+  resolveBodyProcessingFinished = resolve;
+});
+let cancelled = false;
+const stalled = new ReadableStream<Uint8Array>({
+  pull() {
+    resolveReadStarted();
+    return new Promise<never>(() => {});
+  },
+  cancel() {
+    cancelled = true;
+    resolveBodyProcessingFinished();
+  },
+});
 const fetchImpl = vi.fn(async () => new Response(stalled, {
   status: 200,
   headers: { "content-type": "application/json" },
@@ -745,20 +764,29 @@ const outcomePromise = tokenizeWithDeno({
   inputText: "hello",
   fetchImpl,
 });
+await readStarted;
 await vi.advanceTimersByTimeAsync(50);
 await expect(outcomePromise).resolves.toEqual({
   kind: "unavailable",
   failureCategory: "timeout",
 });
 expect(fetchImpl).toHaveBeenCalledTimes(1);
+expect(cancelled).toBe(true);
+await expect(bodyProcessingFinished).resolves.toBeUndefined();
 ```
+
+The timeout result must resolve only after the in-progress body read has been
+cancelled and the stream reports body-processing completion, so the test proves
+that stalled body processing does not outlive the request.
 
 - [ ] **Step 3: Implement one full-lifecycle timeout**
 
 Create one `AbortController` and one timeout promise before `fetch`. Race the
 complete operation, including bounded body read, JSON parse, and schema
 validation, against the timeout promise. On expiry, abort the controller and
-resolve as `timeout`. Clear the timer only after the race settles.
+cancel the active response reader before resolving as `timeout`. Await reader
+cancellation so a stalled body read cannot outlive the request. Clear the timer
+only after the race settles.
 
 Set `redirect: "error"`. Never loop or call `fetch` recursively. Read at most
 1 KiB from the response stream, cancel on overflow, and accept only an object
@@ -1007,7 +1035,7 @@ entrypoint `src/main.ts`. Include these exact settings:
 
 ```text
 Deno application:
-  DENO_TOKENIZER_AUTH_TOKEN = secret
+  OCTG_TOKENIZER_AUTH_TOKEN = secret
   MAX_INPUT_BYTES = same raw value as the matching Gateway
 
 Gateway Worker:
@@ -1043,13 +1071,17 @@ Use the existing canary script. Provide commands requiring the operator to
 supply a previously validated 74k payload and measured concurrency values:
 
 ```bash
+printf 'Canary client key: '
+read -r -s OCTG_CANARY_CLIENT_KEY
+printf '\n'
 OCTG_CANARY_URL="https://<gateway>/v1/chat/completions" \
 OCTG_CANARY_ALLOWED_HOSTS="<gateway-host>" \
-OCTG_CANARY_CLIENT_KEY="<secret>" \
+OCTG_CANARY_CLIENT_KEY="$OCTG_CANARY_CLIENT_KEY" \
 CANARY_PAYLOAD_PATH="<74k-payload.json>" \
 CANARY_CONCURRENCY="1,2,<observed-maximum>" \
 CANARY_REQUEST_TIMEOUT_MS="<measured-wall-time-bound>" \
 node scripts/canary-worker-resource-limits.mjs
+unset OCTG_CANARY_CLIENT_KEY
 ```
 
 Require correlation of each request ID and revision with provider `deno`,

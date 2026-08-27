@@ -115,7 +115,7 @@ Deno application は以下を持つ。
 
 | 設定 | 種別 | 制約 |
 | --- | --- | --- |
-| `DENO_TOKENIZER_AUTH_TOKEN` | secret | 対応する Worker とだけ共有する値 |
+| `OCTG_TOKENIZER_AUTH_TOKEN` | secret | 対応する Worker とだけ共有する値 |
 | `MAX_INPUT_BYTES` | variable | Gateway と同一の raw configuration value |
 
 Production と Preview には別々の Deno Deploy application、endpoint、secret を用意する。
@@ -256,7 +256,8 @@ README から参照する Deno tokenizer runbook を追加する。runbook に�
 
 - Deno Deploy application を Production / Preview ごとに作成し、`deno deploy` または
   Deno Deploy dashboard で `apps/deno-tokenizer` を deployment source とする方法
-- `DENO_TOKENIZER_AUTH_TOKEN` を Deno secret と Cloudflare Worker secret に安全に設定する方法
+- `OCTG_TOKENIZER_AUTH_TOKEN` を Deno secret と
+  `DENO_TOKENIZER_AUTH_TOKEN` を Cloudflare Worker secret として安全に設定する方法
 - endpoint、threshold、timeout、`MAX_INPUT_BYTES` の設定と resolved value の整合性
 - Deno disabled、partial / invalid configuration、Deno failure の挙動
 - retry / fallback を実施しないこと
