@@ -5,6 +5,12 @@ type RawGlob = <Value>(
   options: { eager: true; import: "default"; query: "?raw" },
 ) => Record<string, Value>;
 
+type Lockfile = {
+  readonly packages: Record<string, {
+    readonly dependencies?: Record<string, string>;
+  }>;
+};
+
 const gatewaySources = (import.meta as ImportMeta & { readonly glob: RawGlob }).glob<string>(
   [
     "../src/**/*.ts",
@@ -60,8 +66,7 @@ describe("Tokenizer dependency isolation", () => {
     expect(sharedManifest).not.toMatch(/"tiktoken"\s*:/);
     expect(gatewayManifest).not.toMatch(/"tiktoken"\s*:/);
     expect(tokenizerManifest).toMatch(/"tiktoken"\s*:\s*"1\.0\.22"/);
-    expect(lockfile).toMatch(
-      /"durable-objects\/tokenizer-controller":\s*\{[\s\S]*?"dependencies":\s*\{\s*"tiktoken":\s*"1\.0\.22"/,
-    );
+    const parsedLockfile = JSON.parse(lockfile) as Lockfile;
+    expect(parsedLockfile.packages["durable-objects/tokenizer-controller"]?.dependencies?.tiktoken).toBe("1.0.22");
   });
 });
