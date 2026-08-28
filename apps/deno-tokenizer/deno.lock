@@ -1,0 +1,74 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/assert@1": "1.0.19",
+    "jsr:@std/internal@^1.0.12": "1.0.14"
+  },
+  "jsr": {
+    "@std/assert@1.0.19": {
+      "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
+    "@std/internal@1.0.14": {
+      "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:typescript@^5.6.0"
+      ]
+    },
+    "members": {
+      "apps/deno-tokenizer": {
+        "dependencies": [
+          "npm:tiktoken@1.0.22"
+        ]
+      },
+      "apps/gateway-worker": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@cloudflare/vitest-pool-workers@~0.20.3",
+            "npm:@cloudflare/workers-types@^4.20250617.0",
+            "npm:@octg/quota-controller@*",
+            "npm:@octg/shared@*",
+            "npm:@octg/tokenizer-controller@0.0.0",
+            "npm:jose@^5.6.0",
+            "npm:ulid@^2.3.0",
+            "npm:vitest@^4.1.0",
+            "npm:wrangler@4"
+          ]
+        }
+      },
+      "durable-objects/quota-controller": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@cloudflare/workers-types@^4.20250617.0",
+            "npm:@octg/shared@*"
+          ]
+        }
+      },
+      "durable-objects/tokenizer-controller": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@cloudflare/vitest-pool-workers@~0.20.3",
+            "npm:@cloudflare/workers-types@^5.20260820.1",
+            "npm:@octg/shared@*",
+            "npm:tiktoken@1.0.22",
+            "npm:vitest@^4.1.0"
+          ]
+        }
+      },
+      "packages/shared": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@cloudflare/workers-types@^4.20250617.0",
+            "npm:vitest@3"
+          ]
+        }
+      }
+    }
+  }
+}

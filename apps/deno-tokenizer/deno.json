@@ -1,0 +1,13 @@
+{
+  "lock": true,
+  "imports": {
+    "@octg/shared": "../../packages/shared/src/index.ts",
+    "tiktoken/lite/init": "npm:tiktoken@1.0.22/lite/init",
+    "tiktoken/lite/tiktoken_bg.wasm": "npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm",
+    "tiktoken/encoders/o200k_base": "npm:tiktoken@1.0.22/encoders/o200k_base"
+  },
+  "tasks": {
+    "check": "deno check src/main.ts test/*.test.ts",
+    "test": "deno test --allow-env --allow-read test"
+  }
+}
