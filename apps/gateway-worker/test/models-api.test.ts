@@ -9,7 +9,7 @@ beforeEach(async () => {
 });
 
 describe("GET /v1/models", () => {
-  it("returns enabled complimentary models", async () => {
+  it("returns enabled complimentary models when Deno tokenizer configuration is absent", async () => {
     const response = await SELF.fetch("https://octg.test/v1/models", { headers: { authorization: `Bearer ${TEST_CLIENT_KEY}` } });
     expect(response.status).toBe(200);
     const body = (await response.json()) as { object: string; data: Array<{ id: string; object: string }> };
@@ -25,5 +25,27 @@ describe("GET /v1/models", () => {
     const response = await SELF.fetch("https://octg.test/v1/models", { headers: { authorization: `Bearer ${TEST_CLIENT_KEY}` } });
     expect((await response.json() as { data: Array<{ id: string }> }).data.some((model) => model.id === "gpt-4o")).toBe(false);
     expect((await SELF.fetch("https://octg.test/v1/models")).status).toBe(401);
+  });
+
+  it("checks partial Deno tokenizer configuration only after authentication", async () => {
+    const original = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZER_ENDPOINT");
+    Object.defineProperty(env, "DENO_TOKENIZER_ENDPOINT", {
+      value: "https://tokenizer.example/v1/tokenize",
+      configurable: true,
+    });
+
+    try {
+      const unauthenticated = await SELF.fetch("https://octg.test/v1/models");
+      expect(unauthenticated.status).toBe(401);
+
+      const authenticated = await SELF.fetch("https://octg.test/v1/models", {
+        headers: { authorization: `Bearer ${TEST_CLIENT_KEY}` },
+      });
+      expect(authenticated.status).toBe(500);
+      expect(await authenticated.json()).toMatchObject({ error: { code: "internal_error" } });
+    } finally {
+      if (original) Object.defineProperty(env, "DENO_TOKENIZER_ENDPOINT", original);
+      else Reflect.deleteProperty(env, "DENO_TOKENIZER_ENDPOINT");
+    }
   });
 });

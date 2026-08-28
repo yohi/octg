@@ -1,11 +1,10 @@
 import { env, SELF } from "cloudflare:test";
 import type { TokenizerController } from "@octg/tokenizer-controller";
+import { MAX_BPE_WORK_UNITS } from "@octg/tokenizer-controller/contracts";
 import {
-  MAX_BPE_WORK_UNITS,
   MAX_INPUT_TEXT_BYTES,
-} from "@octg/tokenizer-controller/contracts";
-import {
   MAX_NORMALIZED_INPUT_BYTES,
+  resolveMaxInputBytes,
   safetyMargin,
   type InFlightLease,
 } from "@octg/shared";
@@ -15,7 +14,6 @@ import {
   releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
-  resolveMaxInputBytes,
 } from "../src/proxy";
 import { estimateRpcPayloadSize } from "../src/tokenizer";
 import type { InFlightLeaseReleaser } from "../src/proxy";

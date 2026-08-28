@@ -88,4 +88,28 @@ describe("resource stage event contract", () => {
       upstreamReached: false,
     }));
   });
+
+  it("emits tokenizationProvider and tokenizationFailureCategory for Deno failures", () => {
+    const event: ResourceStageEvent = {
+      ...baseEvent,
+      route: "error:tokenizer_unavailable",
+      phase: "finish",
+      durationMs: 50,
+      outcome: "exception",
+      quotaReserved: false,
+      upstreamReached: false,
+      tokenizationProvider: "deno",
+      tokenizationFailureCategory: "timeout",
+    };
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitResourceStage(event);
+
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      tokenizationProvider: "deno",
+      tokenizationFailureCategory: "timeout",
+      quotaReserved: false,
+      upstreamReached: false,
+    }));
+  });
 });
