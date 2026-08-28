@@ -124,7 +124,16 @@ Production と Preview には別々の Deno Deploy application、endpoint、secr
 
 ## 5. Deno HTTP 契約
 
-Deno は `POST /v1/tokenize` だけを受け付ける。Worker は HTTPS で次だけを送る。
+Deno は `POST /tokenize` と `GET /health` を受け付ける。`GET /health` は公開
+liveness check として認証を要求せず、HTTP 200 と次の JSON を返す。
+
+```json
+{"status":"ok"}
+```
+
+`POST /tokenize` は認証必須の tokenization endpoint である。Deno は path と method を
+認証前に判定し、未知の path は 404、既知の path に対する不正な method は 405 とする。
+Worker は tokenization request に対して HTTPS で次だけを送る。
 
 ```http
 Authorization: Bearer <DENO_TOKENIZER_AUTH_TOKEN>
@@ -140,14 +149,15 @@ OpenAI credential、Cloudflare credential、`octg_sk_*` は送らない。Worker
 observation が request ID と revision を相関するため、Deno wire contract に metadata を
 追加しない。
 
-成功応答は HTTP 200 と次の JSON だけである。
+`POST /tokenize` の成功応答は HTTP 200 と次の JSON だけである。
 
 ```json
 {"baseTokenCount":123}
 ```
 
-`baseTokenCount` は負でない安全整数でなければならない。Deno は method、content type、
-JSON shape、UTF-8 input byte ceiling、認証を検証し、認証失敗時は encode を実行しない。
+`baseTokenCount` は負でない安全整数でなければならない。Deno は `POST /tokenize` について
+content type、JSON shape、UTF-8 input byte ceiling、認証を検証し、認証失敗時は encode を
+実行しない。
 サイズ検証は次の二段階に分ける。
 
 1. **raw JSON envelope:** Worker は whitespace を含めない canonical
