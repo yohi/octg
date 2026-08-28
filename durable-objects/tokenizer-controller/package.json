@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@octg/shared": "*",
     "tiktoken": "1.0.22"
   },
   "devDependencies": {
