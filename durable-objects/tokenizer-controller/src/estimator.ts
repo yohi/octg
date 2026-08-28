@@ -1,3 +1,4 @@
+import { estimatedInputTokensOf } from "@octg/shared";
 import { init, Tiktoken } from "tiktoken/lite/init";
 import wasm from "tiktoken/lite/tiktoken_bg.wasm";
 import o200kBase from "tiktoken/encoders/o200k_base";
@@ -169,7 +170,11 @@ export class TokenizerEstimator {
 
     try {
       const result = {
-        estimatedInputTokens: estimatedTokensOf(base, request),
+        estimatedInputTokens: estimatedInputTokensOf({
+          baseTokenCount: base,
+          messageCount: request.messageCount,
+          opaqueInputBytes: request.opaqueInputBytes,
+        }),
         estimationPath: "exact_bpe",
       } as const;
       context.emit({
@@ -243,7 +248,11 @@ export class TokenizerEstimator {
     return {
       byteCount,
       result: {
-        estimatedInputTokens: estimatedTokensOf(byteCount, request),
+        estimatedInputTokens: estimatedInputTokensOf({
+          baseTokenCount: byteCount,
+          messageCount: request.messageCount,
+          opaqueInputBytes: request.opaqueInputBytes,
+        }),
         estimationPath: "conservative_bytes",
       },
     };
@@ -264,20 +273,4 @@ function assertBpeWorkWithinLimit(inputText: string): void {
     }
     workUnits += pieceWorkUnits;
   }
-}
-
-function estimatedTokensOf(base: number, request: TokenizeRequest): number {
-  const messageOverhead = request.messageCount * 4;
-  const estimated = base + request.opaqueInputBytes + messageOverhead + 3;
-  if (
-    !Number.isSafeInteger(base) ||
-    base < 0 ||
-    !Number.isSafeInteger(messageOverhead) ||
-    messageOverhead < 0 ||
-    !Number.isSafeInteger(estimated) ||
-    estimated < 0
-  ) {
-    throw new RangeError("Tokenizer arithmetic overflow.");
-  }
-  return estimated;
 }
