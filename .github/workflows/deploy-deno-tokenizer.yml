@@ -89,8 +89,6 @@ jobs:
         working-directory: apps/deno-tokenizer
         run: |
           deno deploy \
-            --org "$DENO_DEPLOY_ORG" \
-            --app "$DENO_DEPLOY_APP" \
             --prod \
             --json \
             --non-interactive

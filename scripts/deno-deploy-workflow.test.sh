@@ -164,14 +164,21 @@ end
 deploy_run = deploy_step["run"].to_s
 [
   "deno deploy",
-  '--org "$DENO_DEPLOY_ORG"',
-  '--app "$DENO_DEPLOY_APP"',
   "--prod",
   "--json",
   "--non-interactive",
 ].each do |fragment|
   unless deploy_run.include?(fragment)
     fail_contract("the \"Deploy\" step is missing: #{fragment}")
+  end
+end
+
+[
+  '--org "$DENO_DEPLOY_ORG"',
+  '--app "$DENO_DEPLOY_APP"',
+].each do |fragment|
+  if deploy_run.include?(fragment)
+    fail_contract("the \"Deploy\" step must use Deno Deploy environment variables instead of #{fragment}")
   end
 end
 
