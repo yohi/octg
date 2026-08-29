@@ -44,8 +44,8 @@ The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external 
      Create it at <https://console.deno.com/account/access-tokens> and do not print
      or commit it.
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
-     `deno task check` and `deno task test` for pull requests and deploys only after
-     those checks pass on a push to `master`.
+     `deno install`, `deno task check`, and `deno task test` for pull requests and
+     deploys only after those checks pass on a push to `master`.
    - The workflow runs `deno deploy . --org ... --app ... --prod` from
      `apps/deno-tokenizer` in non-interactive mode.
 

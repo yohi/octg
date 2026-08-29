@@ -14,6 +14,7 @@ required_patterns=(
   'apps/deno-tokenizer/**'
   'packages/shared/**'
   'denoland/setup-deno@'
+  'deno install'
   'deno task check'
   'deno task test'
   'deno deploy .'

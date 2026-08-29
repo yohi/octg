@@ -35,6 +35,9 @@ jobs:
           deno-version: v2.x
           cache: true
 
+      - name: Install Deno dependencies
+        run: deno install --node-modules-dir=auto
+
       - name: Typecheck
         run: deno task check
 
@@ -66,6 +69,10 @@ jobs:
         with:
           deno-version: v2.x
           cache: true
+
+      - name: Install Deno dependencies
+        working-directory: apps/deno-tokenizer
+        run: deno install --node-modules-dir=auto
 
       - name: Verify deployment configuration
         run: |

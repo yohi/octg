@@ -29,11 +29,11 @@
 
 - [ ] **Step 1: Write the workflow**
 
-Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.x`, run `deno task check` and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy . --org ... --app ... --prod --json --non-interactive` from `apps/deno-tokenizer`.
+Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.x`, run `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy . --org ... --app ... --prod --json --non-interactive` from `apps/deno-tokenizer`.
 
 - [ ] **Step 2: Run the repository checks**
 
-Run: `deno task check` and `deno task test` from `apps/deno-tokenizer`.
+Run: `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`.
 
 Expected: Both commands pass without requiring any deployment credential.
 
