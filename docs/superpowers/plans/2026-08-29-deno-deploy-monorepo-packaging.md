@@ -4,7 +4,7 @@
 
 **Goal:** Make the Deno tokenizer production deployment upload both the tokenizer app and its `packages/shared/src` dependency so Deno Deploy can build the revision.
 
-**Architecture:** Keep PR validation rooted at `apps/deno-tokenizer`, but run the production `deno deploy` command from the repository root. A root `deno.json` will define the Deno Deploy manifest and dynamic entrypoint, preserving the existing relative import map and avoiding duplicated shared logic.
+**Architecture:** Keep PR validation rooted at `apps/deno-tokenizer`, but run the production `deno deploy` command from the repository root. A root `deno.json` will define the Deno Deploy manifest, root-based imports, and dynamic entrypoint, avoiding dependency resolution through the app-local configuration during deployment.
 
 **Tech Stack:** GitHub Actions, Deno 2.9.5, Deno Deploy CLI, JSON, YAML, Bash, Ruby standard YAML/JSON libraries.
 
@@ -121,8 +121,8 @@ Expected: FAIL with `the "Deploy" step must run from repository root "."`, becau
 - Test: `scripts/deno-deploy-workflow.test.sh`
 
 **Interfaces:**
-- Consumes: The existing app import map in `apps/deno-tokenizer/deno.json`.
-- Produces: A root Deno Deploy source config and a root-based deploy command.
+- Consumes: The root import map for `@octg/shared` and the required `tiktoken` specifiers.
+- Produces: A root Deno Deploy source config, root-based dependency resolution, and a root-based deploy command.
 
 - [x] **Step 1: Add the minimal root Deno Deploy config**
 
@@ -130,6 +130,12 @@ Create `deno.json` with exactly this deployment configuration:
 
 ```json
 {
+  "imports": {
+    "@octg/shared": "./packages/shared/src/index.ts",
+    "tiktoken/lite/init": "npm:tiktoken@1.0.22/lite/init",
+    "tiktoken/lite/tiktoken_bg.wasm": "npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm",
+    "tiktoken/encoders/o200k_base": "npm:tiktoken@1.0.22/encoders/o200k_base"
+  },
   "deploy": {
     "include": [
       "./deno.json",
@@ -318,7 +324,18 @@ from `apps/deno-tokenizer`.
 
 Expected: Typecheck and tokenizer tests pass.
 
-- [x] **Step 2: Run repository checks**
+- [x] **Step 2: Run the root deployment typecheck**
+
+Run from the repository root:
+
+```bash
+deno check --config deno.json apps/deno-tokenizer/src/main.ts
+```
+
+Expected: The deployment entrypoint typechecks using the root import map,
+including `@octg/shared` and the required `tiktoken` specifiers.
+
+- [x] **Step 3: Run repository checks**
 
 Run:
 

@@ -42,12 +42,15 @@ does not hard-code one account. The production job will inject the non-secret
 immediately before `deno deploy`; the access token will never be written to the
 file and is scoped to the Deploy step rather than the whole job.
 
-Keep validation commands in `apps/deno-tokenizer`, where the app's existing
-import map and tests run unchanged. Change only the deploy step's working
-directory to the repository root so the CLI collector can see every included
-path. Materialize the deployment identity in the ephemeral CI checkout before
-the deploy step. The app's `deno.json` remains in the manifest and continues to resolve
-the relative `@octg/shared` import using the repository layout.
+Keep the existing validation commands in `apps/deno-tokenizer`, where the app's
+tasks and tests run unchanged. The root `deno.json` owns the import map used by
+root-based deployment and maps `@octg/shared` and the required `tiktoken`
+specifiers relative to the repository root. Change only the deploy step's
+working directory to the repository root so the CLI collector can see every
+included path. Materialize the deployment identity in the ephemeral CI
+checkout before the deploy step. The app's `deno.json` remains in the manifest
+for app-local validation, but it is not relied upon for root-based deployment
+dependency resolution.
 
 The workflow contract test will require the root deploy working directory, the
 identity materialization step, and will parse `deno.json` to require the three

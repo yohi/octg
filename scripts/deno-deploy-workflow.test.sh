@@ -163,6 +163,21 @@ expected_env.each do |name, value|
     fail_contract("jobs.deploy.env.#{name} must map to #{value}")
   end
 end
+
+jobs.each do |job_name, raw_job|
+  job = require_mapping(raw_job, "jobs.#{job_name}")
+  require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
+    next unless step.is_a?(Hash)
+    next if job_name == "deploy" && step["name"] == "Deploy"
+
+    step_env = step["env"]
+    next unless step_env.is_a?(Hash)
+    if step_env.key?("DENO_DEPLOY_TOKEN")
+      fail_contract("jobs.#{job_name}.steps[#{index}] must not define DENO_DEPLOY_TOKEN")
+    end
+  end
+end
+
 if deploy_env.key?("DENO_DEPLOY_TOKEN")
   fail_contract("DENO_DEPLOY_TOKEN must be scoped to the Deploy step")
 end
