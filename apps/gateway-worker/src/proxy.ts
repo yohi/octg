@@ -1,4 +1,3 @@
-import { tokenizeInput } from "./tokenizer";
 import { resolveTokenBudget } from "./token-budget";
 import {
   buildOctgHeaders,
@@ -51,6 +50,8 @@ import { proxyStream } from "./stream";
 import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import { assertNever } from "./exhaustiveness";
 import { workerVersionHeaders, type WorkerVersionMetadataLike } from "./version-metadata";
+import { resolveDenoTokenizerConfig } from "./deno-tokenizer-config";
+import { routeTokenization } from "./tokenization-routing";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
@@ -243,6 +244,8 @@ export async function handleProxy(
   try {
     const auth = await authenticate(request, env, requestId);
     if (!("id" in auth)) return errorResponse(auth);
+    const denoTokenizerConfig = resolveDenoTokenizerConfig(env);
+    if (denoTokenizerConfig.kind === "invalid") return errorResponse(errInternal(requestId));
     const parsedIdempotencyKey = parseIdempotencyKey(request.headers.get("Idempotency-Key"));
     if (parsedIdempotencyKey.kind === "invalid") {
       return errorResponse(
@@ -370,11 +373,15 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    const tokenizeOutcome = await tokenizeInput(env.TOKENIZER_CONTROLLER, {
-      requestId,
-      inputText: requestData.inputText,
-      messageCount: requestData.messageCount,
-      opaqueInputBytes: requestData.opaqueInputBytes,
+    const tokenizeOutcome = await routeTokenization({
+      config: denoTokenizerConfig,
+      namespace: env.TOKENIZER_CONTROLLER,
+      request: {
+        requestId,
+        inputText: requestData.inputText,
+        messageCount: requestData.messageCount,
+        opaqueInputBytes: requestData.opaqueInputBytes,
+      },
     });
 
     let tokenizedResult: TokenizeResult;
