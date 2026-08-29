@@ -8,6 +8,8 @@ const originalDenoEndpoint = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZE
 const originalDenoAuthToken = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZER_AUTH_TOKEN");
 const originalDenoThreshold = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZER_THRESHOLD_BYTES");
 const originalDenoTimeout = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZER_TIMEOUT_MS");
+const denoTokenizerUrl = "https://tokenizer.example/v1/tokenize";
+const denoAuthToken = "deno-secret";
 
 function restoreEnvProperty(name: string, descriptor: PropertyDescriptor | undefined) {
   if (descriptor) {
@@ -70,6 +72,28 @@ function clearDenoConfig() {
   Reflect.deleteProperty(env, "DENO_TOKENIZER_TIMEOUT_MS");
 }
 
+function stubFetch(options: {
+  readonly onDenoRequest?: () => void;
+  readonly onUpstreamRequest?: () => void;
+  readonly upstreamTotalTokens?: number;
+}) {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url === denoTokenizerUrl) {
+      options.onDenoRequest?.();
+      return new Response(JSON.stringify({ baseTokenCount: 2 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    options.onUpstreamRequest?.();
+    return new Response(JSON.stringify({ usage: { total_tokens: options.upstreamTotalTokens ?? 1 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+}
+
 describe("Deno tokenizer routing", () => {
   beforeEach(async () => {
     await seedClient();
@@ -100,26 +124,10 @@ describe("Deno tokenizer routing", () => {
     async (endpoint, content, threshold, expectedDoCalls, expectedDenoCalls) => {
       const doCalls = installTokenizer();
       let denoCalls = 0;
-      vi.stubGlobal(
-        "fetch",
-        async (input: RequestInfo | URL, init?: RequestInit) => {
-          const url = typeof input === "string" ? input : (input as Request).url;
-          if (url === "https://tokenizer.example/v1/tokenize") {
-            denoCalls += 1;
-            return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-              status: 200,
-              headers: { "content-type": "application/json" },
-            });
-          }
-          return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        },
-      );
+      stubFetch({ onDenoRequest: () => { denoCalls += 1; } });
       setDenoConfig({
-        endpoint: "https://tokenizer.example/v1/tokenize",
-        authToken: "deno-secret",
+        endpoint: denoTokenizerUrl,
+        authToken: denoAuthToken,
         thresholdBytes: String(threshold),
         timeoutMs: "1000",
       });
@@ -145,26 +153,13 @@ describe("Deno tokenizer routing", () => {
   it("uses exact BPE estimate from Deno result", async () => {
     const doCalls = installTokenizer();
     let denoCallCount = 0;
-    vi.stubGlobal(
-      "fetch",
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : (input as Request).url;
-        if (url === "https://tokenizer.example/v1/tokenize") {
-          denoCallCount += 1;
-          return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ usage: { total_tokens: 5 } }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    );
+    stubFetch({
+      onDenoRequest: () => { denoCallCount += 1; },
+      upstreamTotalTokens: 5,
+    });
     setDenoConfig({
-      endpoint: "https://tokenizer.example/v1/tokenize",
-      authToken: "deno-secret",
+      endpoint: denoTokenizerUrl,
+      authToken: denoAuthToken,
       thresholdBytes: "1",
       timeoutMs: "1000",
     });
@@ -187,23 +182,7 @@ describe("Deno tokenizer routing", () => {
   it("keeps DO path when Deno config is disabled", async () => {
     const doCalls = installTokenizer();
     let denoCalls = 0;
-    vi.stubGlobal(
-      "fetch",
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : (input as Request).url;
-        if (url === "https://tokenizer.example/v1/tokenize") {
-          denoCalls += 1;
-          return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    );
+    stubFetch({ onDenoRequest: () => { denoCalls += 1; } });
     clearDenoConfig();
 
     const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
@@ -225,24 +204,13 @@ describe("Deno tokenizer routing", () => {
     installTokenizer();
     let denoCalls = 0;
     let upstreamCalls = 0;
-    vi.stubGlobal(
-      "fetch",
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === "string" ? input : (input as Request).url;
-        if (url === "https://tokenizer.example/v1/tokenize") {
-          denoCalls += 1;
-          return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        upstreamCalls += 1;
-        return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
-      },
-    );
+    stubFetch({
+      onDenoRequest: () => { denoCalls += 1; },
+      onUpstreamRequest: () => { upstreamCalls += 1; },
+    });
     setDenoConfig({
-      endpoint: "https://tokenizer.example/v1/tokenize",
-      authToken: "deno-secret",
+      endpoint: denoTokenizerUrl,
+      authToken: denoAuthToken,
       // missing timeout and threshold => invalid
     });
 
