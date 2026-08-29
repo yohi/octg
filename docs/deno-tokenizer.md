@@ -35,24 +35,44 @@ Gateway Worker
 
 The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external build step.
 
-1. **Push to Git** (if using Git integration):
+1. **Recommended: GitHub Actions**:
+   - Create the Deno Deploy app in the current Deno Deploy console. Deno Deploy
+     Classic and `deployctl` are not supported.
+   - Configure the GitHub Environment `deno-production` with the non-secret variables
+     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP`.
+   - Add the Deno access token as the Environment Secret `DENO_DEPLOY_TOKEN`.
+     Create it at <https://console.deno.com/account/access-tokens> and do not print
+     or commit it.
+   - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
+     `deno install`, `deno task check`, and `deno task test` for pull requests and
+     deploys only after those checks pass on a push to `master`.
+   - The workflow runs `deno deploy . --org ... --app ... --prod` from
+     `apps/deno-tokenizer` in non-interactive mode.
+
+2. **Push to Git** (if using Deno Deploy's integrated Git deployment instead):
    ```bash
    git add apps/deno-tokenizer/
    git commit -m "feat(deno-tokenizer): add standalone BPE service"
    git push
    ```
 
-2. **Link to Deno Deploy**:
-   - Go to [Deno Deploy dashboard](https://deno.com/deploy).
-   - Create a new project, link your GitHub repository.
-   - Set the entrypoint to `apps/deno-tokenizer/src/main.ts`.
+3. **Configure the Deno Deploy app**:
+   - Go to [Deno Deploy console](https://console.deno.com/).
+   - Create an app and configure `apps/deno-tokenizer` as its application directory.
+   - Set the entrypoint to `src/main.ts`.
    - Add environment variables (see §1.3).
    - Deploy.
 
-3. **Manual Deploy (without Git)**:
+4. **Manual Deploy (without GitHub Actions)**:
    ```bash
    cd apps/deno-tokenizer
-   deno deploy --project=<your-project-name> --include=src/ src/main.ts
+   printf 'Deno Deploy access token: '
+   read -r -s DENO_DEPLOY_TOKEN
+   printf '\n'
+   export DENO_DEPLOY_TOKEN
+   deno deploy . \
+     --org=<your-org> --app=<your-app> --prod --non-interactive
+   unset DENO_DEPLOY_TOKEN
    ```
 
 ### 1.3 Environment Variables
@@ -63,6 +83,9 @@ Configure these in the Deno Deploy dashboard or via CLI:
 |---|---|---|
 | `OCTG_TOKENIZER_AUTH_TOKEN` | **Yes** | Deno secret shared with the Worker. |
 | `MAX_INPUT_BYTES` | No | Raw limit shared with the matching Worker. |
+
+`OCTG_TOKENIZER_AUTH_TOKEN` is a Deno Deploy runtime secret. Configure it in the
+Deno app and do not add it to the GitHub Environment or workflow.
 
 The shared resolver supplies the default and clamps the effective input limit.
 
