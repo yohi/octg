@@ -59,15 +59,20 @@ The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external 
 3. **Configure the Deno Deploy app**:
    - Go to [Deno Deploy console](https://console.deno.com/).
    - Create an app and configure `apps/deno-tokenizer` as its application directory.
-   - Set the entrypoint to `apps/deno-tokenizer/src/main.ts`.
+   - Set the entrypoint to `src/main.ts`.
    - Add environment variables (see §1.3).
    - Deploy.
 
 4. **Manual Deploy (without GitHub Actions)**:
    ```bash
    cd apps/deno-tokenizer
-   DENO_DEPLOY_TOKEN=<your-token> deno deploy . \
+   printf 'Deno Deploy access token: '
+   read -r -s DENO_DEPLOY_TOKEN
+   printf '\n'
+   export DENO_DEPLOY_TOKEN
+   deno deploy . \
      --org=<your-org> --app=<your-app> --prod --non-interactive
+   unset DENO_DEPLOY_TOKEN
    ```
 
 ### 1.3 Environment Variables
