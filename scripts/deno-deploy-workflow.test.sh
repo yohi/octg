@@ -163,7 +163,7 @@ end
 
 deploy_run = deploy_step["run"].to_s
 [
-  "deno deploy .",
+  "deno deploy",
   '--org "$DENO_DEPLOY_ORG"',
   '--app "$DENO_DEPLOY_APP"',
   "--prod",
@@ -173,6 +173,10 @@ deploy_run = deploy_step["run"].to_s
   unless deploy_run.include?(fragment)
     fail_contract("the \"Deploy\" step is missing: #{fragment}")
   end
+end
+
+if deploy_run.match?(/\bdeno\s+deploy\s+\./)
+  fail_contract('the "Deploy" step must not pass a positional root path to deno deploy')
 end
 
 jobs.each do |job_name, raw_job|
