@@ -4,6 +4,10 @@ OpenAI Data Sharing Program (Tier 3) の無料枠を複数クライアントで�
 
 詳細設計は [SPEC.md](./SPEC.md) を参照。
 
+Deno tokenizer の有効化、Secret 設定、canary 手順は
+[docs/deno-tokenizer.md](./docs/deno-tokenizer.md) を参照してください。
+既定の Gateway 設定では Deno tokenizer は無効です。
+
 [![Use this template](https://img.shields.io/badge/Use%20this%20template-yohi/octg-blue)](https://github.com/yohi/octg/generate)
 
 ## アーキテクチャ概要

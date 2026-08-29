@@ -4,9 +4,9 @@ This document covers the deployment and operational procedures for the optional 
 
 ## Overview
 
-The Deno tokenizer is an **optional, opt-in** component. When enabled, the Gateway Worker routes large input texts (above a configurable byte threshold) to this service instead of the local Cloudflare Durable Object (`TokenizerController`). This offloads CPU-intensive BPE work from the Worker to a separate Deno Deploy instance.
+The Deno tokenizer is an **optional, opt-in** component. When enabled, the Gateway Worker routes large input texts (at or above a configurable byte threshold) to this service instead of the local Cloudflare Durable Object (`TokenizerController`). This offloads CPU-intensive BPE work from the Worker to a separate Deno Deploy instance.
 
-```
+```text
 Gateway Worker
   ├── Small inputs / Deno disabled → TokenizerController (Cloudflare DO)
   └── Large inputs / Deno enabled  → Deno Tokenizer Service (Deno Deploy)
@@ -14,9 +14,13 @@ Gateway Worker
 
 ## Architecture
 
-- **Gateway Worker** (`apps/gateway-worker/src/proxy.ts`): Routes tokenization requests based on `DENO_TOKENIZER_ENDPOINT`, `DENO_TOKENIZER_AUTH_TOKEN`, and `DENO_TOKENIZER_THRESHOLD_BYTES`.
-- **Deno Tokenizer** (`apps/deno-tokenizer/`): Standalone Deno service using `js-tiktoken` for exact `o200k_base` BPE. Stateless — no input text, API keys, or tokenizer state is persisted.
-- **Tokenization Router** (`apps/gateway-worker/src/tokenization.ts`): Decides which provider to use based on configuration and input size.
+- **Gateway Worker** (`apps/gateway-worker/src/proxy.ts`): Routes tokenization
+  requests based on the four `DENO_TOKENIZER_*` settings.
+- **Deno Tokenizer** (`apps/deno-tokenizer/`): Standalone Deno service using
+  `tiktoken/lite` for exact `o200k_base` BPE. Stateless — no input text, API
+  keys, or tokenizer state is persisted.
+- **Tokenization Router** (`apps/gateway-worker/src/tokenization-routing.ts`):
+  Decides which provider to use based on configuration and input size.
 - **Observability** (`apps/gateway-worker/src/resource-observation.ts`): Emits `tokenizationProvider` and `tokenizationFailureCategory` fields in resource stage events.
 
 ## 1. Deployment
@@ -57,31 +61,57 @@ Configure these in the Deno Deploy dashboard or via CLI:
 
 | Variable | Required | Description |
 |---|---|---|
-| `PORT` | No | Listen port. Defaults to `8080` locally, ignored on Deno Deploy. |
-| `AUTH_TOKEN` | **Yes** | Bearer token the Gateway Worker must present. Generate a cryptographically random string (e.g., `openssl rand -hex 32`). |
+| `OCTG_TOKENIZER_AUTH_TOKEN` | **Yes** | Deno secret shared with the Worker. |
+| `MAX_INPUT_BYTES` | No | Raw limit shared with the matching Worker. |
+
+The shared resolver supplies the default and clamps the effective input limit.
 
 ### 1.4 Gateway Worker Configuration
 
-Add these variables to the Gateway Worker (`apps/gateway-worker/wrangler.jsonc` → `vars`):
+The checked-in `apps/gateway-worker/wrangler.jsonc` intentionally omits all
+Deno settings. With all four settings absent, `resolveDenoTokenizerConfig`
+returns `disabled`, so the Worker keeps using `TokenizerController`. Do not add
+placeholder values: a partial or invalid configuration fails closed with a
+generic `500` for authenticated requests.
+
+After the Deno Deploy service is healthy, configure each Production or Preview
+Worker independently. Add the three non-secret values to that deployment's
+`vars`:
 
 ```jsonc
 "vars": {
   // ... existing vars ...
   "DENO_TOKENIZER_ENDPOINT": "https://<your-project>.deno.dev/tokenize",
-  "DENO_TOKENIZER_AUTH_TOKEN": "<same-auth-token-as-above>",
-  "DENO_TOKENIZER_THRESHOLD_BYTES": "65536"   // ~64 KiB. Inputs >= this go to Deno.
+  "DENO_TOKENIZER_THRESHOLD_BYTES": "<measured-positive-integer>",
+  "DENO_TOKENIZER_TIMEOUT_MS": "<measured-positive-integer>"
 }
 ```
 
-> **Security**: `DENO_TOKENIZER_AUTH_TOKEN` is a secret and should ideally be set via `wrangler secret put` instead of `vars`. However, since Deno tokenizer is optional and the token is service-to-service, `vars` is acceptable if the repository is private. For public templates, use `wrangler secret put DENO_TOKENIZER_AUTH_TOKEN`.
+This is a deployment-provisioning step, not a checked-in default. Replace the
+example values with measured values for the target deployment, and do not commit
+the placeholders or the authentication Secret.
+
+Set the matching Worker secret separately and deploy the same target:
+
+```bash
+npx wrangler secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
+npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
+```
+
+The four values must be configured together. Do not reuse an endpoint or secret
+between Production and Preview.
 
 ### 1.5 Threshold Configuration
 
 - `DENO_TOKENIZER_THRESHOLD_BYTES` determines when to use the Deno tokenizer.
-- If omitted, the Deno tokenizer is effectively disabled (falls back to `TokenizerController` for all inputs).
-- Recommended starting value: `65536` (64 KiB of UTF-8 text). This balances:
-  - Small inputs: Stay in Worker → lower latency, no outbound RPC.
-  - Large inputs: Offload to Deno → avoid Worker CPU limits on 74k+ token payloads.
+  Inputs with UTF-8 byte length greater than or equal to the threshold use Deno.
+- `DENO_TOKENIZER_TIMEOUT_MS` bounds the complete Deno response lifecycle,
+  including body processing.
+- All four settings absent means disabled. Any missing or invalid setting means
+  configuration invalid and fail-closed; it does not fall back to
+  `TokenizerController`.
+- Choose threshold and timeout from a measured canary for the target
+  environment. Do not treat an unmeasured value as a production default.
 
 ## 2. Operations
 
@@ -155,7 +185,8 @@ Before enabling the Deno tokenizer in production, verify the following:
 
 ### 3.4 Security Criteria
 
-- [ ] **Token secrecy**: `AUTH_TOKEN` is not committed to the repository.
+- [ ] **Token secrecy**: `OCTG_TOKENIZER_AUTH_TOKEN` and
+  `DENO_TOKENIZER_AUTH_TOKEN` are not committed to the repository.
 - [ ] **No data persistence**: Deno tokenizer does not write input text or tokens to disk/database.
 - [ ] **HTTPS only**: Deno Deploy endpoint serves only over HTTPS.
 - [ ] **Input validation**: Malformed JSON or oversized inputs are rejected with `400` or `413` before BPE processing.
@@ -163,7 +194,8 @@ Before enabling the Deno tokenizer in production, verify the following:
 ### 3.5 Rollback Criteria
 
 If any canary check fails:
-- Remove or unset `DENO_TOKENIZER_ENDPOINT` from Gateway Worker vars/secrets.
+- Remove or unset all four `DENO_TOKENIZER_*` settings, including the
+  `DENO_TOKENIZER_AUTH_TOKEN` Secret.
 - All traffic immediately falls back to `TokenizerController` (Cloudflare DO).
 - No Durable Object migration or schema change is required for rollback.
 
@@ -177,7 +209,7 @@ deno task dev   # or: deno run --allow-net src/main.ts
 
 # Test tokenization
 curl -X POST http://localhost:8080/tokenize \
-  -H "Authorization: Bearer <AUTH_TOKEN>" \
+  -H "Authorization: Bearer <OCTG_TOKENIZER_AUTH_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"inputText": "Hello world"}'
 
@@ -188,6 +220,6 @@ curl -X POST http://localhost:8080/tokenize \
 
 - Design spec: `docs/superpowers/specs/2026-08-27-deno-tokenizer-design.md`
 - Implementation plan: `docs/superpowers/plans/2026-08-27-deno-tokenizer.md`
-- Gateway tokenization router: `apps/gateway-worker/src/tokenization.ts`
+- Gateway tokenization router: `apps/gateway-worker/src/tokenization-routing.ts`
 - Deno tokenizer client: `apps/gateway-worker/src/deno-tokenizer-client.ts`
 - Observability contract: `apps/gateway-worker/src/resource-observation.ts`
