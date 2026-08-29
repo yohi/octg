@@ -46,8 +46,9 @@ The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external 
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
      `deno install`, `deno task check`, and `deno task test` for pull requests and
      deploys only after those checks pass on a push to `master`.
-   - The workflow runs `deno deploy --org ... --app ... --prod` from
-     `apps/deno-tokenizer` in non-interactive mode.
+   - The workflow runs `deno deploy --prod --json --non-interactive` from
+     `apps/deno-tokenizer`; the CLI reads the organization and application from
+     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP`.
 
 2. **Push to Git** (if using Deno Deploy's integrated Git deployment instead):
    ```bash
