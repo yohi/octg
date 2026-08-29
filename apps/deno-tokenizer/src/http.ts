@@ -151,7 +151,15 @@ export function createTokenizerHandler(args: {
 }): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url);
-    if (url.pathname !== "/v1/tokenize") {
+    if (url.pathname === "/health") {
+      if (request.method !== "GET") {
+        return errorResponse(405);
+      }
+      return new Response(JSON.stringify({ status: "ok" }), {
+        headers: { "content-type": jsonContentType },
+      });
+    }
+    if (url.pathname !== "/tokenize") {
       return errorResponse(404);
     }
     if (request.method !== "POST") {

@@ -479,7 +479,7 @@ In `http.test.ts`, inject `{ count: () => 7 }` and assert exact statuses:
 
 ```typescript
 const validRequest = (inputText: string, token = "test-secret") =>
-  new Request("https://deno.test/v1/tokenize", {
+  new Request("https://deno.test/tokenize", {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -622,7 +622,7 @@ omission as invalid, and each invalid value as invalid:
 ```typescript
 const complete = {
   MAX_INPUT_BYTES: "1024",
-  DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/v1/tokenize",
+  DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
   DENO_TOKENIZER_AUTH_TOKEN: "test-secret",
   DENO_TOKENIZER_THRESHOLD_BYTES: "512",
   DENO_TOKENIZER_TIMEOUT_MS: "3000",
@@ -634,7 +634,7 @@ expect(resolveDenoTokenizerConfig({ MAX_INPUT_BYTES: "invalid" })).toEqual({
 });
 expect(resolveDenoTokenizerConfig(complete)).toEqual({
   kind: "enabled",
-  endpoint: "https://tokenizer.example/v1/tokenize",
+  endpoint: "https://tokenizer.example/tokenize",
   authToken: "test-secret",
   thresholdBytes: 512,
   timeoutMs: 3000,
@@ -758,7 +758,7 @@ const fetchImpl = vi.fn(async () => new Response(stalled, {
 }));
 
 const outcomePromise = tokenizeWithDeno({
-  endpoint: "https://tokenizer.example/v1/tokenize",
+  endpoint: "https://tokenizer.example/tokenize",
   authToken: "test-secret",
   timeoutMs: 50,
   inputText: "hello",
@@ -1039,7 +1039,7 @@ Deno application:
   MAX_INPUT_BYTES = same raw value as the matching Gateway
 
 Gateway Worker:
-  DENO_TOKENIZER_ENDPOINT = https://.../v1/tokenize
+  DENO_TOKENIZER_ENDPOINT = https://.../tokenize
   DENO_TOKENIZER_AUTH_TOKEN = matching Worker secret
   DENO_TOKENIZER_THRESHOLD_BYTES = measured positive integer
   DENO_TOKENIZER_TIMEOUT_MS = measured positive integer
@@ -1142,8 +1142,9 @@ Expected: all commands exit 0. Confirm that root workspace execution includes
 Start `apps/deno-tokenizer/src/main.ts` in tmux with test-only environment
 values. Use `curl` for:
 
-- `GET /v1/tokenize` -> `405`;
-- unauthenticated `POST /v1/tokenize` -> `401`;
+- `GET /tokenize` -> `405`;
+- `GET /health` without authentication -> `200` with `{"status":"ok"}`;
+- unauthenticated `POST /tokenize` -> `401`;
 - malformed authenticated JSON -> `400`;
 - authenticated valid text -> `200` with only `baseTokenCount`;
 - input exactly at the configured UTF-8 ceiling -> accepted;

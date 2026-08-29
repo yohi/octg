@@ -4,7 +4,6 @@ import { tokenizeWithDeno, type DenoTokenizationOutcome } from "../src/deno-toke
 const endpoint = "https://tokenizer.example/v1/tokenize";
 const authToken = "test-secret";
 const inputText = "hello";
-const timeoutMs = 50;
 
 const expectOutcome = async (
   promise: Promise<DenoTokenizationOutcome>,
@@ -15,7 +14,7 @@ const expectOutcome = async (
 
 describe("tokenizeWithDeno", () => {
   it("sends only authorization, content-type, and the inputText body", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async (input: RequestInfo | URL, init?: RequestInit) =>
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({ baseTokenCount: 7 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -69,8 +68,9 @@ describe("tokenizeWithDeno", () => {
   });
 
   it("reports upstream_status on non-2xx", async () => {
+    let cancelled = false;
     const fetchImpl = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ error: "server error" }), { status: 500 }),
+      new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 500 }),
     );
 
     await expectOutcome(
@@ -78,11 +78,13 @@ describe("tokenizeWithDeno", () => {
       { kind: "unavailable", failureCategory: "upstream_status" },
     );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(cancelled).toBe(true);
   });
 
   it("reports malformed_response on wrong content type", async () => {
+    let cancelled = false;
     const fetchImpl = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ baseTokenCount: 7 }), {
+      new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
         status: 200,
         headers: { "content-type": "text/plain" },
       }),
@@ -93,6 +95,7 @@ describe("tokenizeWithDeno", () => {
       { kind: "unavailable", failureCategory: "malformed_response" },
     );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(cancelled).toBe(true);
   });
 
   it("reports malformed_response on invalid JSON", async () => {
@@ -224,6 +227,55 @@ describe("tokenizeWithDeno", () => {
     vi.useRealTimers();
   });
 
+  it("cancels the response body when timeout wins before headers are processed", async () => {
+    vi.useFakeTimers();
+    let resolveFetchStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => {
+      resolveFetchStarted = resolve;
+    });
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchImpl = vi.fn<typeof fetch>(() => {
+      resolveFetchStarted?.();
+      return new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      });
+    });
+    const outcomePromise = tokenizeWithDeno({
+      endpoint,
+      authToken,
+      timeoutMs: 50,
+      inputText,
+      fetchImpl,
+    });
+
+    await fetchStarted;
+    await vi.advanceTimersByTimeAsync(60);
+    await expect(outcomePromise).resolves.toEqual({
+      kind: "unavailable",
+      failureCategory: "timeout",
+    });
+
+    let cancelled = false;
+    let resolveCancelled: (() => void) | undefined;
+    const bodyCancelled = new Promise<void>((resolve) => {
+      resolveCancelled = resolve;
+    });
+    const response = new Response(new ReadableStream({
+      cancel() {
+        cancelled = true;
+        resolveCancelled?.();
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    resolveFetch?.(response);
+    await bodyCancelled;
+    expect(cancelled).toBe(true);
+
+    vi.useRealTimers();
+  });
+
   it("waits for a slow cancel before returning timeout", async () => {
     vi.useFakeTimers();
     let resolveReadStarted!: () => void;
@@ -270,6 +322,7 @@ describe("tokenizeWithDeno", () => {
     outcomePromise.then(() => {
       outcomeResolved = true;
     });
+    await Promise.resolve();
     expect(outcomeResolved).toBe(false);
 
     resolveCancelFinished();

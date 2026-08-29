@@ -17,6 +17,8 @@
     "not_found_handling": "none",
     "run_worker_first": ["/admin/*"]
   },
+  // Deno tokenizer is opt-in. Keep all DENO_TOKENIZER_* bindings absent from
+  // this checked-in default configuration; see docs/deno-tokenizer.md.
   "vars": {
     "QUOTA_LIMIT_STANDARD": "1000000",
     "QUOTA_LIMIT_MINI": "9950000",

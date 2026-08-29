@@ -4,7 +4,8 @@ import type { ExactEncoder } from "../src/encoder.ts";
 import { createTokenizerHandler } from "../src/http.ts";
 
 const authToken = "test-secret";
-const tokenizeUrl = "https://deno.test/v1/tokenize";
+const tokenizeUrl = "https://deno.test/tokenize";
+const healthUrl = "https://deno.test/health";
 
 type HandlerFixture = {
   readonly handler: (request: Request) => Promise<Response>;
@@ -97,12 +98,27 @@ Deno.test("returns only the exact base token count", async () => {
   assertEquals(fixture.calls(), 1);
 });
 
-Deno.test("returns 404 for a different path", async () => {
+Deno.test("returns health status without authentication", async () => {
+  const fixture = createFixture();
+  const request = new Request(healthUrl, { method: "GET" });
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 200);
+  assertEquals(
+    response.headers.get("content-type"),
+    "application/json; charset=utf-8",
+  );
+  assertEquals(await response.json(), { status: "ok" });
+  assertEquals(fixture.calls(), 0);
+});
+
+Deno.test("returns 404 for a versioned path", async () => {
   const fixture = createFixture();
 
   await expectRejection({
     fixture,
-    request: validRequest("hello", authToken, "https://deno.test/not-tokenize"),
+    request: validRequest("hello", authToken, "https://deno.test/v1/tokenize"),
     status: 404,
   });
 });

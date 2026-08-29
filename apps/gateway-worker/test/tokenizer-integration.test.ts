@@ -5,6 +5,16 @@ import type { TokenizerNamespace } from "../src/tokenizer";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 const originalTokenizerBinding = Object.getOwnPropertyDescriptor(env, "TOKENIZER_CONTROLLER");
+const denoConfigNames = [
+  "DENO_TOKENIZER_ENDPOINT",
+  "DENO_TOKENIZER_AUTH_TOKEN",
+  "DENO_TOKENIZER_THRESHOLD_BYTES",
+  "DENO_TOKENIZER_TIMEOUT_MS",
+] as const;
+const originalDenoConfig = denoConfigNames.map((name) => [
+  name,
+  Object.getOwnPropertyDescriptor(env, name),
+] as const);
 
 const request = () => SELF.fetch("https://octg.test/v1/chat/completions", {
   method: "POST",
@@ -43,6 +53,35 @@ function installTokenizer(result: unknown, rejected = false): Calls {
   return calls;
 }
 
+function installDenoConfig(): void {
+  Object.defineProperty(env, "DENO_TOKENIZER_ENDPOINT", {
+    value: "https://tokenizer.example/tokenize",
+    configurable: true,
+  });
+  Object.defineProperty(env, "DENO_TOKENIZER_AUTH_TOKEN", {
+    value: "test-secret",
+    configurable: true,
+  });
+  Object.defineProperty(env, "DENO_TOKENIZER_THRESHOLD_BYTES", {
+    value: "5",
+    configurable: true,
+  });
+  Object.defineProperty(env, "DENO_TOKENIZER_TIMEOUT_MS", {
+    value: "3000",
+    configurable: true,
+  });
+}
+
+function restoreDenoConfig(): void {
+  for (const [name, descriptor] of originalDenoConfig) {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(env, name);
+    } else {
+      Object.defineProperty(env, name, descriptor);
+    }
+  }
+}
+
 function quotaStub() {
   const day = new Date().toISOString().slice(0, 10);
   return env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
@@ -67,6 +106,7 @@ describe("Tokenizer RPC proxy integration", () => {
     } else {
       Reflect.deleteProperty(env, "TOKENIZER_CONTROLLER");
     }
+    restoreDenoConfig();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -157,5 +197,36 @@ describe("Tokenizer RPC proxy integration", () => {
     expect(response.status).toBe(200);
     expect((await response.json())).toMatchObject({ usage: { total_tokens: 1 } });
     expect((await quotaStub().getState()).confirmedTokens - before.confirmedTokens).toBe(1);
+  });
+
+  it("routes an input at the configured threshold to Deno", async () => {
+    installDenoConfig();
+    const calls = installTokenizer({
+      estimatedInputTokens: 999,
+      estimationPath: "exact_bpe",
+    });
+    let denoCalls = 0;
+    let upstreamCalls = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (String(input) === "https://tokenizer.example/tokenize") {
+        denoCalls += 1;
+        return new Response(JSON.stringify({ baseTokenCount: 2 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      upstreamCalls += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const response = await request();
+
+    expect(response.status).toBe(200);
+    expect(denoCalls).toBe(1);
+    expect(upstreamCalls).toBe(1);
+    expect(calls.requests).toHaveLength(0);
   });
 });

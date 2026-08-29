@@ -1,6 +1,9 @@
 import { resolveTokenBudget } from "./token-budget";
 import { resolveDenoTokenizerConfig } from "./deno-tokenizer-config";
-import { routeTokenization, type RoutedTokenizationOutcome } from "./tokenization";
+import {
+  routeTokenization,
+  type RoutedTokenizationOutcome,
+} from "./tokenization-routing";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -142,8 +145,8 @@ type ResourceStageFields = {
   readonly concurrency?: number;
   readonly quotaReserved?: boolean;
   readonly upstreamReached?: boolean;
-  readonly tokenizationProvider?: import("./resource-observation").TokenizationProvider;
-  readonly tokenizationFailureCategory?: import("./resource-observation").TokenizationFailureCategory;
+  readonly tokenizationProvider?: TokenizationProvider;
+  readonly tokenizationFailureCategory?: TokenizationFailureCategory;
 };
 
 function revisionIdOf(env: Env): string {
@@ -244,6 +247,8 @@ export async function handleProxy(
   try {
     const auth = await authenticate(request, env, requestId);
     if (!("id" in auth)) return errorResponse(auth);
+    const denoTokenizerConfig = resolveDenoTokenizerConfig(env);
+    if (denoTokenizerConfig.kind === "invalid") return errorResponse(errInternal(requestId));
     const parsedIdempotencyKey = parseIdempotencyKey(request.headers.get("Idempotency-Key"));
     if (parsedIdempotencyKey.kind === "invalid") {
       return errorResponse(
@@ -253,11 +258,6 @@ export async function handleProxy(
     const idempotencyKey = parsedIdempotencyKey.kind === "valid"
       ? parsedIdempotencyKey.value
       : undefined;
-
-    const denoTokenizerConfig = resolveDenoTokenizerConfig(env);
-    if (denoTokenizerConfig.kind === "invalid") {
-      return errorResponse(errInternal(requestId));
-    }
 
     const maxInputBytes = Math.min(
       resolveMaxInputBytes(env.MAX_INPUT_BYTES),
@@ -379,17 +379,17 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    const tokenizeOutcome: RoutedTokenizationOutcome = await routeTokenization(
-      denoTokenizerConfig,
-      env.TOKENIZER_CONTROLLER,
-      {
+    const tokenizeOutcome: RoutedTokenizationOutcome = await routeTokenization({
+      config: denoTokenizerConfig,
+      namespace: env.TOKENIZER_CONTROLLER,
+      request: {
         requestId,
         inputText: requestData.inputText,
         inputTextBytes: requestData.inputTextBytes,
         messageCount: requestData.messageCount,
         opaqueInputBytes: requestData.opaqueInputBytes,
       },
-    );
+    });
 
     let tokenizedResult: TokenizeResult;
     switch (tokenizeOutcome.kind) {

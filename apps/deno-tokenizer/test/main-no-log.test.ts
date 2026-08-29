@@ -5,7 +5,7 @@ import { createTokenizerHandler } from "../src/http.ts";
 
 const credential = "unique-credential-that-must-not-be-logged";
 const prompt = "unique-prompt-that-must-not-be-logged";
-const tokenizeUrl = "https://deno.test/v1/tokenize";
+const tokenizeUrl = "https://deno.test/tokenize";
 
 const config: DenoTokenizerServiceConfig = {
   authToken: credential,

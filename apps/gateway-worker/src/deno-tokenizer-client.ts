@@ -66,14 +66,17 @@ export async function tokenizeWithDeno(args: {
 
       if (timedOut) {
         await startCancel();
+        await response.body?.cancel().catch(() => undefined);
         return { kind: "unavailable", failureCategory: "timeout" };
       }
 
       if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
         return { kind: "unavailable", failureCategory: "upstream_status" };
       }
 
       if (!isJsonContentType(response.headers.get("content-type"))) {
+        await response.body?.cancel().catch(() => undefined);
         return { kind: "unavailable", failureCategory: "malformed_response" };
       }
 
