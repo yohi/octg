@@ -345,7 +345,12 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
   migration（冪等）、`wrangler deploy` を実行します。
 - `deploy-deno-tokenizer.yml`: `apps/deno-tokenizer` または依存する shared package の変更時に
   Deno の型検査・テストを実行し、`master` への push では成功後に Deno Deploy の
-  Production アプリへデプロイします。検証は `apps/deno-tokenizer` から実行し、Deploy は
+  Production アプリへデプロイします。Actions の **Run workflow** から feature branch を
+  指定して手動実行した場合も、同じ validate job と `deno-production` Environment の承認を
+  通過した後に実デプロイできます。また、master へマージする前は同一リポジトリの PR に
+  `deploy-deno` ラベルを付けると同じ経路を起動できます（fork PR は対象外）。これにより
+  master へマージする前に Deno Deploy の revision build / warmup まで検証できます。
+  検証は `apps/deno-tokenizer` から実行し、Deploy は
   repository root の `deno.json` manifest（`apps/deno-tokenizer/**` と
   `packages/shared/src/**` を含む）を使用します。GitHub Environment `deno-production` には
   `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` と

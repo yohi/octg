@@ -10,11 +10,13 @@ on:
       - .github/workflows/deploy-deno-tokenizer.yml
   pull_request:
     branches: [master]
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
       - .github/workflows/deploy-deno-tokenizer.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -49,7 +51,7 @@ jobs:
   deploy:
     name: Deploy to Deno Deploy
     needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deno-production

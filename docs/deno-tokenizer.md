@@ -47,7 +47,12 @@ the tokenizer app together with `packages/shared/src`.
      or commit it.
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
      `deno install`, `deno task check`, and `deno task test` for pull requests and
-     deploys only after those checks pass on a push to `master`.
+     deploys only after those checks pass on a push to `master`. Before merging, add
+     the `deploy-deno` label to a same-repository pull request, then approve the
+     `deno-production` Environment deployment. This executes the same gated
+     Production deployment path and verifies the Deno Deploy revision build and
+     warmup. The workflow can also be started with **Run workflow** when available;
+     fork pull requests remain validation-only.
    - The workflow runs `deno deploy --prod --json --non-interactive` from the
      repository root. Immediately before deployment it injects the non-secret
      `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the ephemeral root

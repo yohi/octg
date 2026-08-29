@@ -49,6 +49,13 @@ require_mapping(triggers, "on")
 
 push = require_mapping(triggers["push"], "on.push")
 pull_request = require_mapping(triggers["pull_request"], "on.pull_request")
+unless triggers.key?("workflow_dispatch")
+  fail_contract("on.workflow_dispatch must be configured for pre-merge deployment verification")
+end
+pull_request_types = pull_request["types"]
+unless pull_request_types.is_a?(Array) && pull_request_types.include?("labeled")
+  fail_contract('on.pull_request.types must include "labeled" for pre-merge deployment verification')
+end
 
 unless push["branches"] == ["master"]
   fail_contract('on.push.branches must be exactly ["master"]')
@@ -130,7 +137,7 @@ unless needs.is_a?(Array) && needs.include?("validate")
   fail_contract('jobs.deploy.needs must include "validate" so deployment cannot bypass validation')
 end
 
-expected_if = "github.event_name == 'push' && github.ref == 'refs/heads/master'"
+expected_if = "(github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)"
 deploy_if = deploy["if"].to_s.strip
 deploy_if = deploy_if.sub(/\A\$\{\{\s*/, "").sub(/\s*\}\}\z/, "")
 deploy_if = deploy_if.gsub(/\s+/, " ")
