@@ -7,6 +7,16 @@ export type ResourceStage =
   | "quota_reserve"
   | "upstream";
 
+export type TokenizationProvider = "cloudflare_do" | "deno";
+
+export type TokenizationFailureCategory =
+  | "configuration"
+  | "timeout"
+  | "network"
+  | "upstream_status"
+  | "malformed_response"
+  | "arithmetic";
+
 export type ResourceStageRoute =
   | "free_shared"
   | "reject:request_too_large"
@@ -38,6 +48,8 @@ type ResourceStageEventBase = {
   readonly concurrency?: number;
   readonly quotaReserved?: boolean;
   readonly upstreamReached?: boolean;
+  readonly tokenizationProvider?: TokenizationProvider;
+  readonly tokenizationFailureCategory?: TokenizationFailureCategory;
 };
 
 export type ResourceStageEvent =
@@ -70,6 +82,8 @@ export function emitResourceStage(event: ResourceStageEvent): void {
     ...(event.concurrency === undefined ? {} : { concurrency: event.concurrency }),
     ...(event.quotaReserved === undefined ? {} : { quotaReserved: event.quotaReserved }),
     ...(event.upstreamReached === undefined ? {} : { upstreamReached: event.upstreamReached }),
+    ...(event.tokenizationProvider === undefined ? {} : { tokenizationProvider: event.tokenizationProvider }),
+    ...(event.tokenizationFailureCategory === undefined ? {} : { tokenizationFailureCategory: event.tokenizationFailureCategory }),
     ...(event.phase === "finish" ? { durationMs: event.durationMs, outcome: event.outcome } : {}),
   };
   console.info(runtimeEvent);

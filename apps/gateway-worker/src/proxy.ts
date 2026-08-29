@@ -1,4 +1,9 @@
 import { resolveTokenBudget } from "./token-budget";
+import { resolveDenoTokenizerConfig } from "./deno-tokenizer-config";
+import {
+  routeTokenization,
+  type RoutedTokenizationOutcome,
+} from "./tokenization-routing";
 import {
   buildOctgHeaders,
   classifyModel,
@@ -15,12 +20,13 @@ import {
   errRequestTooLarge,
   errWorkerConcurrencyExceeded,
   errorResponse,
-  MAX_NORMALIZED_INPUT_BYTES,
+  MAX_INPUT_TEXT_BYTES,
   nextUtcMidnight,
   normalizeChatCompletions,
   normalizeResponses,
   parseIdempotencyKey,
   quotaIdOf,
+  resolveMaxInputBytes,
   toPoolLower,
   utcDayOf,
   type QuotaSnapshot,
@@ -45,13 +51,13 @@ import {
   type ResourceStage,
   type ResourceStageOutcome,
   type ResourceStageRoute,
+  type TokenizationProvider,
+  type TokenizationFailureCategory,
 } from "./resource-observation";
 import { proxyStream } from "./stream";
-import { MAX_INPUT_TEXT_BYTES, type TokenizeResult } from "@octg/tokenizer-controller/contracts";
+import type { TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import { assertNever } from "./exhaustiveness";
 import { workerVersionHeaders, type WorkerVersionMetadataLike } from "./version-metadata";
-import { resolveDenoTokenizerConfig } from "./deno-tokenizer-config";
-import { routeTokenization } from "./tokenization-routing";
 
 type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
@@ -104,13 +110,6 @@ export function snapshotOf(view: QuotaView): QuotaSnapshot {
   };
 }
 
-export function resolveMaxInputBytes(configured: string | undefined): number {
-  return Math.min(
-    resolvePositiveSafeInteger(configured, MAX_NORMALIZED_INPUT_BYTES),
-    MAX_TOKENIZATION_RPC_INPUT_BYTES,
-  );
-}
-
 export function resolveMaxInFlightRequests(configured: string | undefined): number {
   return resolvePositiveSafeInteger(configured, 2);
 }
@@ -146,6 +145,8 @@ type ResourceStageFields = {
   readonly concurrency?: number;
   readonly quotaReserved?: boolean;
   readonly upstreamReached?: boolean;
+  readonly tokenizationProvider?: TokenizationProvider;
+  readonly tokenizationFailureCategory?: TokenizationFailureCategory;
 };
 
 function revisionIdOf(env: Env): string {
@@ -186,6 +187,8 @@ function finishResourceStage(
     ...(fields.concurrency === undefined ? {} : { concurrency: fields.concurrency }),
     ...(fields.quotaReserved === undefined ? {} : { quotaReserved: fields.quotaReserved }),
     ...(fields.upstreamReached === undefined ? {} : { upstreamReached: fields.upstreamReached }),
+    ...(fields.tokenizationProvider === undefined ? {} : { tokenizationProvider: fields.tokenizationProvider }),
+    ...(fields.tokenizationFailureCategory === undefined ? {} : { tokenizationFailureCategory: fields.tokenizationFailureCategory }),
   };
   emitResourceStage({
     event: "octg.resource_stage",
@@ -256,7 +259,10 @@ export async function handleProxy(
       ? parsedIdempotencyKey.value
       : undefined;
 
-    const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
+    const maxInputBytes = Math.min(
+      resolveMaxInputBytes(env.MAX_INPUT_BYTES),
+      MAX_TOKENIZATION_RPC_INPUT_BYTES,
+    );
     const bodyReadStartedAt = startResourceStage(env, requestId, "body_read");
     const parseStartedAt = startResourceStage(env, requestId, "parse");
     let parsedBody;
@@ -312,17 +318,17 @@ export async function handleProxy(
     finishResourceStage(
       env,
       requestId,
-    "normalize",
-    normalizeStartedAt,
-    normalized.ok ? "success" : "rejected",
-    normalized.ok
-      ? {
-          inputBytes: normalized.value.inputBytes,
-          inputTextBytes: normalized.value.inputTextBytes,
-          opaqueInputBytes: normalized.value.opaqueInputBytes,
-        }
-      : {},
-  );
+      "normalize",
+      normalizeStartedAt,
+      normalized.ok ? "success" : "rejected",
+      normalized.ok
+        ? {
+            inputBytes: normalized.value.inputBytes,
+            inputTextBytes: normalized.value.inputTextBytes,
+            opaqueInputBytes: normalized.value.opaqueInputBytes,
+          }
+        : {},
+    );
     if (!normalized.ok) {
       if (normalized.error === "input_too_large") return errorResponse(errInputTooLarge(requestId));
       if (normalized.error === "non_text") return errorResponse(errNonTextInput(requestId));
@@ -373,12 +379,13 @@ export async function handleProxy(
     const snapshot = snapshotOf(before);
 
     const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
-    const tokenizeOutcome = await routeTokenization({
+    const tokenizeOutcome: RoutedTokenizationOutcome = await routeTokenization({
       config: denoTokenizerConfig,
       namespace: env.TOKENIZER_CONTROLLER,
       request: {
         requestId,
         inputText: requestData.inputText,
+        inputTextBytes: requestData.inputTextBytes,
         messageCount: requestData.messageCount,
         opaqueInputBytes: requestData.opaqueInputBytes,
       },
@@ -397,6 +404,7 @@ export async function handleProxy(
           opaqueInputBytes: requestData.opaqueInputBytes,
           quotaReserved: false,
           upstreamReached: false,
+          tokenizationProvider: tokenizeOutcome.provider,
         });
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errRequestTooLarge(snapshot, requestId));
@@ -408,6 +416,8 @@ export async function handleProxy(
           opaqueInputBytes: requestData.opaqueInputBytes,
           quotaReserved: false,
           upstreamReached: false,
+          tokenizationProvider: tokenizeOutcome.provider,
+          tokenizationFailureCategory: tokenizeOutcome.failureCategory,
         });
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));
@@ -429,6 +439,7 @@ export async function handleProxy(
         inputTextBytes: requestData.inputTextBytes,
         opaqueInputBytes: requestData.opaqueInputBytes,
         estimationPath: tokenizedResult.estimationPath,
+        tokenizationProvider: tokenizeOutcome.provider,
       });
     };
     switch (budget.kind) {
@@ -439,6 +450,7 @@ export async function handleProxy(
           inputTextBytes: requestData.inputTextBytes,
           opaqueInputBytes: requestData.opaqueInputBytes,
           estimationPath: tokenizedResult.estimationPath,
+          tokenizationProvider: tokenizeOutcome.provider,
           quotaReserved: false,
           upstreamReached: false,
         });

@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TokenizeRequest } from "@octg/tokenizer-controller/contracts";
 import { routeTokenization } from "../src/tokenization-routing";
 import type { TokenizerNamespace } from "../src/tokenizer";
 
-const request: TokenizeRequest = {
+const request = {
   requestId: "req_route",
   inputText: "hello",
+  inputTextBytes: 5,
   messageCount: 1,
   opaqueInputBytes: 11,
-};
+} as const;
 
 const enabledConfig = {
   kind: "enabled",
@@ -64,6 +64,7 @@ describe("routeTokenization", () => {
 
     expect(outcome).toEqual({
       kind: "resolved",
+      provider: "deno",
       result: { estimatedInputTokens: 20, estimationPath: "exact_bpe" },
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -86,6 +87,7 @@ describe("routeTokenization", () => {
 
     expect(outcome).toEqual({
       kind: "resolved",
+      provider: "cloudflare_do",
       result: { estimatedInputTokens: 9, estimationPath: "exact_bpe" },
     });
     expect(fetchImpl).not.toHaveBeenCalled();

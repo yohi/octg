@@ -1,11 +1,10 @@
 import { env, SELF } from "cloudflare:test";
 import type { TokenizerController } from "@octg/tokenizer-controller";
+import { MAX_BPE_WORK_UNITS } from "@octg/tokenizer-controller/contracts";
 import {
-  MAX_BPE_WORK_UNITS,
   MAX_INPUT_TEXT_BYTES,
-} from "@octg/tokenizer-controller/contracts";
-import {
   MAX_NORMALIZED_INPUT_BYTES,
+  resolveMaxInputBytes,
   safetyMargin,
   type InFlightLease,
 } from "@octg/shared";
@@ -15,7 +14,6 @@ import {
   releaseInFlightBestEffort,
   resolveInFlightLeaseRenewalMs,
   resolveInFlightLeaseTtlMs,
-  resolveMaxInputBytes,
 } from "../src/proxy";
 import { estimateRpcPayloadSize } from "../src/tokenizer";
 import type { InFlightLeaseReleaser } from "../src/proxy";
@@ -462,6 +460,39 @@ describe("proxy failure paths", () => {
       uncertainTokens: before.uncertainTokens,
       requestCount: before.requestCount,
     });
+  });
+
+  it("records the tokenizer provider on token budget arithmetic errors", async () => {
+    const realController = stub();
+    const before = await realController.getState();
+    const controller = {
+      getState: vi.fn().mockResolvedValue({ ...before, remaining: Number.NaN }),
+    } as unknown as DurableObjectStub<QuotaController>;
+    vi.spyOn(env.QUOTA_CONTROLLER, "get").mockReturnValue(controller);
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    let upstreamCallCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      upstreamCallCount += 1;
+      return new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 });
+    });
+
+    const response = await request();
+    const resourceEvents = consoleInfo.mock.calls
+      .map(([event]) => event)
+      .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null);
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("X-OCTG-Route")).toBe("error:internal_error");
+    expect(upstreamCallCount).toBe(0);
+    expect(resourceEvents).toContainEqual(expect.objectContaining({
+      stage: "tokenize",
+      phase: "finish",
+      outcome: "exception",
+      route: "error:arithmetic_error",
+      tokenizationProvider: "cloudflare_do",
+      quotaReserved: false,
+      upstreamReached: false,
+    }));
   });
 
   it("maps a real tokenizer work-limit RPC result to 413 before reservation", async () => {
