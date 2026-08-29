@@ -1,0 +1,75 @@
+name: Deploy Deno Tokenizer
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - apps/deno-tokenizer/**
+      - packages/shared/**
+      - .github/workflows/deploy-deno-tokenizer.yml
+  pull_request:
+    branches: [master]
+    paths:
+      - apps/deno-tokenizer/**
+      - packages/shared/**
+      - .github/workflows/deploy-deno-tokenizer.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Deno tokenizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/deno-tokenizer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+          cache: true
+
+      - name: Typecheck
+        run: deno task check
+
+      - name: Unit tests
+        run: deno task test
+
+  deploy:
+    name: Deploy to Deno Deploy
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: deno-production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DENO_DEPLOY_PROJECT: ${{ vars.DENO_DEPLOY_PROJECT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify project configuration
+        run: |
+          if [[ -z "$DENO_DEPLOY_PROJECT" ]]; then
+            echo "::error::GitHub Environment variable DENO_DEPLOY_PROJECT is not configured"
+            exit 2
+          fi
+
+      - name: Deploy
+        uses: denoland/deployctl@v1
+        with:
+          project: ${{ env.DENO_DEPLOY_PROJECT }}
+          entrypoint: apps/deno-tokenizer/src/main.ts
+          root: .
+          include: |
+            apps/deno-tokenizer
+            packages/shared/src

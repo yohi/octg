@@ -6,6 +6,7 @@
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "test:ci-smoke": "bash scripts/ci-smoke-test.test.sh",
+    "test:deno-deploy-workflow": "bash scripts/deno-deploy-workflow.test.sh",
     "test:preview-workflow": "bash scripts/preview-workflow.test.sh && node scripts/preview-d1-resolver.test.mjs && node scripts/preview-quota-validator.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "seed:client": "node scripts/seed-client.mjs",
