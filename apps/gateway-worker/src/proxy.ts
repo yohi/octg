@@ -450,6 +450,7 @@ export async function handleProxy(
           inputTextBytes: requestData.inputTextBytes,
           opaqueInputBytes: requestData.opaqueInputBytes,
           estimationPath: tokenizedResult.estimationPath,
+          tokenizationProvider: tokenizeOutcome.provider,
           quotaReserved: false,
           upstreamReached: false,
         });
