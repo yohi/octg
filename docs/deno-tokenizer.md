@@ -33,7 +33,9 @@ Gateway Worker
 
 ### 1.2 Deno Deploy Deployment
 
-The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external build step.
+The Deno tokenizer runtime entrypoint remains `apps/deno-tokenizer/src/main.ts`.
+The repository-root `deno.json` controls the deployment manifest and includes
+the tokenizer app together with `packages/shared/src`.
 
 1. **Recommended: GitHub Actions**:
    - Create the Deno Deploy app in the current Deno Deploy console. Deno Deploy
@@ -46,35 +48,53 @@ The Deno tokenizer is a single-file entrypoint (`src/main.ts`) with no external 
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
      `deno install`, `deno task check`, and `deno task test` for pull requests and
      deploys only after those checks pass on a push to `master`.
-   - The workflow runs `deno deploy --prod --json --non-interactive` from
-     `apps/deno-tokenizer`; the CLI reads the organization and application from
-     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP`.
+   - The workflow runs `deno deploy --prod --json --non-interactive` from the
+     repository root. Immediately before deployment it injects the non-secret
+     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the ephemeral root
+     `deno.json`; `DENO_DEPLOY_TOKEN` is never written to that file.
 
 2. **Push to Git** (if using Deno Deploy's integrated Git deployment instead):
    ```bash
-   git add apps/deno-tokenizer/
+   git add deno.json apps/deno-tokenizer/ packages/shared/src/
    git commit -m "feat(deno-tokenizer): add standalone BPE service"
    git push
    ```
 
 3. **Configure the Deno Deploy app**:
    - Go to [Deno Deploy console](https://console.deno.com/).
-   - Create an app and configure `apps/deno-tokenizer` as its application directory.
-   - Set the entrypoint to `src/main.ts`.
+   - Create an app and configure the repository root as its application directory.
+   - Set the entrypoint to `apps/deno-tokenizer/src/main.ts`.
+   - Ensure the deployment uses the checked-in root `deno.json` manifest, which
+     includes `apps/deno-tokenizer/**` and `packages/shared/src/**`.
    - Add environment variables (see §1.3).
    - Deploy.
 
 4. **Manual Deploy (without GitHub Actions)**:
    ```bash
-   cd apps/deno-tokenizer
+   # Run these commands from the repository root.
    printf 'Deno Deploy access token: '
    read -r -s DENO_DEPLOY_TOKEN
    printf '\n'
    export DENO_DEPLOY_TOKEN
+   export DENO_DEPLOY_ORG="your-org"
+   export DENO_DEPLOY_APP="your-app"
+   node <<'NODE'
+   const fs = require("node:fs");
+   const path = "deno.json";
+   const config = JSON.parse(fs.readFileSync(path, "utf8"));
+   config.deploy.org = process.env.DENO_DEPLOY_ORG;
+   config.deploy.app = process.env.DENO_DEPLOY_APP;
+   fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+   NODE
    deno deploy \
-     --org=<your-org> --app=<your-app> --prod --non-interactive
+     --prod --json --non-interactive
    unset DENO_DEPLOY_TOKEN
+   unset DENO_DEPLOY_ORG DENO_DEPLOY_APP
    ```
+
+   The preparation command changes only the local checkout. Use a clean
+   checkout or remove the two generated `deploy` identity fields before
+   committing unrelated changes.
 
 ### 1.3 Environment Variables
 

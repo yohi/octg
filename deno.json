@@ -1,0 +1,13 @@
+{
+  "deploy": {
+    "include": [
+      "./deno.json",
+      "./apps/deno-tokenizer/**",
+      "./packages/shared/src/**"
+    ],
+    "runtime": {
+      "type": "dynamic",
+      "entrypoint": "./apps/deno-tokenizer/src/main.ts"
+    }
+  }
+}
