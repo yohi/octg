@@ -4,12 +4,14 @@ on:
   push:
     branches: [master]
     paths:
+      - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
       - .github/workflows/deploy-deno-tokenizer.yml
   pull_request:
     branches: [master]
     paths:
+      - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
       - .github/workflows/deploy-deno-tokenizer.yml
@@ -59,7 +61,6 @@ jobs:
     env:
       DENO_DEPLOY_ORG: ${{ vars.DENO_DEPLOY_ORG }}
       DENO_DEPLOY_APP: ${{ vars.DENO_DEPLOY_APP }}
-      DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,14 +81,35 @@ jobs:
             echo "::error::DENO_DEPLOY_ORG and DENO_DEPLOY_APP must be configured"
             exit 2
           fi
+      - name: Prepare Deno Deploy configuration
+        working-directory: .
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = "deno.json";
+          const config = JSON.parse(fs.readFileSync(path, "utf8"));
+          if (!config.deploy || typeof config.deploy !== "object") {
+            throw new Error("deno.json must contain a deploy configuration");
+          }
+          const org = process.env.DENO_DEPLOY_ORG;
+          const app = process.env.DENO_DEPLOY_APP;
+          if (!org || !app) {
+            throw new Error("DENO_DEPLOY_ORG and DENO_DEPLOY_APP must be configured");
+          }
+          config.deploy.org = org;
+          config.deploy.app = app;
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Deploy
+        working-directory: .
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+        run: |
           if [[ -z "$DENO_DEPLOY_TOKEN" ]]; then
             echo "::error::DENO_DEPLOY_TOKEN is not configured"
             exit 2
           fi
-
-      - name: Deploy
-        working-directory: apps/deno-tokenizer
-        run: |
           deno deploy \
             --prod \
             --json \

@@ -13,7 +13,7 @@ if ! ruby -ryaml -e '' >/dev/null 2>&1; then
   exit 2
 fi
 
-ruby -ryaml - "$workflow" <<'RUBY'
+ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
 def fail_contract(message)
@@ -59,6 +59,7 @@ unless pull_request["branches"] == ["master"]
 end
 
 required_paths = [
+  "deno.json",
   "apps/deno-tokenizer/**",
   "packages/shared/**",
   ".github/workflows/deploy-deno-tokenizer.yml",
@@ -155,7 +156,6 @@ end
 expected_env = {
   "DENO_DEPLOY_ORG" => "${{ vars.DENO_DEPLOY_ORG }}",
   "DENO_DEPLOY_APP" => "${{ vars.DENO_DEPLOY_APP }}",
-  "DENO_DEPLOY_TOKEN" => "${{ secrets.DENO_DEPLOY_TOKEN }}",
 }
 deploy_env = require_mapping(deploy["env"], "jobs.deploy.env")
 expected_env.each do |name, value|
@@ -164,10 +164,33 @@ expected_env.each do |name, value|
   end
 end
 
+jobs.each do |job_name, raw_job|
+  job = require_mapping(raw_job, "jobs.#{job_name}")
+  require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
+    next unless step.is_a?(Hash)
+    next if job_name == "deploy" && step["name"] == "Deploy"
+
+    step_env = step["env"]
+    next unless step_env.is_a?(Hash)
+    if step_env.key?("DENO_DEPLOY_TOKEN")
+      fail_contract("jobs.#{job_name}.steps[#{index}] must not define DENO_DEPLOY_TOKEN")
+    end
+  end
+end
+
+if deploy_env.key?("DENO_DEPLOY_TOKEN")
+  fail_contract("DENO_DEPLOY_TOKEN must be scoped to the Deploy step")
+end
+
 deploy_step = deploy_steps.find { |step| step.is_a?(Hash) && step["name"] == "Deploy" }
 fail_contract('jobs.deploy must have a named "Deploy" step') unless deploy_step
-unless deploy_step["working-directory"] == "apps/deno-tokenizer"
-  fail_contract('the "Deploy" step must run from apps/deno-tokenizer')
+deploy_step_index = deploy_steps.index(deploy_step)
+deploy_step_env = require_mapping(deploy_step["env"], 'the "Deploy" step env')
+unless deploy_step_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
+  fail_contract('the "Deploy" step must map DENO_DEPLOY_TOKEN to the environment secret')
+end
+unless deploy_step["working-directory"] == "."
+  fail_contract('the "Deploy" step must run from repository root "."')
 end
 
 deploy_run = deploy_step["run"].to_s
@@ -193,6 +216,63 @@ end
 
 if deploy_run.match?(/\bdeno\s+deploy\s+\./)
   fail_contract('the "Deploy" step must not pass a positional root path to deno deploy')
+end
+
+identity_step = deploy_steps.find do |step|
+  step.is_a?(Hash) && step["name"] == "Prepare Deno Deploy configuration"
+end
+fail_contract('jobs.deploy must prepare the Deno Deploy configuration') unless identity_step
+identity_step_index = deploy_steps.index(identity_step)
+unless identity_step_index < deploy_step_index
+  fail_contract('the configuration step must run before "Deploy"')
+end
+identity_run = identity_step["run"].to_s
+unless identity_step["working-directory"] == "."
+  fail_contract('the configuration step must run from repository root "."')
+end
+[
+  "DENO_DEPLOY_ORG",
+  "DENO_DEPLOY_APP",
+  "deploy.org",
+  "deploy.app",
+].each do |fragment|
+  unless identity_run.include?(fragment)
+    fail_contract("the configuration step is missing: #{fragment}")
+  end
+end
+if identity_run.include?("DENO_DEPLOY_TOKEN")
+  fail_contract("the configuration step must not write DENO_DEPLOY_TOKEN")
+end
+
+begin
+  deploy_config = JSON.parse(File.read("deno.json"))
+rescue StandardError => error
+  fail_contract("invalid root deno.json: #{error.message}")
+end
+
+deploy_config = require_mapping(deploy_config["deploy"], "deno.json.deploy")
+if deploy_config.key?("org") || deploy_config.key?("app")
+  fail_contract("root deno.json must not hard-code Deno Deploy identity")
+end
+include_paths = deploy_config["include"]
+fail_contract("deno.json.deploy.include must be a list") unless include_paths.is_a?(Array)
+
+required_deploy_paths = [
+  "./deno.json",
+  "./apps/deno-tokenizer/**",
+  "./packages/shared/src/**",
+]
+missing_deploy_paths = required_deploy_paths - include_paths
+unless missing_deploy_paths.empty?
+  fail_contract("deno.json.deploy.include is missing: #{missing_deploy_paths.join(", ")}")
+end
+
+runtime = require_mapping(deploy_config["runtime"], "deno.json.deploy.runtime")
+unless runtime["type"] == "dynamic"
+  fail_contract('deno.json.deploy.runtime.type must be "dynamic"')
+end
+unless runtime["entrypoint"] == "./apps/deno-tokenizer/src/main.ts"
+  fail_contract('deno.json.deploy.runtime.entrypoint must be ./apps/deno-tokenizer/src/main.ts')
 end
 
 jobs.each do |job_name, raw_job|
