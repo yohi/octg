@@ -9,10 +9,10 @@
 - Pull Request では Deno の型検査とテストだけを実行する。
 - `master` への push では、同じ検証が成功した場合だけ Production デプロイを実行する。
 - `apps/deno-tokenizer/**`、`packages/shared/**`、workflow 自身の変更だけをトリガーにする。
-- `denoland/deployctl@v1` と GitHub OIDC (`id-token: write`) を使用し、長期保存する Deno API token は使用しない。
-- Deno Deploy のプロジェクト名は Environment Variable `DENO_DEPLOY_PROJECT` として保持する。
+- Deno 2.x の `deno deploy` CLI と `DENO_DEPLOY_TOKEN` を使用する。`deployctl` は Deno Deploy Classic 用のため使用しない。
+- Deno Deploy の組織名とアプリ名は Environment Variables `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` として保持する。
 - `OCTG_TOKENIZER_AUTH_TOKEN` などの実行時 Secret は Deno Deploy 側で管理し、GitHub Actions へ渡さない。
-- リポジトリルートを upload root とし、Deno app から参照する `packages/shared/src` を deploy payload に含める。
+- `apps/deno-tokenizer` を deploy root とし、Deno CLI のローカル依存解決に任せる。
 
 ## 対象外
 
@@ -23,6 +23,6 @@
 ## 成功条件
 
 - PR で `deno task check` と `deno task test` が実行される。
-- `master` push では検証成功後に `denoland/deployctl@v1` が `apps/deno-tokenizer/src/main.ts` をデプロイする。
-- Production プロジェクト名が未設定の場合、デプロイ前に明示的なエラーで停止する。
-- GitHub Actions の権限は `contents: read` とデプロイ job の `id-token: write` に限定される。
+- `master` push では検証成功後に `deno deploy` が `apps/deno-tokenizer` を Production アプリへデプロイする。
+- Production の組織名、アプリ名、access token が未設定の場合、デプロイ前に明示的なエラーで停止する。
+- GitHub Actions の権限は `contents: read` に限定し、Deno access token は `deno-production` Environment Secret で管理する。

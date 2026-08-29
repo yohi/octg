@@ -16,18 +16,31 @@ required_patterns=(
   'denoland/setup-deno@'
   'deno task check'
   'deno task test'
-  'id-token: write'
-  'denoland/deployctl@v1'
-  'apps/deno-tokenizer/src/main.ts'
-  'DENO_DEPLOY_PROJECT'
+  'deno deploy .'
+  '--org "$DENO_DEPLOY_ORG"'
+  '--app "$DENO_DEPLOY_APP"'
+  '--prod'
+  'DENO_DEPLOY_ORG'
+  'DENO_DEPLOY_APP'
+  'DENO_DEPLOY_TOKEN'
   'environment: deno-production'
 )
 
 for pattern in "${required_patterns[@]}"; do
-  if ! grep -Fq "$pattern" "$workflow"; then
+  if ! grep -Fq -- "$pattern" "$workflow"; then
     printf 'workflow contract missing: %s\n' "$pattern" >&2
     exit 1
   fi
 done
+
+if grep -Fq 'denoland/deployctl@' "$workflow"; then
+  printf 'workflow contract uses retired deployctl action\n' >&2
+  exit 1
+fi
+
+if grep -Fq 'id-token: write' "$workflow"; then
+  printf 'workflow contract uses obsolete Deno Deploy OIDC permission\n' >&2
+  exit 1
+fi
 
 printf 'Deno Deploy workflow contract: ok\n'

@@ -4,14 +4,14 @@
 
 **Goal:** Add a gated GitHub Actions workflow that validates and deploys the Deno tokenizer to its configured Deno Deploy production project.
 
-**Architecture:** Keep Deno deployment in a dedicated workflow. Pull requests run Deno checks only; pushes to `master` run the same checks and then use `denoland/deployctl@v1` with GitHub OIDC to deploy the monorepo entrypoint. Runtime secrets remain in Deno Deploy and are not exposed to Actions.
+**Architecture:** Keep Deno deployment in a dedicated workflow. Pull requests run Deno checks only; pushes to `master` run the same checks and then use the Deno 2.x `deno deploy` CLI with a GitHub Environment access token. Runtime secrets remain in Deno Deploy and are not exposed to Actions.
 
-**Tech Stack:** GitHub Actions, Deno 2.x, `denoland/setup-deno@v2`, `denoland/deployctl@v1`, Deno Deploy GitHub Actions deployment mode.
+**Tech Stack:** GitHub Actions, Deno 2.x, `denoland/setup-deno@v2`, `deno deploy`, Deno Deploy current platform.
 
 ## Global Constraints
 
 - Production and Preview control planes must remain separate.
-- `OCTG_TOKENIZER_AUTH_TOKEN` must not be committed or passed through workflow logs.
+- `OCTG_TOKENIZER_AUTH_TOKEN` and `DENO_DEPLOY_TOKEN` must not be committed or passed through workflow logs.
 - The Deno app imports `packages/shared/src` through `apps/deno-tokenizer/deno.json`.
 - Existing Cloudflare Worker workflows must remain unchanged.
 - Deploy only after `deno task check` and `deno task test` succeed.
@@ -24,12 +24,12 @@
 - Create: `.github/workflows/deploy-deno-tokenizer.yml`
 
 **Interfaces:**
-- Consumes: GitHub Environment `deno-production`, with non-secret variable `DENO_DEPLOY_PROJECT`.
+- Consumes: GitHub Environment `deno-production`, with variables `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` and Secret `DENO_DEPLOY_TOKEN`.
 - Produces: PR validation and `master` push deployment for `apps/deno-tokenizer/src/main.ts`.
 
 - [ ] **Step 1: Write the workflow**
 
-Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.x`, run `deno task check` and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `id-token: write`, `contents: read`, and `environment: deno-production`. Fail before the action when `DENO_DEPLOY_PROJECT` is empty. Configure `denoland/deployctl@v1` with repository root `.`, entrypoint `apps/deno-tokenizer/src/main.ts`, and include paths for `apps/deno-tokenizer` and `packages/shared/src`.
+Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.x`, run `deno task check` and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy . --org ... --app ... --prod --json --non-interactive` from `apps/deno-tokenizer`.
 
 - [ ] **Step 2: Run the repository checks**
 
@@ -45,14 +45,14 @@ Expected: Both commands pass without requiring any deployment credential.
 
 **Interfaces:**
 - Consumes: `.github/workflows/deploy-deno-tokenizer.yml`.
-- Produces: Setup instructions for the `deno-production` Environment and `DENO_DEPLOY_PROJECT` variable.
+- Produces: Setup instructions for the `deno-production` Environment variables and `DENO_DEPLOY_TOKEN` Secret.
 
 - [ ] **Step 1: Document environment provisioning**
 
-Document that the Deno Deploy project must be linked to the repository in GitHub Actions deployment mode, that the GitHub Environment `deno-production` needs the `DENO_DEPLOY_PROJECT` variable, and that the Deno Deploy runtime Secret remains configured in Deno Deploy. State that PRs validate only and `master` pushes deploy after checks.
+Document that the current Deno Deploy app must exist, that the GitHub Environment `deno-production` needs `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` variables and `DENO_DEPLOY_TOKEN` Secret, and that `OCTG_TOKENIZER_AUTH_TOKEN` remains configured in Deno Deploy. State that PRs validate only and `master` pushes deploy after checks.
 
 - [ ] **Step 2: Verify documentation references**
 
-Run: `grep -n "deploy-deno-tokenizer\|DENO_DEPLOY_PROJECT\|deno-production" README.md docs/deno-tokenizer.md .github/workflows/deploy-deno-tokenizer.yml`.
+Run: `grep -n "deploy-deno-tokenizer\|DENO_DEPLOY_APP\|DENO_DEPLOY_TOKEN\|deno-production" README.md docs/deno-tokenizer.md .github/workflows/deploy-deno-tokenizer.yml`.
 
 Expected: All required setup names appear in the workflow documentation.
