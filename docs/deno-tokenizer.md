@@ -34,8 +34,10 @@ Gateway Worker
 ### 1.2 Deno Deploy Deployment
 
 The Deno tokenizer runtime entrypoint remains `apps/deno-tokenizer/src/main.ts`.
-The repository-root `deno.json` controls the deployment manifest and includes
-the tokenizer app together with `packages/shared/src`.
+The repository-root `deno.json` controls the deployment manifest. It uploads only
+`./deno.json`, `apps/deno-tokenizer/src/**`, and `packages/shared/src/**`; npm
+workspace manifests are intentionally excluded so Deno Deploy resolves npm
+dependencies through Deno's global cache instead of an uploaded `node_modules` tree.
 
 1. **Recommended: GitHub Actions**:
    - Create the Deno Deploy app in the current Deno Deploy console. Deno Deploy
@@ -69,8 +71,10 @@ the tokenizer app together with `packages/shared/src`.
    - Go to [Deno Deploy console](https://console.deno.com/).
    - Create an app and configure the repository root as its application directory.
    - Set the entrypoint to `apps/deno-tokenizer/src/main.ts`.
-   - Ensure the deployment uses the checked-in root `deno.json` manifest, which
-     includes `apps/deno-tokenizer/**` and `packages/shared/src/**`.
+   - Ensure the deployment uses the checked-in root `deno.json` manifest. Its
+     `deploy.include` entries are `./deno.json`, `apps/deno-tokenizer/src/**`, and
+     `packages/shared/src/**`; do not add `package.json` or `package-lock.json` to
+     the Deploy artifact.
    - Add environment variables (see §1.3).
    - Deploy.
 

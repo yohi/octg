@@ -7,12 +7,9 @@
     "tiktoken/encoders/o200k_base": "npm:tiktoken@1.0.22/encoders/o200k_base"
   },
   "deploy": {
-    "install": "npm install",
     "include": [
       "./deno.json",
-      "./package.json",
-      "./package-lock.json",
-      "./apps/deno-tokenizer/**",
+      "./apps/deno-tokenizer/src/**",
       "./packages/shared/src/**"
     ],
     "runtime": {

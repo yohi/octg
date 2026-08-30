@@ -351,8 +351,9 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
   `deploy-deno` ラベルを付けると同じ経路を起動できます（fork PR は対象外）。これにより
   master へマージする前に Deno Deploy の revision build / warmup まで検証できます。
   検証は `apps/deno-tokenizer` から実行し、Deploy は
-  repository root の `deno.json` manifest（`apps/deno-tokenizer/**` と
-  `packages/shared/src/**` を含む）を使用します。GitHub Environment `deno-production` には
+  repository root の `deno.json` manifest（`./deno.json`、
+  `apps/deno-tokenizer/src/**`、`packages/shared/src/**` のみを upload 対象とし、
+  `package.json` / `package-lock.json` は含めない）を使用します。GitHub Environment `deno-production` には
   `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` と
   Secret `DENO_DEPLOY_TOKEN` を設定します。現行の `deno deploy` CLI を使用し、Classic の
   `deployctl` は使用しません。

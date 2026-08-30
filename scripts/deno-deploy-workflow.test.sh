@@ -28,11 +28,6 @@ if ! ruby -rjson -e 'config = JSON.parse(File.read("apps/deno-tokenizer/package.
   exit 1
 fi
 
-if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); install = config.dig("deploy", "install"); exit(install.to_s == "npm install" ? 0 : 1)'; then
-  printf 'Deno Deploy contract violation: deno.json must configure npm install for Deploy\n' >&2
-  exit 1
-fi
-
 ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
@@ -45,16 +40,6 @@ begin
   deploy_config = JSON.parse(File.read("deno.json"))
 rescue StandardError => error
   fail_contract("invalid deno.json: #{error.message}")
-end
-
-deploy_includes = deploy_config.dig("deploy", "include")
-unless deploy_includes.is_a?(Array)
-  fail_contract("deno.json deploy.include must be a list")
-end
-%w[./package.json ./package-lock.json].each do |required_file|
-  unless deploy_includes.include?(required_file)
-    fail_contract("deno.json deploy.include is missing: #{required_file}")
-  end
 end
 
 def require_mapping(value, name)
@@ -302,12 +287,21 @@ fail_contract("deno.json.deploy.include must be a list") unless include_paths.is
 
 required_deploy_paths = [
   "./deno.json",
-  "./apps/deno-tokenizer/**",
+  "./apps/deno-tokenizer/src/**",
   "./packages/shared/src/**",
 ]
 missing_deploy_paths = required_deploy_paths - include_paths
 unless missing_deploy_paths.empty?
   fail_contract("deno.json.deploy.include is missing: #{missing_deploy_paths.join(", ")}")
+end
+forbidden_deploy_paths = [
+  "./package.json",
+  "./package-lock.json",
+  "./apps/deno-tokenizer/package.json",
+]
+present_forbidden_paths = forbidden_deploy_paths & include_paths
+unless present_forbidden_paths.empty?
+  fail_contract("deno.json.deploy.include must not contain: #{present_forbidden_paths.join(", ")}")
 end
 
 runtime = require_mapping(deploy_config["runtime"], "deno.json.deploy.runtime")
