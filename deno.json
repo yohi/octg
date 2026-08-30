@@ -1,4 +1,5 @@
 {
+  "nodeModulesDir": "auto",
   "imports": {
     "@octg/shared": "./packages/shared/src/index.ts",
     "tiktoken/lite/init": "npm:tiktoken@1.0.22/lite/init",

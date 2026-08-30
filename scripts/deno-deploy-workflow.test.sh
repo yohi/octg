@@ -18,6 +18,11 @@ if rg -n '^(import|export) .* from "\./[^"./]+";' packages/shared/src; then
   exit 1
 fi
 
+if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); exit(config["nodeModulesDir"] == "auto" ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: deno.json must set nodeModulesDir to auto\n' >&2
+  exit 1
+fi
+
 ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
