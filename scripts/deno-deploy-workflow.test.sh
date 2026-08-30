@@ -23,6 +23,11 @@ if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); exit(config["n
   exit 1
 fi
 
+if ! ruby -rjson -e 'config = JSON.parse(File.read("apps/deno-tokenizer/package.json")); exit(config.dig("dependencies", "tiktoken") == "1.0.22" ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: apps/deno-tokenizer/package.json must declare tiktoken 1.0.22\n' >&2
+  exit 1
+fi
+
 if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); install = config.dig("deploy", "install"); exit(install.to_s.include?("deno install") ? 0 : 1)'; then
   printf 'Deno Deploy contract violation: deno.json must configure a deploy install command\n' >&2
   exit 1
