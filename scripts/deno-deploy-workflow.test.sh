@@ -41,6 +41,22 @@ def fail_contract(message)
   exit 1
 end
 
+begin
+  deploy_config = JSON.parse(File.read("deno.json"))
+rescue StandardError => error
+  fail_contract("invalid deno.json: #{error.message}")
+end
+
+deploy_includes = deploy_config.dig("deploy", "include")
+unless deploy_includes.is_a?(Array)
+  fail_contract("deno.json deploy.include must be a list")
+end
+%w[./package.json ./package-lock.json].each do |required_file|
+  unless deploy_includes.include?(required_file)
+    fail_contract("deno.json deploy.include is missing: #{required_file}")
+  end
+end
+
 def require_mapping(value, name)
   fail_contract("#{name} must be a mapping") unless value.is_a?(Hash)
   value
