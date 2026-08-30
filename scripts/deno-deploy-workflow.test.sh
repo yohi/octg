@@ -23,6 +23,11 @@ if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); exit(config["n
   exit 1
 fi
 
+if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); install = config.dig("deploy", "install"); exit(install.to_s.include?("deno install") ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: deno.json must configure a deploy install command\n' >&2
+  exit 1
+fi
+
 ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
