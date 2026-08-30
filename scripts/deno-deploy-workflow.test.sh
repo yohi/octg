@@ -28,8 +28,8 @@ if ! ruby -rjson -e 'config = JSON.parse(File.read("apps/deno-tokenizer/package.
   exit 1
 fi
 
-if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); install = config.dig("deploy", "install"); exit(install.to_s.include?("deno install") ? 0 : 1)'; then
-  printf 'Deno Deploy contract violation: deno.json must configure a deploy install command\n' >&2
+if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); install = config.dig("deploy", "install"); exit(install.to_s == "npm install" ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: deno.json must configure npm install for Deploy\n' >&2
   exit 1
 fi
 

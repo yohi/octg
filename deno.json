@@ -7,7 +7,7 @@
     "tiktoken/encoders/o200k_base": "npm:tiktoken@1.0.22/encoders/o200k_base"
   },
   "deploy": {
-    "install": "deno install --node-modules-dir=auto",
+    "install": "npm install",
     "include": [
       "./deno.json",
       "./apps/deno-tokenizer/**",
