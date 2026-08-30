@@ -1,4 +1,4 @@
-import { MAX_NORMALIZED_INPUT_BYTES } from "./normalize";
+import { MAX_NORMALIZED_INPUT_BYTES } from "./normalize.ts";
 
 export const MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536;
 

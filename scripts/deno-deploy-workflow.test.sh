@@ -13,6 +13,11 @@ if ! ruby -ryaml -e '' >/dev/null 2>&1; then
   exit 2
 fi
 
+if rg -n '^(import|export) .* from "\./[^"./]+";' packages/shared/src; then
+  printf 'Deno Deploy contract violation: shared relative imports must include .ts extensions\n' >&2
+  exit 1
+fi
+
 ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 

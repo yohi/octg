@@ -1,5 +1,5 @@
-import { toPoolLower } from "./pool";
-import type { PoolName } from "./types";
+import { toPoolLower } from "./pool.ts";
+import type { PoolName } from "./types.ts";
 
 export interface QuotaSnapshot {
   pool: PoolName;

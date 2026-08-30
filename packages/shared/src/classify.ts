@@ -1,4 +1,4 @@
-import type { PoolName } from "./types";
+import type { PoolName } from "./types.ts";
 
 export interface RegistryEntry {
   model: string;
