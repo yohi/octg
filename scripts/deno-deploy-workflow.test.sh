@@ -145,6 +145,7 @@ unless deploy_steps.any? { |step| step.is_a?(Hash) && step["uses"].to_s.start_wi
 end
 
 expected_deno_version = "v2.9.6"
+expected_deploy_cli = "deno run -A jsr:@deno/deploy@0.0.9904"
 {"validate" => validate_steps, "deploy" => deploy_steps}.each do |job_name, steps|
   setup_step = steps.find { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("denoland/setup-deno@") }
   setup_with = require_mapping(setup_step["with"], "jobs.#{job_name} denoland/setup-deno.with")
@@ -227,7 +228,7 @@ end
 
 deploy_run = deploy_step["run"].to_s
 [
-  "deno deploy",
+  expected_deploy_cli,
   "--prod",
   "--json",
   "--non-interactive",
@@ -235,6 +236,10 @@ deploy_run = deploy_step["run"].to_s
   unless deploy_run.include?(fragment)
     fail_contract("the \"Deploy\" step is missing: #{fragment}")
   end
+end
+
+if deploy_run.lines.any? { |line| line.match?(/^\s*deno\s+deploy\b/i) }
+  fail_contract('the "Deploy" step must bypass the Deno 2.9.6 wrapper that duplicates passthrough arguments')
 end
 
 [

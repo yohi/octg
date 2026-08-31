@@ -4,9 +4,9 @@
 
 **Goal:** Add a gated GitHub Actions workflow that validates and deploys the Deno tokenizer to its configured Deno Deploy production project.
 
-**Architecture:** Keep Deno deployment in a dedicated workflow. Pull requests run Deno checks only; pushes to `master` run the same checks and then use the Deno 2.x `deno deploy` CLI with a GitHub Environment access token. Runtime secrets remain in Deno Deploy and are not exposed to Actions.
+**Architecture:** Keep Deno deployment in a dedicated workflow. Pull requests run Deno checks only; pushes to `master` run the same checks and then use the pinned `@deno/deploy` CLI implementation with a GitHub Environment access token. Runtime secrets remain in Deno Deploy and are not exposed to Actions.
 
-**Tech Stack:** GitHub Actions, Deno 2.x, `denoland/setup-deno@v2`, `deno deploy`, Deno Deploy current platform.
+**Tech Stack:** GitHub Actions, Deno 2.x, `denoland/setup-deno@v2`, `jsr:@deno/deploy@0.0.9904`, Deno Deploy current platform.
 
 ## Global Constraints
 
@@ -29,7 +29,7 @@
 
 - [ ] **Step 1: Write the workflow**
 
-Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.9.6`, which includes the Deno Deploy workspace-member include fix and deploy CLI cache refresh, run `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy --prod --json --non-interactive` from `apps/deno-tokenizer`; the CLI reads the organization and application from the environment variables.
+Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.9.6`, which includes the Deno Deploy workspace-member include fix and deploy CLI cache refresh, run `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno run -A jsr:@deno/deploy@0.0.9904 --prod --json --non-interactive` from the repository root because the Deno 2.9.6 wrapper duplicates passthrough arguments; the CLI implementation reads the organization and application from the prepared root manifest and environment variables.
 
 - [ ] **Step 2: Run the repository checks**
 

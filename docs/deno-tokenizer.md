@@ -55,8 +55,10 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
      Production deployment path and verifies the Deno Deploy revision build and
      warmup. The workflow can also be started with **Run workflow** when available;
      fork pull requests remain validation-only.
-   - The workflow runs `deno deploy --prod --json --non-interactive` from the
-     repository root. Immediately before deployment it injects the non-secret
+   - The workflow runs the pinned `@deno/deploy@0.0.9904` implementation with
+     `deno run -A jsr:@deno/deploy@0.0.9904 --prod --json --non-interactive`
+     from the repository root. This avoids a Deno 2.9.6 wrapper bug that
+     duplicates passthrough arguments. Immediately before deployment it injects the non-secret
      `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the ephemeral root
      `deno.json`; `DENO_DEPLOY_TOKEN` is never written to that file.
 
@@ -95,7 +97,7 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
    config.deploy.app = process.env.DENO_DEPLOY_APP;
    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
    NODE
-   deno deploy \
+   deno run -A jsr:@deno/deploy@0.0.9904 \
      --prod --json --non-interactive
    unset DENO_DEPLOY_TOKEN
    unset DENO_DEPLOY_ORG DENO_DEPLOY_APP

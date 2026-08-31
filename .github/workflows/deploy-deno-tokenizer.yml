@@ -116,7 +116,8 @@ jobs:
             exit 2
           fi
           set +e
-          deno deploy \
+          # Deno 2.9.6 duplicates passthrough arguments in its deploy wrapper.
+          deno run -A jsr:@deno/deploy@0.0.9904 \
             --prod \
             --json \
             --non-interactive >"$RUNNER_TEMP/deno-deploy.log" 2>&1
