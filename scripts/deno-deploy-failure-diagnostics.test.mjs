@@ -35,6 +35,7 @@ test("ignores unstructured URLs and non-console hints", () => {
 test("classifies bounded build logs without returning their contents", async () => {
   let requestedUrl;
   let requestedAuthorization;
+  let requestedOrganization;
   const body = new ReadableStream({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(
@@ -47,9 +48,11 @@ test("classifies bounded build logs without returning their contents", async () 
   const result = await classifyBuildLogs({
     revision: "opaque-id._~+",
     token: "test-token",
+    organization: "yohi",
     fetchImpl: async (url, init) => {
       requestedUrl = url;
       requestedAuthorization = init?.headers?.authorization;
+      requestedOrganization = init?.headers?.["x-deno-org"];
       return new Response(body, {
         headers: { "content-type": "application/x-ndjson" },
       });
@@ -62,9 +65,10 @@ test("classifies bounded build logs without returning their contents", async () 
   });
   assert.equal(
     requestedUrl,
-    "https://api.deno.com/v2/revisions/opaque-id._~%2B/build_logs",
+    "https://console.deno.com/api/v2/revisions/opaque-id._~%2B/build_logs",
   );
   assert.equal(requestedAuthorization, "Bearer test-token");
+  assert.equal(requestedOrganization, "yohi");
   assert.equal("logs" in result, false);
 });
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 export const MAX_BUILD_LOG_BYTES = 1024 * 1024;
 
 const CONSOLE_ORIGIN = "https://console.deno.com";
+const CONSOLE_API_ORIGIN = `${CONSOLE_ORIGIN}/api/v2`;
 
 export function extractRevision(output) {
   let revision;
@@ -56,6 +57,7 @@ function isValidRevision(value) {
 export async function classifyBuildLogs({
   revision,
   token,
+  organization,
   fetchImpl = fetch,
   maxBytes = MAX_BUILD_LOG_BYTES,
 }) {
@@ -65,13 +67,18 @@ export async function classifyBuildLogs({
 
   let response;
   try {
+    const headers = {
+      accept: "application/x-ndjson",
+      authorization: `Bearer ${token}`,
+    };
+    if (typeof organization === "string" && organization.length > 0) {
+      headers["x-deno-org"] = organization;
+    }
+
     response = await fetchImpl(
-      `https://api.deno.com/v2/revisions/${encodeURIComponent(revision)}/build_logs`,
+      `${CONSOLE_API_ORIGIN}/revisions/${encodeURIComponent(revision)}/build_logs`,
       {
-        headers: {
-          accept: "application/x-ndjson",
-          authorization: `Bearer ${token}`,
-        },
+        headers,
         redirect: "error",
       },
     );
@@ -162,6 +169,7 @@ async function main() {
     const result = await classifyBuildLogs({
       revision: process.env.DENO_DEPLOY_REVISION,
       token: process.env.DENO_DEPLOY_TOKEN,
+      organization: process.env.DENO_DEPLOY_ORG,
     });
 
     if (result.skipped === true) {
