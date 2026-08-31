@@ -140,6 +140,7 @@ function classifyText(text) {
     ["npm", /npm:|\btiktoken\b/i],
     ["module_resolution", /could not find|cannot find|module not found|failed to resolve/i],
     ["entrypoint", /entrypoint/i],
+    ["runtime_configuration", /OCTG_TOKENIZER_AUTH_TOKEN|Invalid Deno tokenizer configuration/i],
     ["lockfile", /lockfile/i],
     ["permission", /permission/i],
     ["network", /network|timeout|timed out|dns/i],

@@ -72,6 +72,21 @@ test("classifies bounded build logs without returning their contents", async () 
   assert.equal("logs" in result, false);
 });
 
+test("classifies a missing tokenizer runtime secret without returning build logs", async () => {
+  const result = await classifyBuildLogs({
+    revision: "revision-id",
+    token: "test-token",
+    fetchImpl: async () => new Response(
+      "Invalid Deno tokenizer configuration: OCTG_TOKENIZER_AUTH_TOKEN is missing\n",
+    ),
+  });
+
+  assert.deepEqual(result, {
+    categories: ["runtime_configuration"],
+    truncated: false,
+  });
+});
+
 test("limits build-log reads to one mebibyte", async () => {
   const result = await classifyBuildLogs({
     revision: "revision-id",
