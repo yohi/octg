@@ -222,7 +222,7 @@ deploy_step_env = require_mapping(deploy_step["env"], 'the "Deploy" step env')
 unless deploy_step_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
   fail_contract('the "Deploy" step must map DENO_DEPLOY_TOKEN to the environment secret')
 end
-unless deploy_step["working-directory"] == "${{ runner.temp }}/deno-deploy-source"
+unless deploy_step["working-directory"] == "${{ github.workspace }}/.deno-deploy-source"
   fail_contract('the "Deploy" step must run from the staged source directory')
 end
 
@@ -333,7 +333,7 @@ if identity_run.include?("DENO_DEPLOY_TOKEN")
   fail_contract("the configuration step must not write DENO_DEPLOY_TOKEN")
 end
 [
-  "RUNNER_TEMP/deno-deploy-source",
+  "GITHUB_WORKSPACE/.deno-deploy-source",
   'cp deno.json',
   'cp -R apps/deno-tokenizer/src',
   'cp -R packages/shared/src',
