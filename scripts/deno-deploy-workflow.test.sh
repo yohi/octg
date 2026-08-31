@@ -294,10 +294,10 @@ if diagnostic_run.match?(/console\.log\([^)]*(?:buildLog|response|text)/)
   fail_contract("the failed revision classifier must not print raw API responses or build logs")
 end
 
-unless deploy_run.include?("node scripts/deno-deploy-failure-diagnostics.mjs extract")
+unless deploy_run.include?("node \"$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs\" extract")
   fail_contract('the "Deploy" step must extract the failed revision with the diagnostics helper')
 end
-unless deploy_run.include?("node scripts/deno-deploy-failure-diagnostics.mjs classify-cli")
+unless deploy_run.include?("node \"$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs\" classify-cli")
   fail_contract('the "Deploy" step must classify CLI failures without printing raw output')
 end
 unless deploy_run.include?("status=$?") && deploy_run.include?("exit \"$status\"")
