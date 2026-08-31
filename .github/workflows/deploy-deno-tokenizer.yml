@@ -104,10 +104,15 @@ jobs:
           config.deploy.app = app;
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
           NODE
+          staging="$RUNNER_TEMP/deno-deploy-source"
+          mkdir -p "$staging/apps/deno-tokenizer" "$staging/packages/shared"
+          cp deno.json "$staging/deno.json"
+          cp -R apps/deno-tokenizer/src "$staging/apps/deno-tokenizer"
+          cp -R packages/shared/src "$staging/packages/shared"
 
       - name: Deploy
         id: deploy
-        working-directory: .
+        working-directory: ${{ runner.temp }}/deno-deploy-source
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
         run: |
