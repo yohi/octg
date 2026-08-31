@@ -101,7 +101,7 @@ export async function classifyBuildLogs({
   }
 
   return {
-    categories: classifyText(readResult.text),
+    categories: classifyText(extractLogMessages(readResult.text)),
     truncated: readResult.truncated,
   };
 }
@@ -129,8 +129,10 @@ export function classifyRuntimeLogs({
       continue;
     }
 
-    if (entry?.revision === revision && typeof entry.body === "string") {
-      bodies.push(entry.body);
+    const entryRevision = entry?.revision_id ?? entry?.revision;
+    const message = entry?.message ?? entry?.body;
+    if (entryRevision === revision && typeof message === "string") {
+      bodies.push(message);
     }
   }
 
@@ -138,6 +140,28 @@ export function classifyRuntimeLogs({
     categories: classifyText(bodies.join("\n")),
     truncated,
   };
+}
+
+function extractLogMessages(output) {
+  const messages = [];
+  let parsedEntries = 0;
+
+  for (const line of output.split(/\r?\n/)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry === null || typeof entry !== "object") continue;
+    parsedEntries += 1;
+    if (typeof entry.message === "string") messages.push(entry.message);
+    if (typeof entry.body === "string") messages.push(entry.body);
+    if (typeof entry.error?.message === "string") messages.push(entry.error.message);
+  }
+
+  return parsedEntries === 0 ? output : messages.join("\n");
 }
 
 async function readBoundedText(body, maxBytes) {

@@ -110,6 +110,21 @@ test("classifies only runtime logs for the failed revision", () => {
   assert.equal("output" in result, false);
 });
 
+test("classifies documented runtime log fields for the failed revision", () => {
+  const result = classifyRuntimeLogs({
+    revision: "revision-id",
+    output: JSON.stringify({
+      revision_id: "revision-id",
+      message: "Invalid Deno tokenizer configuration: OCTG_TOKENIZER_AUTH_TOKEN is missing",
+    }),
+  });
+
+  assert.deepEqual(result, {
+    categories: ["runtime_configuration"],
+    truncated: false,
+  });
+});
+
 test("limits build-log reads to one mebibyte", async () => {
   const result = await classifyBuildLogs({
     revision: "revision-id",
