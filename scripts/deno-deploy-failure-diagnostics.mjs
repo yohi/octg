@@ -197,7 +197,7 @@ function classifyText(text) {
   return [
     ["node_modules", /node_modules/i],
     ["npm", /npm:|\btiktoken\b/i],
-    ["module_resolution", /could not find|cannot find|module not found|failed to resolve/i],
+    ["module_resolution", /could not find|cannot find|module not found|failed to resolve|relative import path|not in import map/i],
     ["entrypoint", /entrypoint/i],
     ["runtime_configuration", /OCTG_TOKENIZER_AUTH_TOKEN|Invalid Deno tokenizer configuration/i],
     ["lockfile", /lockfile/i],

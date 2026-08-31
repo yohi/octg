@@ -88,6 +88,21 @@ test("classifies a missing tokenizer runtime secret without returning build logs
   });
 });
 
+test("classifies an import-map resolution failure", async () => {
+  const result = await classifyBuildLogs({
+    revision: "revision-id",
+    token: "test-token",
+    fetchImpl: async () => new Response(
+      'Relative import path "@octg/shared" not in import map\n',
+    ),
+  });
+
+  assert.deepEqual(result, {
+    categories: ["module_resolution"],
+    truncated: false,
+  });
+});
+
 test("classifies only runtime logs for the failed revision", () => {
   const result = classifyRuntimeLogs({
     revision: "revision-id",
