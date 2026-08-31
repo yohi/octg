@@ -142,6 +142,40 @@ export function classifyRuntimeLogs({
   };
 }
 
+export function summarizeDeploymentFailure({ revision, output }) {
+  if (!isValidRevision(revision ?? "") || typeof output !== "string") {
+    return { status: "unknown", categories: [], skipped: true };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return { status: "unknown", categories: [], error: "invalid_json" };
+  }
+
+  const records = Array.isArray(parsed)
+    ? parsed
+    : [
+      parsed,
+      ...(Array.isArray(parsed?.revisions) ? parsed.revisions : []),
+      ...(Array.isArray(parsed?.deployments) ? parsed.deployments : []),
+      ...(Array.isArray(parsed?.data) ? parsed.data : []),
+    ];
+  const record = records.find((entry) =>
+    entry?.id === revision || entry?.revision === revision
+  );
+  if (record === undefined) {
+    return { status: "unknown", categories: [] };
+  }
+
+  const status = ["queued", "building", "succeeded", "failed", "skipped"].includes(record.status)
+    ? record.status
+    : "unknown";
+  const reason = typeof record.failure_reason === "string" ? record.failure_reason : "";
+  return { status, categories: classifyText(reason) };
+}
+
 function extractLogMessages(output) {
   const messages = [];
   let parsedEntries = 0;
@@ -251,6 +285,30 @@ async function main() {
         console.log(`Deno Deploy runtime-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
       }
     }
+    return;
+  }
+
+  if (mode === "summarize-deployment-failure") {
+    const revision = process.argv[3];
+    const readResult = await readBoundedText(
+      Readable.toWeb(process.stdin),
+      MAX_BUILD_LOG_BYTES,
+    );
+    if (readResult.error !== undefined) {
+      console.warn("Deno Deploy failure summary unavailable: read.");
+      return;
+    }
+
+    const result = summarizeDeploymentFailure({
+      revision,
+      output: readResult.text,
+    });
+    if (result.skipped === true) {
+      console.warn("Deno Deploy failure summary skipped because its inputs are invalid.");
+      return;
+    }
+    console.log(`Deno Deploy failure status: ${result.status}`);
+    console.log(`Deno Deploy failure categories: ${result.categories.join(", ") || "none"}`);
     return;
   }
 

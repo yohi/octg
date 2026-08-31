@@ -4,6 +4,7 @@ import {
   classifyBuildLogs,
   classifyRuntimeLogs,
   extractRevision,
+  summarizeDeploymentFailure,
 } from "./deno-deploy-failure-diagnostics.mjs";
 
 test("extracts a revision from the structured Deno Deploy error hint", () => {
@@ -101,6 +102,25 @@ test("classifies an import-map resolution failure", async () => {
     categories: ["module_resolution"],
     truncated: false,
   });
+});
+
+test("summarizes a matching revision failure reason without returning it", () => {
+  const result = summarizeDeploymentFailure({
+    revision: "revision-id",
+    output: JSON.stringify({
+      revisions: [{
+        id: "revision-id",
+        status: "failed",
+        failure_reason: 'Relative import path "@octg/shared" not in import map',
+      }],
+    }),
+  });
+
+  assert.deepEqual(result, {
+    status: "failed",
+    categories: ["module_resolution"],
+  });
+  assert.equal("failure_reason" in result, false);
 });
 
 test("classifies only runtime logs for the failed revision", () => {

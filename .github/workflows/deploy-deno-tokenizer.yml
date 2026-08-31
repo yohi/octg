@@ -153,3 +153,19 @@ jobs:
           if [[ "$logs_status" -ne 0 ]]; then
             echo "::warning::Deno Deploy runtime-log diagnostics unavailable"
           fi
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            deployments list \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --status failed \
+            --limit 20 \
+            --json \
+            --non-interactive \
+            2>/dev/null \
+            | node scripts/deno-deploy-failure-diagnostics.mjs summarize-deployment-failure "$DENO_DEPLOY_REVISION"
+          deployments_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$deployments_status" -ne 0 ]]; then
+            echo "::warning::Deno Deploy failure summary unavailable"
+          fi
