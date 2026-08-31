@@ -29,7 +29,7 @@
 
 - [ ] **Step 1: Write the workflow**
 
-Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.9.5` to avoid the Deno `2.9.6` deploy argument passthrough regression, run `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy --prod --json --non-interactive` from `apps/deno-tokenizer`; the CLI reads the organization and application from the environment variables.
+Create a workflow with `pull_request` validation and `push` deployment triggers, limited to `apps/deno-tokenizer/**`, `packages/shared/**`, and the workflow file. Use `denoland/setup-deno@v2` pinned to `v2.9.6`, which includes the Deno Deploy workspace-member include fix and deploy CLI cache refresh, run `deno install --node-modules-dir=auto`, `deno task check`, and `deno task test` from `apps/deno-tokenizer`, and make the deployment job depend on validation. Give the deployment job `contents: read`, `environment: deno-production`, and serialized production concurrency. Fail before the CLI when `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, or `DENO_DEPLOY_TOKEN` is empty. Run `deno deploy --prod --json --non-interactive` from `apps/deno-tokenizer`; the CLI reads the organization and application from the environment variables.
 
 - [ ] **Step 2: Run the repository checks**
 

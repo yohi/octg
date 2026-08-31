@@ -144,7 +144,7 @@ unless deploy_steps.any? { |step| step.is_a?(Hash) && step["uses"].to_s.start_wi
   fail_contract("jobs.deploy must use denoland/setup-deno")
 end
 
-expected_deno_version = "v2.9.5"
+expected_deno_version = "v2.9.6"
 {"validate" => validate_steps, "deploy" => deploy_steps}.each do |job_name, steps|
   setup_step = steps.find { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("denoland/setup-deno@") }
   setup_with = require_mapping(setup_step["with"], "jobs.#{job_name} denoland/setup-deno.with")
