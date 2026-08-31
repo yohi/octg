@@ -90,6 +90,7 @@ required_paths = [
   "deno.json",
   "apps/deno-tokenizer/**",
   "packages/shared/**",
+  "scripts/deno-deploy-failure-diagnostics.mjs",
   ".github/workflows/deploy-deno-tokenizer.yml",
 ]
 
@@ -196,7 +197,7 @@ jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
   require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
     next unless step.is_a?(Hash)
-    next if job_name == "deploy" && step["name"] == "Deploy"
+    next if job_name == "deploy" && ["Deploy", "Classify failed revision"].include?(step["name"])
 
     step_env = step["env"]
     next unless step_env.is_a?(Hash)
@@ -213,6 +214,9 @@ end
 deploy_step = deploy_steps.find { |step| step.is_a?(Hash) && step["name"] == "Deploy" }
 fail_contract('jobs.deploy must have a named "Deploy" step') unless deploy_step
 deploy_step_index = deploy_steps.index(deploy_step)
+unless deploy_step["id"] == "deploy"
+  fail_contract('the "Deploy" step must have id "deploy" for failed revision diagnostics')
+end
 deploy_step_env = require_mapping(deploy_step["env"], 'the "Deploy" step env')
 unless deploy_step_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
   fail_contract('the "Deploy" step must map DENO_DEPLOY_TOKEN to the environment secret')
@@ -244,6 +248,50 @@ end
 
 if deploy_run.match?(/\bdeno\s+deploy\s+\./)
   fail_contract('the "Deploy" step must not pass a positional root path to deno deploy')
+end
+
+diagnostic_step = deploy_steps.find do |step|
+  step.is_a?(Hash) && step["name"] == "Classify failed revision"
+end
+fail_contract('jobs.deploy must classify a failed Deno Deploy revision') unless diagnostic_step
+diagnostic_step_index = deploy_steps.index(diagnostic_step)
+unless deploy_step_index < diagnostic_step_index
+  fail_contract('the failed revision classifier must run after "Deploy"')
+end
+
+diagnostic_if = diagnostic_step["if"].to_s
+unless diagnostic_if.include?("failure()") && diagnostic_if.include?("steps.deploy.outputs.revision")
+  fail_contract('the failed revision classifier must run only after a Deploy failure with a revision ID')
+end
+
+diagnostic_env = require_mapping(diagnostic_step["env"], 'the "Classify failed revision" step env')
+unless diagnostic_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
+  fail_contract('the failed revision classifier must scope DENO_DEPLOY_TOKEN to its step')
+end
+unless diagnostic_env["DENO_DEPLOY_REVISION"] == "${{ steps.deploy.outputs.revision }}"
+  fail_contract('the failed revision classifier must receive the failed Deploy revision ID')
+end
+
+diagnostic_run = diagnostic_step["run"].to_s
+[
+  "node scripts/deno-deploy-failure-diagnostics.mjs classify",
+].each do |fragment|
+  unless diagnostic_run.include?(fragment)
+    fail_contract("the failed revision classifier is missing: #{fragment}")
+  end
+end
+if diagnostic_run.match?(/console\.log\([^)]*(?:buildLog|response|text)/)
+  fail_contract("the failed revision classifier must not print raw API responses or build logs")
+end
+
+unless deploy_run.include?("node scripts/deno-deploy-failure-diagnostics.mjs extract")
+  fail_contract('the "Deploy" step must extract the failed revision with the diagnostics helper')
+end
+unless deploy_run.include?("status=$?") && deploy_run.include?("exit \"$status\"")
+  fail_contract('the "Deploy" step must preserve the deno deploy exit status')
+end
+if deploy_run.include?("tee")
+  fail_contract('the "Deploy" step must not stream raw CLI output to the Actions log')
 end
 
 identity_step = deploy_steps.find do |step|

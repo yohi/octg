@@ -7,6 +7,7 @@ on:
       - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
+      - scripts/deno-deploy-failure-diagnostics.mjs
       - .github/workflows/deploy-deno-tokenizer.yml
   pull_request:
     branches: [master]
@@ -15,6 +16,7 @@ on:
       - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
+      - scripts/deno-deploy-failure-diagnostics.mjs
       - .github/workflows/deploy-deno-tokenizer.yml
   workflow_dispatch:
 
@@ -104,6 +106,7 @@ jobs:
           NODE
 
       - name: Deploy
+        id: deploy
         working-directory: .
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
@@ -112,7 +115,25 @@ jobs:
             echo "::error::DENO_DEPLOY_TOKEN is not configured"
             exit 2
           fi
+          set +e
           deno deploy \
             --prod \
             --json \
-            --non-interactive
+            --non-interactive >"$RUNNER_TEMP/deno-deploy.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            if ! node scripts/deno-deploy-failure-diagnostics.mjs extract "$RUNNER_TEMP/deno-deploy.log"; then
+              echo "::warning::Deno Deploy failure diagnostics could not extract a revision ID"
+            fi
+            echo "::error::Deno Deploy failed; raw CLI output was suppressed"
+          fi
+          exit "$status"
+
+      - name: Classify failed revision
+        if: failure() && steps.deploy.outputs.revision != ''
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          DENO_DEPLOY_REVISION: ${{ steps.deploy.outputs.revision }}
+        run: |
+          node scripts/deno-deploy-failure-diagnostics.mjs classify
