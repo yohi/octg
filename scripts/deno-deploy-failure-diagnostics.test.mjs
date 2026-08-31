@@ -2,6 +2,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   classifyBuildLogs,
+  classifyCliOutput,
   classifyRuntimeLogs,
   extractRevision,
   summarizeDeploymentFailure,
@@ -121,6 +122,14 @@ test("summarizes a matching revision failure reason without returning it", () =>
     categories: ["module_resolution"],
   });
   assert.equal("failure_reason" in result, false);
+});
+
+test("classifies CLI failure output without returning the output", () => {
+  const result = classifyCliOutput(JSON.stringify({
+    error: { message: "permission denied while collecting source files" },
+  }));
+
+  assert.deepEqual(result, { categories: ["permission"] });
 });
 
 test("classifies only runtime logs for the failed revision", () => {

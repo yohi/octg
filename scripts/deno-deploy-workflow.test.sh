@@ -297,6 +297,9 @@ end
 unless deploy_run.include?("node scripts/deno-deploy-failure-diagnostics.mjs extract")
   fail_contract('the "Deploy" step must extract the failed revision with the diagnostics helper')
 end
+unless deploy_run.include?("node scripts/deno-deploy-failure-diagnostics.mjs classify-cli")
+  fail_contract('the "Deploy" step must classify CLI failures without printing raw output')
+end
 unless deploy_run.include?("status=$?") && deploy_run.include?("exit \"$status\"")
   fail_contract('the "Deploy" step must preserve the deno deploy exit status')
 end

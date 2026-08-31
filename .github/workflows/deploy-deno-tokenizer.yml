@@ -132,6 +132,9 @@ jobs:
             if ! node scripts/deno-deploy-failure-diagnostics.mjs extract "$RUNNER_TEMP/deno-deploy.log"; then
               echo "::warning::Deno Deploy failure diagnostics could not extract a revision ID"
             fi
+            if ! node scripts/deno-deploy-failure-diagnostics.mjs classify-cli "$RUNNER_TEMP/deno-deploy.log"; then
+              echo "::warning::Deno Deploy CLI failure classification unavailable"
+            fi
             echo "::error::Deno Deploy failed; raw CLI output was suppressed"
           fi
           exit "$status"

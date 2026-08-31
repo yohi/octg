@@ -176,6 +176,13 @@ export function summarizeDeploymentFailure({ revision, output }) {
   return { status, categories: classifyText(reason) };
 }
 
+export function classifyCliOutput(output) {
+  if (typeof output !== "string") {
+    return { categories: [], skipped: true };
+  }
+  return { categories: classifyText(extractLogMessages(output)) };
+}
+
 function extractLogMessages(output) {
   const messages = [];
   let parsedEntries = 0;
@@ -256,6 +263,14 @@ async function main() {
     } else if (revision === undefined) {
       console.warn("Deno Deploy failure did not include a revision ID for build-log classification.");
     }
+    return;
+  }
+
+  if (mode === "classify-cli") {
+    const outputPath = process.argv[3];
+    if (outputPath === undefined) return;
+    const result = classifyCliOutput(readFileSync(outputPath, "utf8"));
+    console.log(`Deno Deploy CLI failure categories: ${result.categories.join(", ") || "none"}`);
     return;
   }
 
