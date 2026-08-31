@@ -1,4 +1,5 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 export const MAX_BUILD_LOG_BYTES = 1024 * 1024;
@@ -105,6 +106,40 @@ export async function classifyBuildLogs({
   };
 }
 
+export function classifyRuntimeLogs({
+  revision,
+  output,
+  maxBytes = MAX_BUILD_LOG_BYTES,
+  inputTruncated = false,
+}) {
+  if (!isValidRevision(revision ?? "") || typeof output !== "string") {
+    return { categories: [], skipped: true, truncated: false };
+  }
+
+  const bytes = Buffer.from(output, "utf8");
+  const truncated = inputTruncated || bytes.byteLength > maxBytes;
+  const boundedOutput = bytes.subarray(0, maxBytes).toString("utf8");
+  const bodies = [];
+
+  for (const line of boundedOutput.split(/\r?\n/)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry?.revision === revision && typeof entry.body === "string") {
+      bodies.push(entry.body);
+    }
+  }
+
+  return {
+    categories: classifyText(bodies.join("\n")),
+    truncated,
+  };
+}
+
 async function readBoundedText(body, maxBytes) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -162,6 +197,35 @@ async function main() {
       appendFileSync(githubOutput, `revision=${revision}\n`);
     } else if (revision === undefined) {
       console.warn("Deno Deploy failure did not include a revision ID for build-log classification.");
+    }
+    return;
+  }
+
+  if (mode === "classify-runtime") {
+    const revision = process.argv[3];
+    const readResult = await readBoundedText(
+      Readable.toWeb(process.stdin),
+      MAX_BUILD_LOG_BYTES,
+    );
+
+    if (readResult.error !== undefined) {
+      console.warn("Deno Deploy runtime-log classifier unavailable: read.");
+      return;
+    }
+
+    const result = classifyRuntimeLogs({
+      revision,
+      output: readResult.text,
+      inputTruncated: readResult.truncated,
+    });
+
+    if (result.skipped === true) {
+      console.warn("Deno Deploy runtime-log classifier skipped because its inputs are invalid.");
+    } else {
+      console.log(`Deno Deploy runtime-log categories: ${result.categories.join(", ") || "none"}`);
+      if (result.truncated) {
+        console.log(`Deno Deploy runtime-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
+      }
     }
     return;
   }

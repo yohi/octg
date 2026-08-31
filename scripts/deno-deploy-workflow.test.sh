@@ -280,6 +280,9 @@ end
 diagnostic_run = diagnostic_step["run"].to_s
 [
   "node scripts/deno-deploy-failure-diagnostics.mjs classify",
+  "deno run -A jsr:@deno/deploy@0.0.9904",
+  "logs",
+  "node scripts/deno-deploy-failure-diagnostics.mjs classify-runtime",
 ].each do |fragment|
   unless diagnostic_run.include?(fragment)
     fail_contract("the failed revision classifier is missing: #{fragment}")

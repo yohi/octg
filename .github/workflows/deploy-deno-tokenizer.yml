@@ -138,3 +138,18 @@ jobs:
           DENO_DEPLOY_REVISION: ${{ steps.deploy.outputs.revision }}
         run: |
           node scripts/deno-deploy-failure-diagnostics.mjs classify
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            logs \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --once \
+            --json \
+            --non-interactive \
+            2>/dev/null \
+            | node scripts/deno-deploy-failure-diagnostics.mjs classify-runtime "$DENO_DEPLOY_REVISION"
+          logs_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$logs_status" -ne 0 ]]; then
+            echo "::warning::Deno Deploy runtime-log diagnostics unavailable"
+          fi

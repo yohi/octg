@@ -2,6 +2,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   classifyBuildLogs,
+  classifyRuntimeLogs,
   extractRevision,
 } from "./deno-deploy-failure-diagnostics.mjs";
 
@@ -85,6 +86,28 @@ test("classifies a missing tokenizer runtime secret without returning build logs
     categories: ["runtime_configuration"],
     truncated: false,
   });
+});
+
+test("classifies only runtime logs for the failed revision", () => {
+  const result = classifyRuntimeLogs({
+    revision: "revision-id",
+    output: [
+      JSON.stringify({
+        revision: "other-revision",
+        body: "Invalid Deno tokenizer configuration: OCTG_TOKENIZER_AUTH_TOKEN is missing",
+      }),
+      JSON.stringify({
+        revision: "revision-id",
+        body: "Invalid Deno tokenizer configuration: OCTG_TOKENIZER_AUTH_TOKEN is missing",
+      }),
+    ].join("\n"),
+  });
+
+  assert.deepEqual(result, {
+    categories: ["runtime_configuration"],
+    truncated: false,
+  });
+  assert.equal("output" in result, false);
 });
 
 test("limits build-log reads to one mebibyte", async () => {
