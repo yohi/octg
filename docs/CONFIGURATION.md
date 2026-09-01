@@ -218,6 +218,7 @@ Previewの変数は全て`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`です�
 | --- | ---: | --- | --- |
 | `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | No | Preview Wrangler認証 | Preview専用AccountのID |
 | `CLOUDFLARE_PREVIEW_API_TOKEN` | Yes | Preview setup/GitHub Secret | Preview resourceだけに限定したtoken |
+| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Yes | Preview setup/GitHub Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのRun token。Production tokenと共有しない |
 | `OCTG_PREVIEW_DATABASE_ID` | No | 一時Preview Wrangler config | Preview D1 Database ID。空欄なら既存名を検索し、なければ作成後にIDを入力 |
 | `OCTG_PREVIEW_DATABASE_NAME` | No | Preview D1 | 既定値は`octg-gateway-preview-db` |
 | `OCTG_PREVIEW_WORKER_NAME` | No | Preview Worker | 既定値は`octg-gateway-preview` |

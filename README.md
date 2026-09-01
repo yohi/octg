@@ -404,8 +404,8 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
    ```
 
    `--github` は `preview` Environment の Variables と、
-   `CLOUDFLARE_PREVIEW_API_TOKEN` / `OCTG_PREVIEW_SMOKE_API_KEY` /
-   `OCTG_KEY_PEPPER` Secretsを更新します。
+   `CLOUDFLARE_PREVIEW_API_TOKEN` / `OCTG_UPSTREAM_API_TOKEN` /
+   `OCTG_PREVIEW_SMOKE_API_KEY` / `OCTG_KEY_PEPPER` Secretsを更新します。
    Scriptはcanonical configの`DB` bindingだけを使った一時configを生成するため、
    canonical configに複数のD1 bindingがあってもProduction D1を変更しません。
 
@@ -413,7 +413,9 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
    `OCTG_PREVIEW_KEY_PEPPER` と control-plane credential は production と別の値を
    Cloudflare側で管理します。セットアップスクリプトは入力した
    `OCTG_PREVIEW_KEY_PEPPER` をGitHub preview Environment Secret
-   `OCTG_KEY_PEPPER`へ設定し、workflowの対象version uploadとCI client seedで同じ値を使用します。
+   `OCTG_KEY_PEPPER`へ設定し、`OCTG_PREVIEW_UPSTREAM_API_TOKEN`を
+   GitHub preview Environment Secret `OCTG_UPSTREAM_API_TOKEN`へ設定します。
+   workflowの対象version uploadとCI client seedでPreview専用の値を使用します。
    upstream billing principalを共有する場合も、preview workflowへproduction
    D1/Worker credentialやUsage API keyを渡してはいけません。`scripts/seed-client.mjs` でseed SQLを生成し、
    preview D1へ適用してください。
@@ -443,6 +445,7 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
    productionのclient keyは使わないでください。
 3. GitHub Environment `preview` の Secrets に以下を登録します:
    - `CLOUDFLARE_PREVIEW_API_TOKEN` — preview resource専用 token
+   - `OCTG_UPSTREAM_API_TOKEN` — Preview Gateway B専用 Run token
    - `OCTG_PREVIEW_SMOKE_API_KEY` — 手順 2 の preview client key
    - `OCTG_KEY_PEPPER` — Preview WorkerとCI version uploadで共有するkey pepper
 4. **Actions Variables** に以下を登録します:

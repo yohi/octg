@@ -20,6 +20,9 @@ const upload = blockBetween(
 if (!upload.includes('--secrets-file "$secrets_file"')) {
   throw new Error("version upload must include the Preview Worker secrets file");
 }
+if (!upload.includes("OCTG_UPSTREAM_API_TOKEN: ${{ secrets.OCTG_UPSTREAM_API_TOKEN }}")) {
+  throw new Error("version upload must receive the Preview upstream token secret");
+}
 const uploadRun = upload.slice(upload.indexOf("        run: |"));
 if (!upload.includes("PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}")) {
   throw new Error("version upload must pass the pull request number through step env");
@@ -35,6 +38,9 @@ if (!uploadRun.includes('--tag "pr-${PULL_REQUEST_NUMBER}"')) {
 }
 if (!uploadRun.includes('--message "pr-${PULL_REQUEST_NUMBER} ${PULL_REQUEST_HEAD_SHA}"')) {
   throw new Error("version upload must use env-backed pull request metadata for its message");
+}
+if (!upload.includes("OCTG_UPSTREAM_API_TOKEN: process.env.OCTG_UPSTREAM_API_TOKEN")) {
+  throw new Error("Preview Worker secrets file must include the upstream token");
 }
 
 const restore = blockBetween(

@@ -13,12 +13,14 @@ test("parses safe assignments without executing shell syntax", () => {
   const values = parseSetupEnvFile([
     "# comments are ignored",
     'export OCTG_UPSTREAM_BASE_URL="https://gateway.example/openai"',
+    "OCTG_PREVIEW_UPSTREAM_API_TOKEN=preview-upstream-token",
     "OCTG_DATABASE_ID='db-123'",
     "UNRELATED=$(touch /tmp/should-not-exist)",
   ].join("\n"));
 
   assert.deepEqual(values, {
     OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
+    OCTG_PREVIEW_UPSTREAM_API_TOKEN: "preview-upstream-token",
     OCTG_DATABASE_ID: "db-123",
   });
 });
