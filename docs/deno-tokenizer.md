@@ -34,8 +34,10 @@ Gateway Worker
 ### 1.2 Deno Deploy Deployment
 
 The Deno tokenizer runtime entrypoint remains `apps/deno-tokenizer/src/main.ts`.
-The repository-root `deno.json` controls the deployment manifest and includes
-the tokenizer app together with `packages/shared/src`.
+The repository-root `deno.json` controls the deployment manifest. It uploads only
+`./deno.json`, `apps/deno-tokenizer/src/**`, and `packages/shared/src/**`; npm
+workspace manifests are intentionally excluded so Deno Deploy resolves npm
+dependencies through Deno's global cache instead of an uploaded `node_modules` tree.
 
 1. **Recommended: GitHub Actions**:
    - Create the Deno Deploy app in the current Deno Deploy console. Deno Deploy
@@ -47,9 +49,16 @@ the tokenizer app together with `packages/shared/src`.
      or commit it.
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
      `deno install`, `deno task check`, and `deno task test` for pull requests and
-     deploys only after those checks pass on a push to `master`.
-   - The workflow runs `deno deploy --prod --json --non-interactive` from the
-     repository root. Immediately before deployment it injects the non-secret
+     deploys only after those checks pass on a push to `master`. Before merging, add
+     the `deploy-deno` label to a same-repository pull request, then approve the
+     `deno-production` Environment deployment. This executes the same gated
+     Production deployment path and verifies the Deno Deploy revision build and
+     warmup. The workflow can also be started with **Run workflow** when available;
+     fork pull requests remain validation-only.
+   - The workflow runs the pinned `@deno/deploy@0.0.9904` implementation with
+     `deno run -A jsr:@deno/deploy@0.0.9904 --prod --json --non-interactive`
+     from the repository root. This avoids a Deno 2.9.6 wrapper bug that
+     duplicates passthrough arguments. Immediately before deployment it injects the non-secret
      `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the ephemeral root
      `deno.json`; `DENO_DEPLOY_TOKEN` is never written to that file.
 
@@ -64,8 +73,10 @@ the tokenizer app together with `packages/shared/src`.
    - Go to [Deno Deploy console](https://console.deno.com/).
    - Create an app and configure the repository root as its application directory.
    - Set the entrypoint to `apps/deno-tokenizer/src/main.ts`.
-   - Ensure the deployment uses the checked-in root `deno.json` manifest, which
-     includes `apps/deno-tokenizer/**` and `packages/shared/src/**`.
+   - Ensure the deployment uses the checked-in root `deno.json` manifest. Its
+     `deploy.include` entries are `./deno.json`, `apps/deno-tokenizer/src/**`, and
+     `packages/shared/src/**`; do not add `package.json` or `package-lock.json` to
+     the Deploy artifact.
    - Add environment variables (see §1.3).
    - Deploy.
 
@@ -86,7 +97,7 @@ the tokenizer app together with `packages/shared/src`.
    config.deploy.app = process.env.DENO_DEPLOY_APP;
    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
    NODE
-   deno deploy \
+   deno run -A jsr:@deno/deploy@0.0.9904 \
      --prod --json --non-interactive
    unset DENO_DEPLOY_TOKEN
    unset DENO_DEPLOY_ORG DENO_DEPLOY_APP

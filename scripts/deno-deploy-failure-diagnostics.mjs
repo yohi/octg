@@ -1,0 +1,385 @@
+import { appendFileSync } from "node:fs";
+import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
+
+export const MAX_BUILD_LOG_BYTES = 1024 * 1024;
+
+const CONSOLE_ORIGIN = "https://console.deno.com";
+const CONSOLE_API_ORIGIN = `${CONSOLE_ORIGIN}/api/v2`;
+
+export function extractRevision(output) {
+  let revision;
+
+  for (const line of output.split(/\r?\n/)) {
+    let envelope;
+    try {
+      envelope = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const candidate = extractRevisionFromHint(envelope?.error?.hint);
+    if (candidate !== undefined) {
+      revision = candidate;
+    }
+  }
+
+  return revision;
+}
+
+function extractRevisionFromHint(hint) {
+  if (typeof hint !== "string") return undefined;
+
+  const urlMatch = /https:\/\/console\.deno\.com\/[^\s]+/.exec(hint);
+  if (urlMatch === null) return undefined;
+
+  try {
+    const url = new URL(trimTrailingUrlPunctuation(urlMatch[0]));
+    if (url.origin !== CONSOLE_ORIGIN) return undefined;
+
+    const segments = url.pathname.split("/").filter(Boolean);
+    const buildIndex = segments.lastIndexOf("builds");
+    if (buildIndex < 0 || buildIndex !== segments.length - 2) {
+      return undefined;
+    }
+
+    const revision = decodeURIComponent(segments.at(-1));
+    return isValidRevision(revision) ? revision : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function trimTrailingUrlPunctuation(value) {
+  let end = value.length;
+  while (end > 0 && "),.;".includes(value[end - 1])) end -= 1;
+  return value.slice(0, end);
+}
+
+function isValidRevision(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f\\/]/.test(value);
+}
+
+export async function classifyBuildLogs({
+  revision,
+  token,
+  organization,
+  fetchImpl = fetch,
+  maxBytes = MAX_BUILD_LOG_BYTES,
+}) {
+  if (!isValidRevision(revision ?? "") || typeof token !== "string" || token.length === 0) {
+    return { categories: [], skipped: true, truncated: false };
+  }
+
+  let response;
+  try {
+    const headers = {
+      accept: "application/x-ndjson",
+      authorization: `Bearer ${token}`,
+    };
+    if (typeof organization === "string" && organization.length > 0) {
+      headers["x-deno-org"] = organization;
+    }
+
+    response = await fetchImpl(
+      `${CONSOLE_API_ORIGIN}/revisions/${encodeURIComponent(revision)}/build_logs`,
+      {
+        headers,
+        redirect: "error",
+      },
+    );
+  } catch {
+    return { categories: [], error: "network", truncated: false };
+  }
+
+  if (!response.ok || response.body === null) {
+    return {
+      categories: [],
+      error: `http_${response.status}`,
+      truncated: false,
+    };
+  }
+
+  const readResult = await readBoundedText(response.body, maxBytes);
+  if (readResult.error !== undefined) {
+    return { categories: [], error: "read", truncated: false };
+  }
+
+  return {
+    categories: classifyText(extractLogMessages(readResult.text)),
+    truncated: readResult.truncated,
+  };
+}
+
+export function classifyRuntimeLogs({
+  revision,
+  output,
+  maxBytes = MAX_BUILD_LOG_BYTES,
+  inputTruncated = false,
+}) {
+  if (!isValidRevision(revision ?? "") || typeof output !== "string") {
+    return { categories: [], skipped: true, truncated: false };
+  }
+
+  const bytes = Buffer.from(output, "utf8");
+  const truncated = inputTruncated || bytes.byteLength > maxBytes;
+  const boundedOutput = bytes.subarray(0, maxBytes).toString("utf8");
+  const bodies = [];
+
+  for (const line of boundedOutput.split(/\r?\n/)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const entryRevision = entry?.revision_id ?? entry?.revision;
+    const message = entry?.message ?? entry?.body;
+    if (entryRevision === revision && typeof message === "string") {
+      bodies.push(message);
+    }
+  }
+
+  return {
+    categories: classifyText(bodies.join("\n")),
+    truncated,
+  };
+}
+
+export function summarizeDeploymentFailure({ revision, output }) {
+  if (!isValidRevision(revision ?? "") || typeof output !== "string") {
+    return { status: "unknown", categories: [], skipped: true };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return { status: "unknown", categories: [], error: "invalid_json" };
+  }
+
+  const records = getDeploymentRecords(parsed);
+  const record = findDeploymentRecord(records, revision);
+  if (record === undefined) {
+    return { status: "unknown", categories: [] };
+  }
+
+  const status = getDeploymentStatus(record.status);
+  const reason = getFailureReason(record);
+  return { status, categories: classifyText(reason) };
+}
+
+function getDeploymentRecords(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  return [
+    parsed,
+    ...getRecordList(parsed, "revisions"),
+    ...getRecordList(parsed, "deployments"),
+    ...getRecordList(parsed, "data"),
+    ...getRecordList(parsed, "items"),
+  ];
+}
+
+function getRecordList(parsed, key) {
+  return Array.isArray(parsed?.[key]) ? parsed[key] : [];
+}
+
+function findDeploymentRecord(records, revision) {
+  return records.find((entry) =>
+    entry?.id === revision || entry?.revision === revision
+  );
+}
+
+function getDeploymentStatus(status) {
+  const allowedStatuses = ["queued", "building", "succeeded", "failed", "skipped"];
+  return allowedStatuses.includes(status) ? status : "unknown";
+}
+
+function getFailureReason(record) {
+  if (typeof record?.failure_reason === "string") return record.failure_reason;
+  if (typeof record?.failureReason === "string") return record.failureReason;
+  return "";
+}
+
+export function classifyCliOutput(output) {
+  if (typeof output !== "string") {
+    return { categories: [], skipped: true };
+  }
+  return { categories: classifyText(extractLogMessages(output)) };
+}
+
+function extractLogMessages(output) {
+  const messages = [];
+  let parsedEntries = 0;
+
+  for (const line of output.split(/\r?\n/)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry === null || typeof entry !== "object") continue;
+    parsedEntries += 1;
+    if (typeof entry.message === "string") messages.push(entry.message);
+    if (typeof entry.body === "string") messages.push(entry.body);
+    if (typeof entry.error?.message === "string") messages.push(entry.error.message);
+  }
+
+  return parsedEntries === 0 ? output : messages.join("\n");
+}
+
+async function readBoundedText(body, maxBytes) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let received = 0;
+  let text = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const length = Math.min(value.byteLength, maxBytes - received);
+      if (length > 0) {
+        text += decoder.decode(value.subarray(0, length), { stream: true });
+        received += length;
+      }
+      if (length < value.byteLength) {
+        await reader.cancel().catch(() => undefined);
+        return { text, truncated: true };
+      }
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    return { error: "read" };
+  }
+
+  return { text: text + decoder.decode(), truncated: false };
+}
+
+function classifyText(text) {
+  return [
+    ["node_modules", /node_modules/i],
+    ["npm", /npm:|\btiktoken\b/i],
+    ["module_resolution", /could not find|cannot find|module not found|failed to resolve|relative import path|not in import map/i],
+    ["entrypoint", /entrypoint/i],
+    ["runtime_configuration", /OCTG_TOKENIZER_AUTH_TOKEN|Invalid Deno tokenizer configuration/i],
+    ["lockfile", /lockfile/i],
+    ["permission", /permission/i],
+    ["network", /network|timeout|timed out|dns/i],
+  ]
+    .filter(([, pattern]) => pattern.test(text))
+    .map(([name]) => name);
+}
+
+async function main() {
+  const handler = new Map([
+    ["extract", handleExtract],
+    ["classify-cli", handleClassifyCli],
+    ["classify-runtime", handleClassifyRuntime],
+    ["summarize-deployment-failure", handleSummarizeDeploymentFailure],
+    ["classify", handleClassifyBuildLogs],
+  ]).get(process.argv[2]);
+  if (handler !== undefined) await handler();
+}
+
+async function handleExtract() {
+  const revision = extractRevision(await readDiagnosticStdin());
+  const githubOutput = process.env.GITHUB_OUTPUT;
+  if (revision !== undefined && githubOutput !== undefined) {
+    appendFileSync(githubOutput, `revision=${revision}\n`);
+  } else if (revision === undefined) {
+    console.warn("Deno Deploy failure did not include a revision ID for build-log classification.");
+  }
+}
+
+async function handleClassifyCli() {
+  const result = classifyCliOutput(await readDiagnosticStdin());
+  console.log(`Deno Deploy CLI failure categories: ${result.categories.join(", ") || "none"}`);
+}
+
+async function handleClassifyRuntime() {
+  const revision = process.argv[3];
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    console.warn("Deno Deploy runtime-log classifier unavailable: read.");
+    return;
+  }
+
+  const result = classifyRuntimeLogs({
+    revision,
+    output: readResult.text,
+    inputTruncated: readResult.truncated,
+  });
+  if (result.skipped === true) {
+    console.warn("Deno Deploy runtime-log classifier skipped because its inputs are invalid.");
+    return;
+  }
+
+  console.log(`Deno Deploy runtime-log categories: ${result.categories.join(", ") || "none"}`);
+  if (result.truncated) {
+    console.log(`Deno Deploy runtime-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
+  }
+}
+
+async function handleSummarizeDeploymentFailure() {
+  const revision = process.argv[3];
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    console.warn("Deno Deploy failure summary unavailable: read.");
+    return;
+  }
+
+  const result = summarizeDeploymentFailure({
+    revision,
+    output: readResult.text,
+  });
+  if (result.skipped === true) {
+    console.warn("Deno Deploy failure summary skipped because its inputs are invalid.");
+    return;
+  }
+  console.log(`Deno Deploy failure status: ${result.status}`);
+  console.log(`Deno Deploy failure categories: ${result.categories.join(", ") || "none"}`);
+}
+
+async function handleClassifyBuildLogs() {
+  const result = await classifyBuildLogs({
+    revision: process.env.DENO_DEPLOY_REVISION,
+    token: process.env.DENO_DEPLOY_TOKEN,
+    organization: process.env.DENO_DEPLOY_ORG,
+  });
+
+  if (result.skipped === true) {
+    console.warn("Deno Deploy build-log classifier skipped because its inputs are invalid.");
+  } else if (result.error !== undefined) {
+    console.warn(`Deno Deploy build-log classifier unavailable: ${result.error}.`);
+  } else {
+    console.log(`Deno Deploy build-log categories: ${result.categories.join(", ") || "none"}`);
+    if (result.truncated) {
+      console.log(`Deno Deploy build-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
+    }
+  }
+}
+
+async function readDiagnosticInput() {
+  return readBoundedText(
+    Readable.toWeb(process.stdin),
+    MAX_BUILD_LOG_BYTES,
+  );
+}
+
+async function readDiagnosticStdin() {
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    throw new Error("diagnostic input unavailable");
+  }
+  return readResult.text;
+}
+
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  await main();
+}

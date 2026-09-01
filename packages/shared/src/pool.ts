@@ -1,4 +1,4 @@
-import type { PoolName, PoolNameLower, PoolState } from "./types";
+import type { PoolName, PoolNameLower, PoolState } from "./types.ts";
 
 export const POOL_LIMITS = {
   STANDARD: 1_000_000,

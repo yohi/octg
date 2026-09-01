@@ -1,4 +1,4 @@
-import { hasToolUse } from "./classify";
+import { hasToolUse } from "./classify.ts";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 export const MAX_NORMALIZED_INPUT_BYTES = 1_048_576;

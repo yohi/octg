@@ -7,14 +7,18 @@ on:
       - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
+      - scripts/deno-deploy-failure-diagnostics.mjs
       - .github/workflows/deploy-deno-tokenizer.yml
   pull_request:
     branches: [master]
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - deno.json
       - apps/deno-tokenizer/**
       - packages/shared/**
+      - scripts/deno-deploy-failure-diagnostics.mjs
       - .github/workflows/deploy-deno-tokenizer.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,7 +38,7 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.9.5
+          deno-version: v2.9.6
           cache: true
 
       - name: Install Deno dependencies
@@ -49,7 +53,7 @@ jobs:
   deploy:
     name: Deploy to Deno Deploy
     needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deno-production
@@ -68,7 +72,7 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.9.5
+          deno-version: v2.9.6
           cache: true
 
       - name: Install Deno dependencies
@@ -84,6 +88,27 @@ jobs:
       - name: Prepare Deno Deploy configuration
         working-directory: .
         run: |
+          staging="$GITHUB_WORKSPACE/.deno-deploy-source"
+          mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+          deno cache --config apps/deno-tokenizer/deno.json \
+            npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
+          wasm_source="$(
+            deno eval \
+              --config apps/deno-tokenizer/deno.json \
+              'console.log(import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm"));'
+          )"
+          if [[ "$wasm_source" != file://* ]]; then
+            echo "::error::tiktoken WASM did not resolve to a local file URL"
+            exit 2
+          fi
+          cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"
+          cp -R packages/shared/src/. "$staging/packages/shared/src"
+          node - "$wasm_source" "$staging/apps/deno-tokenizer/src/tiktoken_bg.wasm" <<'NODE'
+          const fs = require("node:fs");
+          const { fileURLToPath } = require("node:url");
+          const [source, destination] = process.argv.slice(2);
+          fs.copyFileSync(fileURLToPath(source), destination);
+          NODE
           node <<'NODE'
           const fs = require("node:fs");
           const path = "deno.json";
@@ -96,13 +121,22 @@ jobs:
           if (!org || !app) {
             throw new Error("DENO_DEPLOY_ORG and DENO_DEPLOY_APP must be configured");
           }
+          if (!config.imports || typeof config.imports !== "object") {
+            throw new Error("deno.json must contain an imports mapping");
+          }
           config.deploy.org = org;
           config.deploy.app = app;
+          config.imports["tiktoken/lite/tiktoken_bg.wasm"] =
+            "./apps/deno-tokenizer/src/tiktoken_bg.wasm";
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
           NODE
+          cp deno.json "$staging/deno.json"
+          deno check --config "$staging/deno.json" \
+            "$staging/apps/deno-tokenizer/src/main.ts"
 
       - name: Deploy
-        working-directory: .
+        id: deploy
+        working-directory: ${{ github.workspace }}/.deno-deploy-source
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
         run: |
@@ -110,7 +144,60 @@ jobs:
             echo "::error::DENO_DEPLOY_TOKEN is not configured"
             exit 2
           fi
-          deno deploy \
+          set +e
+          # Deno 2.9.6 duplicates passthrough arguments in its deploy wrapper.
+          deno run -A jsr:@deno/deploy@0.0.9904 \
             --prod \
             --json \
-            --non-interactive
+            --non-interactive >"$RUNNER_TEMP/deno-deploy.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" extract <"$RUNNER_TEMP/deno-deploy.log"; then
+              echo "::warning::Deno Deploy failure diagnostics could not extract a revision ID"
+            fi
+            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" classify-cli <"$RUNNER_TEMP/deno-deploy.log"; then
+              echo "::warning::Deno Deploy CLI failure classification unavailable"
+            fi
+            echo "::error::Deno Deploy failed; raw CLI output was suppressed"
+          fi
+          exit "$status"
+
+      - name: Classify failed revision
+        if: failure() && steps.deploy.outputs.revision != ''
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          DENO_DEPLOY_REVISION: ${{ steps.deploy.outputs.revision }}
+        run: |
+          node scripts/deno-deploy-failure-diagnostics.mjs classify
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            logs \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --once \
+            --json \
+            --non-interactive \
+            2>/dev/null \
+            | node scripts/deno-deploy-failure-diagnostics.mjs classify-runtime "$DENO_DEPLOY_REVISION"
+          logs_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$logs_status" -ne 0 ]]; then
+            echo "::warning::Deno Deploy runtime-log diagnostics unavailable"
+          fi
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            deployments list \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --status failed \
+            --limit 20 \
+            --json \
+            --non-interactive \
+            2>/dev/null \
+            | node scripts/deno-deploy-failure-diagnostics.mjs summarize-deployment-failure "$DENO_DEPLOY_REVISION"
+          deployments_status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$deployments_status" -ne 0 ]]; then
+            echo "::warning::Deno Deploy failure summary unavailable"
+          fi

@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "tiktoken": "1.0.22"
+  },
   "scripts": {
     "test": "deno task test",
     "typecheck": "deno task check"

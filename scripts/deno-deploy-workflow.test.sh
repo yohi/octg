@@ -13,12 +13,33 @@ if ! ruby -ryaml -e '' >/dev/null 2>&1; then
   exit 2
 fi
 
+if rg -n '^(import|export) .* from "\./[^"./]+";' packages/shared/src; then
+  printf 'Deno Deploy contract violation: shared relative imports must include .ts extensions\n' >&2
+  exit 1
+fi
+
+if ! ruby -rjson -e 'config = JSON.parse(File.read("deno.json")); exit(config["nodeModulesDir"] == "none" ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: deno.json must set nodeModulesDir to none\n' >&2
+  exit 1
+fi
+
+if ! ruby -rjson -e 'config = JSON.parse(File.read("apps/deno-tokenizer/package.json")); exit(config.dig("dependencies", "tiktoken") == "1.0.22" ? 0 : 1)'; then
+  printf 'Deno Deploy contract violation: apps/deno-tokenizer/package.json must declare tiktoken 1.0.22\n' >&2
+  exit 1
+fi
+
 ruby -ryaml -rjson - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
 def fail_contract(message)
   warn "workflow contract violation: #{message}"
   exit 1
+end
+
+begin
+  deploy_config = JSON.parse(File.read("deno.json"))
+rescue StandardError => error
+  fail_contract("invalid deno.json: #{error.message}")
 end
 
 def require_mapping(value, name)
@@ -49,6 +70,13 @@ require_mapping(triggers, "on")
 
 push = require_mapping(triggers["push"], "on.push")
 pull_request = require_mapping(triggers["pull_request"], "on.pull_request")
+unless triggers.key?("workflow_dispatch")
+  fail_contract("on.workflow_dispatch must be configured for pre-merge deployment verification")
+end
+pull_request_types = pull_request["types"]
+unless pull_request_types.is_a?(Array) && pull_request_types.include?("labeled")
+  fail_contract('on.pull_request.types must include "labeled" for pre-merge deployment verification')
+end
 
 unless push["branches"] == ["master"]
   fail_contract('on.push.branches must be exactly ["master"]')
@@ -62,6 +90,7 @@ required_paths = [
   "deno.json",
   "apps/deno-tokenizer/**",
   "packages/shared/**",
+  "scripts/deno-deploy-failure-diagnostics.mjs",
   ".github/workflows/deploy-deno-tokenizer.yml",
 ]
 
@@ -115,7 +144,8 @@ unless deploy_steps.any? { |step| step.is_a?(Hash) && step["uses"].to_s.start_wi
   fail_contract("jobs.deploy must use denoland/setup-deno")
 end
 
-expected_deno_version = "v2.9.5"
+expected_deno_version = "v2.9.6"
+expected_deploy_cli = "deno run -A jsr:@deno/deploy@0.0.9904"
 {"validate" => validate_steps, "deploy" => deploy_steps}.each do |job_name, steps|
   setup_step = steps.find { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("denoland/setup-deno@") }
   setup_with = require_mapping(setup_step["with"], "jobs.#{job_name} denoland/setup-deno.with")
@@ -130,7 +160,7 @@ unless needs.is_a?(Array) && needs.include?("validate")
   fail_contract('jobs.deploy.needs must include "validate" so deployment cannot bypass validation')
 end
 
-expected_if = "github.event_name == 'push' && github.ref == 'refs/heads/master'"
+expected_if = "(github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)"
 deploy_if = deploy["if"].to_s.strip
 deploy_if = deploy_if.sub(/\A\$\{\{\s*/, "").sub(/\s*\}\}\z/, "")
 deploy_if = deploy_if.gsub(/\s+/, " ")
@@ -168,7 +198,7 @@ jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
   require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
     next unless step.is_a?(Hash)
-    next if job_name == "deploy" && step["name"] == "Deploy"
+    next if job_name == "deploy" && ["Deploy", "Classify failed revision"].include?(step["name"])
 
     step_env = step["env"]
     next unless step_env.is_a?(Hash)
@@ -185,17 +215,20 @@ end
 deploy_step = deploy_steps.find { |step| step.is_a?(Hash) && step["name"] == "Deploy" }
 fail_contract('jobs.deploy must have a named "Deploy" step') unless deploy_step
 deploy_step_index = deploy_steps.index(deploy_step)
+unless deploy_step["id"] == "deploy"
+  fail_contract('the "Deploy" step must have id "deploy" for failed revision diagnostics')
+end
 deploy_step_env = require_mapping(deploy_step["env"], 'the "Deploy" step env')
 unless deploy_step_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
   fail_contract('the "Deploy" step must map DENO_DEPLOY_TOKEN to the environment secret')
 end
-unless deploy_step["working-directory"] == "."
-  fail_contract('the "Deploy" step must run from repository root "."')
+unless deploy_step["working-directory"] == "${{ github.workspace }}/.deno-deploy-source"
+  fail_contract('the "Deploy" step must run from the staged source directory')
 end
 
 deploy_run = deploy_step["run"].to_s
 [
-  "deno deploy",
+  expected_deploy_cli,
   "--prod",
   "--json",
   "--non-interactive",
@@ -203,6 +236,10 @@ deploy_run = deploy_step["run"].to_s
   unless deploy_run.include?(fragment)
     fail_contract("the \"Deploy\" step is missing: #{fragment}")
   end
+end
+
+if deploy_run.lines.any? { |line| line.match?(/^\s*deno\s+deploy\b/i) }
+  fail_contract('the "Deploy" step must bypass the Deno 2.9.6 wrapper that duplicates passthrough arguments')
 end
 
 [
@@ -216,6 +253,68 @@ end
 
 if deploy_run.match?(/\bdeno\s+deploy\s+\./)
   fail_contract('the "Deploy" step must not pass a positional root path to deno deploy')
+end
+
+diagnostic_step = deploy_steps.find do |step|
+  step.is_a?(Hash) && step["name"] == "Classify failed revision"
+end
+fail_contract('jobs.deploy must classify a failed Deno Deploy revision') unless diagnostic_step
+diagnostic_step_index = deploy_steps.index(diagnostic_step)
+unless deploy_step_index < diagnostic_step_index
+  fail_contract('the failed revision classifier must run after "Deploy"')
+end
+
+diagnostic_if = diagnostic_step["if"].to_s
+unless diagnostic_if.include?("failure()") && diagnostic_if.include?("steps.deploy.outputs.revision")
+  fail_contract('the failed revision classifier must run only after a Deploy failure with a revision ID')
+end
+
+diagnostic_env = require_mapping(diagnostic_step["env"], 'the "Classify failed revision" step env')
+unless diagnostic_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
+  fail_contract('the failed revision classifier must scope DENO_DEPLOY_TOKEN to its step')
+end
+unless diagnostic_env["DENO_DEPLOY_REVISION"] == "${{ steps.deploy.outputs.revision }}"
+  fail_contract('the failed revision classifier must receive the failed Deploy revision ID')
+end
+
+diagnostic_run = diagnostic_step["run"].to_s
+[
+  "node scripts/deno-deploy-failure-diagnostics.mjs classify",
+  "deno run -A jsr:@deno/deploy@0.0.9904",
+  "logs",
+  "node scripts/deno-deploy-failure-diagnostics.mjs classify-runtime",
+  "deployments list",
+  "node scripts/deno-deploy-failure-diagnostics.mjs summarize-deployment-failure",
+].each do |fragment|
+  unless diagnostic_run.include?(fragment)
+    fail_contract("the failed revision classifier is missing: #{fragment}")
+  end
+end
+if diagnostic_run.match?(/console\.log\([^)]*(?:buildLog|response|text)/)
+  fail_contract("the failed revision classifier must not print raw API responses or build logs")
+end
+
+unless deploy_run.include?("node \"$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs\" extract")
+  fail_contract('the "Deploy" step must extract the failed revision with the diagnostics helper')
+end
+unless deploy_run.include?("node \"$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs\" classify-cli")
+  fail_contract('the "Deploy" step must classify CLI failures without printing raw output')
+end
+unless deploy_run.include?('extract <"$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must pipe the CLI log to revision extraction via stdin')
+end
+unless deploy_run.include?('classify-cli <"$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must pipe the CLI log to classification via stdin')
+end
+if deploy_run.include?('extract "$RUNNER_TEMP/deno-deploy.log"') ||
+    deploy_run.include?('classify-cli "$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must not pass diagnostic paths as CLI arguments')
+end
+unless deploy_run.include?("status=$?") && deploy_run.include?("exit \"$status\"")
+  fail_contract('the "Deploy" step must preserve the deno deploy exit status')
+end
+if deploy_run.include?("tee")
+  fail_contract('the "Deploy" step must not stream raw CLI output to the Actions log')
 end
 
 identity_step = deploy_steps.find do |step|
@@ -243,6 +342,47 @@ end
 if identity_run.include?("DENO_DEPLOY_TOKEN")
   fail_contract("the configuration step must not write DENO_DEPLOY_TOKEN")
 end
+[
+  "GITHUB_WORKSPACE/.deno-deploy-source",
+  'mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"',
+  'cp deno.json',
+  'cp -R apps/deno-tokenizer/src',
+  'cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"',
+  'cp -R packages/shared/src',
+  'cp -R packages/shared/src/. "$staging/packages/shared/src"',
+  'deno check --config "$staging/deno.json"',
+  '"$staging/apps/deno-tokenizer/src/main.ts"',
+  'deno cache --config apps/deno-tokenizer/deno.json',
+  'npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm',
+  'import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm")',
+  'file://',
+  'tiktoken_bg.wasm',
+  'fileURLToPath',
+  'fs.copyFileSync',
+  'config.imports["tiktoken/lite/tiktoken_bg.wasm"]',
+  '"./apps/deno-tokenizer/src/tiktoken_bg.wasm"',
+].each do |fragment|
+  unless identity_run.include?(fragment)
+    fail_contract("the staging step is missing: #{fragment}")
+  end
+end
+source_copy_index = identity_run.index('cp -R apps/deno-tokenizer/src')
+wasm_copy_index = identity_run.index('fs.copyFileSync')
+unless source_copy_index && wasm_copy_index && source_copy_index < wasm_copy_index
+  fail_contract('the source tree must be staged before copying the WASM asset')
+end
+cache_index = identity_run.index('deno cache --config apps/deno-tokenizer/deno.json')
+resolve_index = identity_run.index('import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm")')
+config_override_index = identity_run.index('config.imports["tiktoken/lite/tiktoken_bg.wasm"]')
+unless cache_index && resolve_index && config_override_index &&
+    cache_index < config_override_index && resolve_index < config_override_index
+  fail_contract('the WASM source must be resolved before overriding the staged import map')
+end
+staged_config_copy_index = identity_run.index('cp deno.json "$staging/deno.json"')
+staged_check_index = identity_run.index('deno check --config "$staging/deno.json"')
+unless staged_config_copy_index && staged_check_index && staged_config_copy_index < staged_check_index
+  fail_contract('the staged deployment configuration must be checked before deployment')
+end
 
 begin
   deploy_config = JSON.parse(File.read("deno.json"))
@@ -259,12 +399,21 @@ fail_contract("deno.json.deploy.include must be a list") unless include_paths.is
 
 required_deploy_paths = [
   "./deno.json",
-  "./apps/deno-tokenizer/**",
+  "./apps/deno-tokenizer/src/**",
   "./packages/shared/src/**",
 ]
 missing_deploy_paths = required_deploy_paths - include_paths
 unless missing_deploy_paths.empty?
   fail_contract("deno.json.deploy.include is missing: #{missing_deploy_paths.join(", ")}")
+end
+forbidden_deploy_paths = [
+  "./package.json",
+  "./package-lock.json",
+  "./apps/deno-tokenizer/package.json",
+]
+present_forbidden_paths = forbidden_deploy_paths & include_paths
+unless present_forbidden_paths.empty?
+  fail_contract("deno.json.deploy.include must not contain: #{present_forbidden_paths.join(", ")}")
 end
 
 runtime = require_mapping(deploy_config["runtime"], "deno.json.deploy.runtime")
