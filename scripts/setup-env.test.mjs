@@ -25,6 +25,13 @@ test("parses safe assignments without executing shell syntax", () => {
   });
 });
 
+test("rejects non-whitespace characters after a quoted value", () => {
+  assert.throws(
+    () => parseSetupEnvFile('OCTG_DATABASE_ID="db-123"suffix"'),
+    /invalid env file line: 1/,
+  );
+});
+
 test("process values override env-file values and defaults", () => {
   const result = mergeSetupEnvironment(
     { OCTG_DATABASE_ID: "from-file", OCTG_UPSTREAM_BASE_URL: "from-file" },
@@ -63,16 +70,39 @@ test("uses the legacy local setting from the env file when the canonical setting
   );
 });
 
+test("treats local angle-bracket placeholders as unset", () => {
+  assert.equal(
+    resolveLocalValue(
+      { OCTG_LOCAL_UPSTREAM_BASE_URL: "https://gateway.example/<account_id>" },
+      "OCTG_LOCAL_UPSTREAM_BASE_URL",
+      "OCTG_UPSTREAM_BASE_URL",
+      "https://default.example/openai",
+    ),
+    "https://default.example/openai",
+  );
+  assert.equal(
+    resolveLocalValue(
+      {},
+      "OCTG_LOCAL_UPSTREAM_BASE_URL",
+      "OCTG_UPSTREAM_BASE_URL",
+      "https://gateway.example/<gateway_id>",
+    ),
+    "",
+  );
+});
+
 test("resolves deploy inputs from existing config and reports only missing names", () => {
   assert.deepEqual(
     resolveDeployInputs(
       {
+        CLOUDFLARE_ACCOUNT_ID: "",
         OCTG_DATABASE_ID: "",
         OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
         ACCESS_TEAM_DOMAIN: "",
         ACCESS_AUD: "aud-123",
       },
       {
+        accountId: "existing-account",
         databaseId: "existing-db",
         upstream: "https://existing.example/openai",
         teamDomain: "https://team.example",
@@ -81,6 +111,7 @@ test("resolves deploy inputs from existing config and reports only missing names
     ),
     {
       values: {
+        accountId: "existing-account",
         databaseId: "existing-db",
         upstream: "https://gateway.example/openai",
         teamDomain: "https://team.example",
@@ -91,27 +122,63 @@ test("resolves deploy inputs from existing config and reports only missing names
   );
 });
 
-test("does not include secret values in missing-input messages", () => {
+test("requires a Cloudflare account ID for deploy inputs", () => {
   const result = resolveDeployInputs(
-    { OCTG_DATABASE_ID: "", OCTG_UPSTREAM_BASE_URL: "", ACCESS_TEAM_DOMAIN: "", ACCESS_AUD: "" },
-    { databaseId: "", upstream: "", teamDomain: "", audience: "" },
+    {
+      CLOUDFLARE_ACCOUNT_ID: "",
+      OCTG_DATABASE_ID: "db-123",
+      OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
+      ACCESS_TEAM_DOMAIN: "https://team.example",
+      ACCESS_AUD: "aud-123",
+    },
+    { accountId: "", databaseId: "", upstream: "", teamDomain: "", audience: "" },
   );
 
-  assert.deepEqual(result.missing, ["OCTG_DATABASE_ID", "OCTG_UPSTREAM_BASE_URL", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD"]);
+  assert.deepEqual(result.missing, ["CLOUDFLARE_ACCOUNT_ID"]);
+});
+
+test("trims deploy input values before checking placeholders", () => {
+  const result = resolveDeployInputs(
+    {
+      CLOUDFLARE_ACCOUNT_ID: " account-123 ",
+      OCTG_DATABASE_ID: "   ",
+      OCTG_UPSTREAM_BASE_URL: " https://gateway.example/openai ",
+      ACCESS_TEAM_DOMAIN: " <team-domain> ",
+      ACCESS_AUD: " aud-123 ",
+    },
+    { accountId: "", databaseId: "", upstream: "", teamDomain: "", audience: "" },
+  );
+
+  assert.deepEqual(result.values, {
+    accountId: "account-123",
+    upstream: "https://gateway.example/openai",
+    audience: "aud-123",
+  });
+  assert.deepEqual(result.missing, ["OCTG_DATABASE_ID", "ACCESS_TEAM_DOMAIN"]);
+});
+
+test("does not include secret values in missing-input messages", () => {
+  const result = resolveDeployInputs(
+    { CLOUDFLARE_ACCOUNT_ID: "", OCTG_DATABASE_ID: "", OCTG_UPSTREAM_BASE_URL: "", ACCESS_TEAM_DOMAIN: "", ACCESS_AUD: "" },
+    { accountId: "", databaseId: "", upstream: "", teamDomain: "", audience: "" },
+  );
+
+  assert.deepEqual(result.missing, ["CLOUDFLARE_ACCOUNT_ID", "OCTG_DATABASE_ID", "OCTG_UPSTREAM_BASE_URL", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD"]);
   assert.equal(JSON.stringify(result).includes("secret"), false);
 });
 
 test("treats documentation placeholders as missing deploy inputs", () => {
   const result = resolveDeployInputs(
     {
+      CLOUDFLARE_ACCOUNT_ID: "<account-id>",
       OCTG_DATABASE_ID: "<database-id>",
       OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
       ACCESS_TEAM_DOMAIN: "<team-domain>",
       ACCESS_AUD: "<audience-tag>",
     },
-    { databaseId: "", upstream: "", teamDomain: "", audience: "" },
+    { accountId: "", databaseId: "", upstream: "", teamDomain: "", audience: "" },
   );
 
-  assert.deepEqual(result.missing, ["OCTG_DATABASE_ID", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD"]);
+  assert.deepEqual(result.missing, ["CLOUDFLARE_ACCOUNT_ID", "OCTG_DATABASE_ID", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD"]);
   assert.deepEqual(result.values, { upstream: "https://gateway.example/openai" });
 });

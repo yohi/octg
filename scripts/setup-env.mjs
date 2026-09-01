@@ -61,10 +61,11 @@ function parseValue(rawValue, lineNumber) {
 
   const quote = value[0];
   if (quote !== "'" && quote !== '"') return value;
-  if (value.length < 2 || value.at(-1) !== quote) {
+  const closingQuote = value.indexOf(quote, 1);
+  if (closingQuote !== value.length - 1) {
     throw new TypeError(`invalid env file line: ${lineNumber}`);
   }
-  return value.slice(1, -1);
+  return value.slice(1, closingQuote);
 }
 
 export function parseSetupEnvFile(source) {
@@ -95,11 +96,15 @@ export function mergeSetupEnvironment(fileEnvironment, processEnvironment, defau
 }
 
 export function resolveLocalValue(environment, localName, legacyName, defaultValue) {
-  return environment[localName] || environment[legacyName] || defaultValue;
+  for (const value of [environment[localName], environment[legacyName], defaultValue]) {
+    if (typeof value === "string" && value.trim() !== "" && !/<[^>]+>/.test(value)) return value;
+  }
+  return "";
 }
 
 export function resolveDeployInputs(environment, currentConfig) {
   const definitions = [
+    ["accountId", "CLOUDFLARE_ACCOUNT_ID", currentConfig.accountId],
     ["databaseId", "OCTG_DATABASE_ID", currentConfig.databaseId],
     ["upstream", "OCTG_UPSTREAM_BASE_URL", currentConfig.upstream],
     ["teamDomain", "ACCESS_TEAM_DOMAIN", currentConfig.teamDomain],
@@ -109,7 +114,8 @@ export function resolveDeployInputs(environment, currentConfig) {
   const missing = [];
   for (const [property, name, currentValue] of definitions) {
     const candidate = environment[name] || currentValue || "";
-    const value = /<[^>]+>/.test(candidate) ? "" : candidate;
+    const normalizedCandidate = String(candidate).trim();
+    const value = /<[^>]+>/.test(normalizedCandidate) ? "" : normalizedCandidate;
     if (value === "") missing.push(name);
     else values[property] = value;
   }

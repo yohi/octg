@@ -145,6 +145,7 @@ function currentDeployConfig() {
   const source = readFileSync(`${root}/${config}`, "utf8");
   const valueOf = (key) => source.match(new RegExp(String.raw`"${key}"\s*:\s*"([^"]*)"`))?.[1] || "";
   return {
+    accountId: valueOf("account_id"),
     databaseId: valueOf("database_id"),
     upstream: valueOf("OCTG_UPSTREAM_BASE_URL"),
     teamDomain: valueOf("ACCESS_TEAM_DOMAIN"),
@@ -155,7 +156,6 @@ function currentDeployConfig() {
 async function setupDeploy(environment) {
   console.log("本番環境の設定を開始します。Cloudflare にログイン済みであることを確認してください。\n");
   for (const name of [
-    "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_API_TOKEN",
     "OCTG_KEY_PEPPER",
     "OCTG_UPSTREAM_API_TOKEN",
@@ -166,6 +166,7 @@ async function setupDeploy(environment) {
   const resolved = resolveDeployInputs(environment, currentDeployConfig());
   const values = { ...resolved.values };
   const names = {
+    accountId: "CLOUDFLARE_ACCOUNT_ID",
     databaseId: "OCTG_DATABASE_ID",
     upstream: "OCTG_UPSTREAM_BASE_URL",
     teamDomain: "ACCESS_TEAM_DOMAIN",
@@ -196,13 +197,13 @@ async function setupDeploy(environment) {
     run(node, [wrangler, "secret", "put", secret, "--config", config], {
       input: value ? `${value}\n` : undefined,
       env: {
-        ...(environment.CLOUDFLARE_ACCOUNT_ID ? { CLOUDFLARE_ACCOUNT_ID: environment.CLOUDFLARE_ACCOUNT_ID } : {}),
+        ...(values.accountId ? { CLOUDFLARE_ACCOUNT_ID: values.accountId } : {}),
         ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
       },
     });
   }
   const cloudflareEnv = {
-    ...(environment.CLOUDFLARE_ACCOUNT_ID ? { CLOUDFLARE_ACCOUNT_ID: environment.CLOUDFLARE_ACCOUNT_ID } : {}),
+    ...(values.accountId ? { CLOUDFLARE_ACCOUNT_ID: values.accountId } : {}),
     ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
   };
   run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config], { env: cloudflareEnv });
