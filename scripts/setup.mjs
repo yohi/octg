@@ -3,9 +3,12 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+
+import { mergeSetupEnvironment, parseSetupEnvFile, resolveDeployInputs } from "./setup-env.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
@@ -14,15 +17,18 @@ const wrangler = `${root}/node_modules/wrangler/bin/wrangler.js`;
 const args = process.argv.slice(2);
 const mode = args[0];
 const force = args.includes("--force");
+const dryRun = args.includes("--dry-run");
+const envFileOption = args.find((arg) => arg.startsWith("--env-file="));
+const envFile = envFileOption?.slice("--env-file=".length);
 
 const usage = `使い方:
-  npm run setup:local [-- --force]
-  npm run setup:deploy
+  npm run setup:local [-- --env-file=.env] [--force]
+  npm run setup:deploy [-- --env-file=.env] [--dry-run]
 
 setup:local   .dev.vars、ローカル D1、開発用クライアントを準備します。
 setup:deploy  本番用 vars と Secrets を設定し、D1 migration と deploy を実行します。
 
-注意: 本番用の Secret 値はこのスクリプトに保存せず、wrangler の入力プロンプトへ直接入力します。`;
+注意: 本番用の Secret 値はコマンドライン引数へ置かず、環境変数または wrangler の入力へ渡します。`;
 
 if (!mode || args.includes("--help") || args.includes("-h")) {
   console.log(usage);
@@ -37,8 +43,9 @@ if (!new Set(["local", "deploy"]).has(mode)) {
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
     cwd: root,
-    stdio: options.input ? ["pipe", "inherit", "inherit"] : "inherit",
+    stdio: options.input !== undefined ? ["pipe", "inherit", "inherit"] : "inherit",
     input: options.input,
+    env: options.env ? { ...process.env, ...options.env } : process.env,
     shell: false,
   });
   if (result.status !== 0) {
@@ -76,23 +83,38 @@ async function prompt(question, defaultValue) {
   return answer.trim() || defaultValue;
 }
 
-async function setupLocal() {
+function loadSetupEnvironment() {
+  const path = envFile ? resolve(root, envFile) : `${root}/.env`;
+  if (!existsSync(path)) {
+    if (envFile) throw new Error(`${path} がありません`);
+    return mergeSetupEnvironment({}, process.env);
+  }
+  return mergeSetupEnvironment(parseSetupEnvFile(readFileSync(path, "utf8")), process.env);
+}
+
+function localValue(environment, localName, legacyName, defaultValue) {
+  return environment[localName] || process.env[legacyName] || defaultValue;
+}
+
+async function setupLocal(environment) {
   const varsPath = `${root}/apps/gateway-worker/.dev.vars`;
   if (existsSync(varsPath) && !force) {
     throw new Error(`${varsPath} は既に存在します。既存値を保護するため中断しました。上書きする場合は --force を付けてください。`);
   }
 
-  const pepper = process.env.OCTG_KEY_PEPPER || "dev-pepper";
-  const upstream = process.env.OCTG_UPSTREAM_BASE_URL || "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai";
-  const clientId = process.env.OCTG_CLIENT_ID || "client_demo";
-  const clientName = process.env.OCTG_CLIENT_NAME || "Demo";
-  const clientKey = process.env.OCTG_CLIENT_KEY || `octg_sk_local_${randomBytes(18).toString("hex")}`;
-  const clientToolsMode = process.env.OCTG_CLIENT_TOOLS_MODE === "ALLOW" ? "ALLOW" : "REJECT";
+  const pepper = localValue(environment, "OCTG_LOCAL_KEY_PEPPER", "OCTG_KEY_PEPPER", "dev-pepper");
+  const upstream = localValue(environment, "OCTG_LOCAL_UPSTREAM_BASE_URL", "OCTG_UPSTREAM_BASE_URL", "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai");
+  const upstreamToken = localValue(environment, "OCTG_LOCAL_UPSTREAM_API_TOKEN", "OCTG_UPSTREAM_API_TOKEN", "dev-token");
+  const usageApiKey = localValue(environment, "OCTG_LOCAL_OPENAI_USAGE_API_KEY", "OPENAI_USAGE_API_KEY", "dev-usage-key");
+  const clientId = localValue(environment, "OCTG_LOCAL_CLIENT_ID", "OCTG_CLIENT_ID", "client_demo");
+  const clientName = localValue(environment, "OCTG_LOCAL_CLIENT_NAME", "OCTG_CLIENT_NAME", "Demo");
+  const clientKey = localValue(environment, "OCTG_LOCAL_CLIENT_KEY", "OCTG_CLIENT_KEY", `octg_sk_local_${randomBytes(18).toString("hex")}`);
+  const clientToolsMode = localValue(environment, "OCTG_LOCAL_CLIENT_TOOLS_MODE", "OCTG_CLIENT_TOOLS_MODE", "REJECT") === "ALLOW" ? "ALLOW" : "REJECT";
   const vars = [
     `OCTG_KEY_PEPPER=${pepper}`,
     `OCTG_UPSTREAM_BASE_URL=${upstream}`,
-    "OCTG_UPSTREAM_API_TOKEN=dev-token",
-    "OPENAI_USAGE_API_KEY=dev-usage-key",
+    `OCTG_UPSTREAM_API_TOKEN=${upstreamToken}`,
+    `OPENAI_USAGE_API_KEY=${usageApiKey}`,
     "",
   ].join("\n");
 
@@ -118,37 +140,79 @@ async function setupLocal() {
   console.log("次に npm run dev -w apps/gateway-worker を実行してください。");
 }
 
-async function setupDeploy() {
+function currentDeployConfig() {
+  const source = readFileSync(`${root}/${config}`, "utf8");
+  const valueOf = (key) => source.match(new RegExp(String.raw`"${key}"\s*:\s*"([^"]*)"`))?.[1] || "";
+  return {
+    databaseId: valueOf("database_id"),
+    upstream: valueOf("OCTG_UPSTREAM_BASE_URL"),
+    teamDomain: valueOf("ACCESS_TEAM_DOMAIN"),
+    audience: valueOf("ACCESS_AUD"),
+  };
+}
+
+async function setupDeploy(environment) {
   console.log("本番環境の設定を開始します。Cloudflare にログイン済みであることを確認してください。\n");
-  const databaseId = await prompt("D1 database_id", "");
-  const upstream = await prompt("OCTG_UPSTREAM_BASE_URL", "");
-  const teamDomain = await prompt("ACCESS_TEAM_DOMAIN", "");
-  const audience = await prompt("ACCESS_AUD", "");
-  if (!databaseId) {
-    throw new Error("D1 database_id は必須です");
+  for (const name of [
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "OCTG_KEY_PEPPER",
+    "OCTG_UPSTREAM_API_TOKEN",
+    "OPENAI_USAGE_API_KEY",
+  ]) {
+    if (environment[name]) validateDeployValue(name, environment[name]);
   }
-  validateDeployValue("OCTG_UPSTREAM_BASE_URL", upstream);
-  validateDeployValue("ACCESS_TEAM_DOMAIN", teamDomain);
-  validateDeployValue("ACCESS_AUD", audience);
+  const resolved = resolveDeployInputs(environment, currentDeployConfig());
+  const values = { ...resolved.values };
+  const names = {
+    databaseId: "OCTG_DATABASE_ID",
+    upstream: "OCTG_UPSTREAM_BASE_URL",
+    teamDomain: "ACCESS_TEAM_DOMAIN",
+    audience: "ACCESS_AUD",
+  };
+  for (const name of resolved.missing) {
+    const property = Object.keys(names).find((key) => names[key] === name);
+    if (!property) throw new Error(`未対応の設定値です: ${name}`);
+    values[property] = await prompt(name, "");
+  }
+  for (const [property, name] of Object.entries(names)) validateDeployValue(name, values[property]);
+
+  if (dryRun) {
+    console.log("dry-run: wrangler.jsoncのvars更新、Secret登録、D1 migration、Worker deployを省略しました。");
+    console.log(`dry-run: 対象設定 ${Object.values(names).join(", ")}`);
+    return;
+  }
 
   updateConfig({
-    database_id: databaseId,
-    OCTG_UPSTREAM_BASE_URL: upstream,
-    ACCESS_TEAM_DOMAIN: teamDomain,
-    ACCESS_AUD: audience,
+    database_id: values.databaseId,
+    OCTG_UPSTREAM_BASE_URL: values.upstream,
+    ACCESS_TEAM_DOMAIN: values.teamDomain,
+    ACCESS_AUD: values.audience,
   });
 
   for (const secret of ["OCTG_KEY_PEPPER", "OCTG_UPSTREAM_API_TOKEN", "OPENAI_USAGE_API_KEY"]) {
-    run(node, [wrangler, "secret", "put", secret, "--config", config]);
+    const value = environment[secret];
+    run(node, [wrangler, "secret", "put", secret, "--config", config], {
+      input: value ? `${value}\n` : undefined,
+      env: {
+        ...(environment.CLOUDFLARE_ACCOUNT_ID ? { CLOUDFLARE_ACCOUNT_ID: environment.CLOUDFLARE_ACCOUNT_ID } : {}),
+        ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
+      },
+    });
   }
-  run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config]);
-  run(node, [wrangler, "deploy", "--config", config]);
+  const cloudflareEnv = {
+    ...(environment.CLOUDFLARE_ACCOUNT_ID ? { CLOUDFLARE_ACCOUNT_ID: environment.CLOUDFLARE_ACCOUNT_ID } : {}),
+    ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
+  };
+  run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config], { env: cloudflareEnv });
+  run(node, [wrangler, "deploy", "--config", config], { env: cloudflareEnv });
   console.log("\n本番セットアップが完了しました。");
   console.log("クライアントキーは seed:client で発行してください。");
 }
 
 try {
-  await (mode === "local" ? setupLocal() : setupDeploy());
+  const environment = loadSetupEnvironment();
+  await (mode === "local" ? setupLocal(environment) : setupDeploy(environment));
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);

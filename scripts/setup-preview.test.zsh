@@ -23,7 +23,7 @@ OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME="CI Smoke"
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_test
-OCTG_KEY_PEPPER=test-pepper
+OCTG_PREVIEW_KEY_PEPPER=test-pepper
 GITHUB_REPOSITORY=yohi/octg
 EOF
 
@@ -33,6 +33,44 @@ output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" zsh "$SCRIPT_PATH" --dry-r
 [[ "$output" == *"database_id=814c8fdb-dc9d-4a83-9065-001729ccd169"* ]] || { print -u2 "dry-run did not retain the Preview D1 ID"; exit 1; }
 [[ "$output" == *"STANDARD=0"* && "$output" == *"MINI=100000"* ]] || { print -u2 "dry-run did not report quota limits"; exit 1; }
 [[ "$output" != *"test-token"* && "$output" != *"test-pepper"* && "$output" != *"octg_sk_test"* ]] || { print -u2 "dry-run leaked a secret value"; exit 1; }
+
+MARKER="$TEMP_DIR/command-substitution-ran"
+cat > "$TEMP_DIR/consolidated.env" <<EOF
+# Production values remain in the same file but must not be executed by zsh.
+CLOUDFLARE_ACCOUNT_ID=<production-account-id>
+OCTG_LOCAL_UPSTREAM_BASE_URL=https://gateway.example.test/v1/<account_id>/<gateway_id>/openai
+OCTG_PREVIEW_DATABASE_ID=814c8fdb-dc9d-4a83-9065-001729ccd169
+CLOUDFLARE_PREVIEW_ACCOUNT_ID=4bc6b4d26ae21d2b0d5bbb7ce91f1cda
+CLOUDFLARE_PREVIEW_API_TOKEN=preview-token
+OCTG_PREVIEW_DATABASE_NAME=octg-gateway-preview-db
+OCTG_PREVIEW_WORKER_NAME=octg-gateway-preview
+OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/openai
+OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
+OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
+OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
+OCTG_PREVIEW_CLIENT_NAME=CI Smoke
+OCTG_PREVIEW_CLIENT_KEY=octg_sk_preview
+OCTG_PREVIEW_KEY_PEPPER=preview-pepper
+UNRELATED_COMMAND=\$(touch "$MARKER")
+EOF
+if ! consolidated_output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/consolidated.env" zsh "$SCRIPT_PATH" --dry-run)"; then
+  print -u2 "consolidated .env dry-run failed"
+  exit 1
+fi
+[[ ! -e "$MARKER" ]] || { print -u2 "consolidated .env executed an unrelated command"; exit 1; }
+[[ "$consolidated_output" != *"preview-token"* && "$consolidated_output" != *"preview-pepper"* && "$consolidated_output" != *"octg_sk_preview"* ]] || {
+  print -u2 "consolidated .env dry-run leaked a secret value"
+  exit 1
+}
+
+sed '/^OCTG_PREVIEW_KEY_PEPPER=/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/missing-preview-pepper.env"
+if OCTG_KEY_PEPPER=production-pepper \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/missing-preview-pepper.env" \
+  zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup reused a Production pepper"
+  exit 1
+fi
 
 sed 's/OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000/OCTG_PREVIEW_QUOTA_LIMIT_MINI=0/' \
   "$TEMP_DIR/valid.env" > "$TEMP_DIR/invalid.env"

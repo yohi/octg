@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="${0:A:h:h}"
 BASE_CONFIG="$ROOT_DIR/apps/gateway-worker/wrangler.jsonc"
 WRANGLER="${OCTG_PREVIEW_WRANGLER:-$ROOT_DIR/node_modules/.bin/wrangler}"
-ENV_FILE="${OCTG_PREVIEW_ENV_FILE:-$ROOT_DIR/.env.preview}"
+ENV_FILE="${OCTG_PREVIEW_ENV_FILE:-$ROOT_DIR/.env}"
 TEMP_DIR=""
 PREVIEW_CONFIG=""
 DRY_RUN=false
@@ -21,7 +21,10 @@ usage() {
   --help     このヘルプを表示する
 
 デフォルトの入力ファイル:
-  .env.preview
+  .env
+
+.envはshellとして実行せず、Preview用の変数だけを安全に読み込みます。
+ProductionのOCTG_KEY_PEPPERはPreview用pepperへ流用しません。
 
 別のファイルを使う場合:
   OCTG_PREVIEW_ENV_FILE=/path/to/preview.env zsh scripts/setup-preview.zsh
@@ -37,7 +40,7 @@ cleanup() {
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
     rm -rf -- "$TEMP_DIR"
   fi
-  unset CLOUDFLARE_PREVIEW_API_TOKEN OCTG_PREVIEW_CLIENT_KEY OCTG_KEY_PEPPER
+  unset CLOUDFLARE_PREVIEW_API_TOKEN OCTG_PREVIEW_CLIENT_KEY OCTG_PREVIEW_KEY_PEPPER OCTG_KEY_PEPPER
 }
 
 trap cleanup EXIT HUP INT TERM
@@ -64,9 +67,45 @@ done
 [[ -x "$WRANGLER" ]] || die "$WRANGLER がありません。先に npm install を実行してください"
 
 chmod 600 "$ENV_FILE"
-set -a
-source "$ENV_FILE"
-set +a
+
+load_preview_value() {
+  local name="$1"
+  local value
+  [[ -v "$name" ]] && return 0
+  value="$(node --input-type=module - "$ROOT_DIR" "$ENV_FILE" "$name" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [root, envFile, name] = process.argv.slice(2);
+const { parseSetupEnvFile } = await import(`${root}/scripts/setup-env.mjs`);
+const values = parseSetupEnvFile(readFileSync(envFile, "utf8"));
+  const value = values[name];
+  if (typeof value === "string") process.stdout.write(value);
+NODE
+)"
+  if [[ -n "$value" ]]; then
+    typeset -g "$name=$value"
+  fi
+  return 0
+}
+
+for name in \
+  CLOUDFLARE_PREVIEW_ACCOUNT_ID \
+  CLOUDFLARE_PREVIEW_API_TOKEN \
+  OCTG_PREVIEW_DATABASE_ID \
+  OCTG_PREVIEW_DATABASE_NAME \
+  OCTG_PREVIEW_WORKER_NAME \
+  OCTG_PREVIEW_UPSTREAM_BASE_URL \
+  OCTG_PREVIEW_BASE_URL \
+  OCTG_PREVIEW_QUOTA_LIMIT_STANDARD \
+  OCTG_PREVIEW_QUOTA_LIMIT_MINI \
+  OCTG_PREVIEW_CLIENT_ID \
+  OCTG_PREVIEW_CLIENT_NAME \
+  OCTG_PREVIEW_CLIENT_KEY \
+  OCTG_PREVIEW_KEY_PEPPER \
+  GITHUB_REPOSITORY \
+  SMOKE_MODEL; do
+  load_preview_value "$name"
+done
 
 require_value() {
   local name="$1"
@@ -113,7 +152,7 @@ require_value OCTG_PREVIEW_CLIENT_ID "${OCTG_PREVIEW_CLIENT_ID:-}"
 require_value OCTG_PREVIEW_CLIENT_NAME "${OCTG_PREVIEW_CLIENT_NAME:-}"
 require_value OCTG_PREVIEW_CLIENT_KEY "${OCTG_PREVIEW_CLIENT_KEY:-}"
 [[ "${OCTG_PREVIEW_CLIENT_KEY}" == octg_sk_* ]] || die "OCTG_PREVIEW_CLIENT_KEY はoctg_sk_で始める必要があります"
-require_value OCTG_KEY_PEPPER "${OCTG_KEY_PEPPER:-}"
+require_value OCTG_PREVIEW_KEY_PEPPER "${OCTG_PREVIEW_KEY_PEPPER:-}"
 
 if [[ "$CONFIGURE_GITHUB" == true ]]; then
   require_value GITHUB_REPOSITORY "${GITHUB_REPOSITORY:-}"
@@ -217,7 +256,7 @@ fi
 run_wrangler d1 migrations apply DB --remote --config "$PREVIEW_CONFIG"
 
 SEED_SQL="$TEMP_DIR/seed.sql"
-OCTG_KEY_PEPPER="$OCTG_KEY_PEPPER" \
+OCTG_KEY_PEPPER="$OCTG_PREVIEW_KEY_PEPPER" \
   node "$ROOT_DIR/scripts/seed-client.mjs" \
     "$OCTG_PREVIEW_CLIENT_ID" "$OCTG_PREVIEW_CLIENT_NAME" "$OCTG_PREVIEW_CLIENT_KEY" REJECT \
     > "$SEED_SQL"
@@ -243,7 +282,7 @@ if [[ "$CONFIGURE_GITHUB" == true ]]; then
   set_github_variable SMOKE_MODEL "${SMOKE_MODEL:-gpt-5-mini}"
   set_github_secret CLOUDFLARE_PREVIEW_API_TOKEN "$CLOUDFLARE_PREVIEW_API_TOKEN"
   set_github_secret OCTG_PREVIEW_SMOKE_API_KEY "$OCTG_PREVIEW_CLIENT_KEY"
-  set_github_secret OCTG_KEY_PEPPER "$OCTG_KEY_PEPPER"
+  set_github_secret OCTG_KEY_PEPPER "$OCTG_PREVIEW_KEY_PEPPER"
 fi
 
 print "Preview D1 migrationとCI client seedが完了しました: client_id=$OCTG_PREVIEW_CLIENT_ID"

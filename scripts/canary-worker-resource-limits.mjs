@@ -5,7 +5,10 @@ import { resolve } from "node:path";
 
 const MAX_CANARY_CONCURRENCY = 64;
 const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
+const MAX_RESPONSE_METADATA_BYTES = 16 * 1024;
 const OCTG_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+const SAFE_RESPONSE_VALUE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const AWS_ACCESS_KEY_ID = /^AKIA[0-9A-Z]{16}$/;
 const SAFE_ERROR_NAMES = new Set(["AbortError", "Error", "TypeError"]);
 const SAFE_ERROR_CODES = new Set([
   "EAI_AGAIN",
@@ -52,6 +55,36 @@ const safeErrorMetadata = (error) => {
   }
 };
 
+const sanitizeResponseValue = (value) => (
+  typeof value === "string" &&
+  SAFE_RESPONSE_VALUE.test(value) &&
+  !value.startsWith("octg_sk_") &&
+  !value.startsWith("sk-") &&
+  !AWS_ACCESS_KEY_ID.test(value)
+    ? value
+    : null
+);
+
+const safeResponseMetadata = (response, body) => {
+  let parsedBody;
+  try {
+    const responseText = new TextDecoder().decode(new Uint8Array(body).subarray(0, MAX_RESPONSE_METADATA_BYTES));
+    parsedBody = JSON.parse(responseText);
+  } catch {
+    parsedBody = undefined;
+  }
+  const responseError = parsedBody && typeof parsedBody === "object" && parsedBody !== null
+    ? parsedBody.error
+    : undefined;
+  return {
+    route: sanitizeResponseValue(response.headers.get("X-OCTG-Route")),
+    workerVersion: sanitizeResponseValue(response.headers.get("X-OCTG-Worker-Version")),
+    responseErrorType: sanitizeResponseValue(responseError?.type),
+    responseErrorCode: sanitizeResponseValue(responseError?.code),
+    responseErrorParam: sanitizeResponseValue(responseError?.param),
+  };
+};
+
 export async function requestCanary({
   url,
   apiKey,
@@ -76,7 +109,7 @@ export async function requestCanary({
       signal: controller.signal,
       redirect: "error",
     });
-    await response.arrayBuffer();
+    const responseBody = await response.arrayBuffer();
     return {
       event: "octg.canary.result",
       concurrency,
@@ -85,6 +118,7 @@ export async function requestCanary({
       status: response.status,
       durationMs: now() - startedAt,
       requestId: response.headers.get("X-OCTG-Request-Id")?.match(OCTG_REQUEST_ID)?.[0] ?? null,
+      ...safeResponseMetadata(response, responseBody),
     };
   } catch (error) {
     const metadata = safeErrorMetadata(error);

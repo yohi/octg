@@ -57,6 +57,67 @@ test("waits for the response body before measuring duration", async () => {
   assert.equal(bodyConsumed, true);
 });
 
+test("reports safe response metadata without exposing the error message", async () => {
+  const sensitiveMessage = "upstream private detail: user=secret@example.test";
+  const responseBody = JSON.stringify({
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_request",
+      param: "model",
+      message: sensitiveMessage,
+    },
+  });
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Request-Id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "X-OCTG-Route": "free_shared",
+        "X-OCTG-Worker-Version": "version-123",
+      }),
+      arrayBuffer: async () => new TextEncoder().encode(responseBody).buffer,
+    }),
+  });
+
+  assert.equal(result.status, 400);
+  assert.equal(result.route, "free_shared");
+  assert.equal(result.workerVersion, "version-123");
+  assert.equal(result.responseErrorType, "invalid_request_error");
+  assert.equal(result.responseErrorCode, "invalid_request");
+  assert.equal(result.responseErrorParam, "model");
+  assert.equal(JSON.stringify(result).includes(sensitiveMessage), false);
+});
+
+test("omits credential-shaped response metadata", async () => {
+  const credentialShapedValue = "octg_sk_test_secret_value";
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Request-Id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "X-OCTG-Route": credentialShapedValue,
+        "X-OCTG-Worker-Version": credentialShapedValue,
+      }),
+      arrayBuffer: async () => new TextEncoder().encode(JSON.stringify({
+        error: {
+          type: credentialShapedValue,
+          code: credentialShapedValue,
+          param: credentialShapedValue,
+        },
+      })).buffer,
+    }),
+  });
+
+  assert.equal(result.route, null);
+  assert.equal(result.workerVersion, null);
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(JSON.stringify(result).includes(credentialShapedValue), false);
+});
+
 test("exposes only ULID-shaped OCTG request IDs", async () => {
   const validRequestId = "req_01ARZ3NDEKTSV4RRFFQ69G5FAV";
   for (const [header, expectedRequestId] of [

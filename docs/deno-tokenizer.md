@@ -2,6 +2,8 @@
 
 This document covers the deployment and operational procedures for the optional Deno-based tokenizer service (`apps/deno-tokenizer`), which provides exact `o200k_base` BPE tokenization as an external RPC endpoint for the OCTG Gateway Worker.
 
+The repository-wide environment variable catalog is available in [CONFIGURATION.md](./CONFIGURATION.md).
+
 ## Overview
 
 The Deno tokenizer is an **optional, opt-in** component. When enabled, the Gateway Worker routes large input texts (at or above a configurable byte threshold) to this service instead of the local Cloudflare Durable Object (`TokenizerController`). This offloads CPU-intensive BPE work from the Worker to a separate Deno Deploy instance.
