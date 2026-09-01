@@ -31,6 +31,9 @@ jobs:
           deno-version: v2.x
           cache: true
 
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install --yes zsh
+
       - name: Install dependencies
         run: npm ci --ignore-scripts
 

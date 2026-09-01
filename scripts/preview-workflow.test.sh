@@ -13,6 +13,14 @@ function blockBetween(startMarker, endMarker) {
   return workflow.slice(start, end);
 }
 
+const testJob = blockBetween("  test:\n", "  version-smoke:");
+if (!testJob.includes("      - name: Install zsh")) {
+  throw new Error("test job must install zsh before running the Preview contract test");
+}
+if (!testJob.includes("sudo apt-get install --yes zsh")) {
+  throw new Error("test job must install zsh through the runner package manager");
+}
+
 const upload = blockBetween(
   "      - name: Upload worker version",
   "      - name: Add uploaded version at 0% traffic",
