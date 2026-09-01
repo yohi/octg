@@ -337,10 +337,24 @@ end
   'cp deno.json',
   'cp -R apps/deno-tokenizer/src',
   'cp -R packages/shared/src',
+  'deno cache --config apps/deno-tokenizer/deno.json',
+  'npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm',
+  'import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm")',
+  'file://',
+  'tiktoken_bg.wasm',
+  'fileURLToPath',
+  'fs.copyFileSync',
+  'config.imports["tiktoken/lite/tiktoken_bg.wasm"]',
+  '"./apps/deno-tokenizer/src/tiktoken_bg.wasm"',
 ].each do |fragment|
   unless identity_run.include?(fragment)
     fail_contract("the staging step is missing: #{fragment}")
   end
+end
+source_copy_index = identity_run.index('cp -R apps/deno-tokenizer/src')
+wasm_copy_index = identity_run.index('fs.copyFileSync')
+unless source_copy_index && wasm_copy_index && source_copy_index < wasm_copy_index
+  fail_contract('the source tree must be staged before copying the WASM asset')
 end
 
 begin

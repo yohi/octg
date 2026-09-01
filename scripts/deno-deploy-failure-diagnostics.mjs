@@ -161,6 +161,7 @@ export function summarizeDeploymentFailure({ revision, output }) {
       ...(Array.isArray(parsed?.revisions) ? parsed.revisions : []),
       ...(Array.isArray(parsed?.deployments) ? parsed.deployments : []),
       ...(Array.isArray(parsed?.data) ? parsed.data : []),
+      ...(Array.isArray(parsed?.items) ? parsed.items : []),
     ];
   const record = records.find((entry) =>
     entry?.id === revision || entry?.revision === revision
@@ -172,7 +173,9 @@ export function summarizeDeploymentFailure({ revision, output }) {
   const status = ["queued", "building", "succeeded", "failed", "skipped"].includes(record.status)
     ? record.status
     : "unknown";
-  const reason = typeof record.failure_reason === "string" ? record.failure_reason : "";
+  const reason = typeof record.failure_reason === "string"
+    ? record.failure_reason
+    : typeof record.failureReason === "string" ? record.failureReason : "";
   return { status, categories: classifyText(reason) };
 }
 

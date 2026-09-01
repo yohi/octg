@@ -124,6 +124,24 @@ test("summarizes a matching revision failure reason without returning it", () =>
   assert.equal("failure_reason" in result, false);
 });
 
+test("summarizes the deployments API item shape", () => {
+  const result = summarizeDeploymentFailure({
+    revision: "revision-id",
+    output: JSON.stringify({
+      items: [{
+        revision: "revision-id",
+        status: "failed",
+        failureReason: "entrypoint could not be resolved",
+      }],
+    }),
+  });
+
+  assert.deepEqual(result, {
+    status: "failed",
+    categories: ["entrypoint"],
+  });
+});
+
 test("classifies CLI failure output without returning the output", () => {
   const result = classifyCliOutput(JSON.stringify({
     error: { message: "permission denied while collecting source files" },
