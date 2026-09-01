@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
+import { resolve } from "node:path";
 import {
   classifyBuildLogs,
   classifyCliOutput,
   classifyRuntimeLogs,
   extractRevision,
+  readDiagnosticFile,
   summarizeDeploymentFailure,
 } from "./deno-deploy-failure-diagnostics.mjs";
 
@@ -148,6 +150,14 @@ test("classifies CLI failure output without returning the output", () => {
   }));
 
   assert.deepEqual(result, { categories: ["permission"] });
+});
+
+test("restricts CLI diagnostic files to trusted working directories", () => {
+  assert.match(readDiagnosticFile(resolve("package.json")), /"name": "octg"/);
+  assert.throws(
+    () => readDiagnosticFile(resolve("/")),
+    /outside an allowed directory/,
+  );
 });
 
 test("classifies only runtime logs for the failed revision", () => {

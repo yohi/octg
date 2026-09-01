@@ -1,4 +1,5 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -186,6 +187,43 @@ export function classifyCliOutput(output) {
   return { categories: classifyText(extractLogMessages(output)) };
 }
 
+export function readDiagnosticFile(outputPath) {
+  if (typeof outputPath !== "string" || outputPath.length === 0) {
+    throw new Error("diagnostic input path is invalid");
+  }
+
+  const candidatePath = resolve(outputPath);
+  const allowedRoots = [process.env.RUNNER_TEMP, process.cwd()]
+    .filter((root) => typeof root === "string" && root.length > 0)
+    .map((root) => resolve(root));
+  if (!allowedRoots.some((root) => isWithinDirectory(root, candidatePath))) {
+    throw new Error("diagnostic input path is outside an allowed directory");
+  }
+
+  const canonicalPath = realpathSync(candidatePath);
+  const canonicalRoots = allowedRoots.flatMap((root) => {
+    try {
+      return [realpathSync(root)];
+    } catch {
+      return [];
+    }
+  });
+  if (!canonicalRoots.some((root) => isWithinDirectory(root, canonicalPath))) {
+    throw new Error("diagnostic input path is outside an allowed directory");
+  }
+
+  return readFileSync(canonicalPath, "utf8");
+}
+
+function isWithinDirectory(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return relativePath === "" || (
+    !isAbsolute(relativePath) &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..${sep}`)
+  );
+}
+
 function extractLogMessages(output) {
   const messages = [];
   let parsedEntries = 0;
@@ -259,7 +297,7 @@ async function main() {
     const outputPath = process.argv[3];
     if (outputPath === undefined) return;
 
-    const revision = extractRevision(readFileSync(outputPath, "utf8"));
+    const revision = extractRevision(readDiagnosticFile(outputPath));
     const githubOutput = process.env.GITHUB_OUTPUT;
     if (revision !== undefined && githubOutput !== undefined) {
       appendFileSync(githubOutput, `revision=${revision}\n`);
@@ -272,7 +310,7 @@ async function main() {
   if (mode === "classify-cli") {
     const outputPath = process.argv[3];
     if (outputPath === undefined) return;
-    const result = classifyCliOutput(readFileSync(outputPath, "utf8"));
+    const result = classifyCliOutput(readDiagnosticFile(outputPath));
     console.log(`Deno Deploy CLI failure categories: ${result.categories.join(", ") || "none"}`);
     return;
   }
