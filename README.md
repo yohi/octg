@@ -371,7 +371,8 @@ PR の検証には固定の専用 preview Worker と Version Override を使用�
 疎通テストのリクエストだけが対象 version に到達します。PR checkout のコード、
 `wrangler.jsonc`、smoke script には production credential / resource を渡しません。
 
-Deno Deploy の workflow は PR では検証だけを行い、fork からの PR ではデプロイしません。
+Deno Deploy の workflow は通常の PR と fork からの PR では検証だけを行います。同一リポジトリの PR でも
+`deploy-deno` ラベルを付けた場合は、検証と `deno-production` Environment の承認を経てデプロイできます。
 `OCTG_TOKENIZER_AUTH_TOKEN` は GitHub ではなく、対象 Deno Deploy アプリの runtime
 Secret として設定してください。Preview 用 Deno Deploy を使う場合は、Production と別の
 GitHub Environment、別プロジェクト、別 Secret を追加して workflow を拡張します。
