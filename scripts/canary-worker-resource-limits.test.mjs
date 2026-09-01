@@ -43,9 +43,15 @@ test("waits for the response body before measuring duration", async () => {
   const fetchImpl = async () => ({
     status: 200,
     headers: new Headers({ "X-OCTG-Request-Id": "req-body" }),
-    arrayBuffer: async () => {
-      bodyConsumed = true;
-      return new ArrayBuffer(0);
+    body: {
+      getReader: () => ({
+        read: async () => {
+          bodyConsumed = true;
+          return { done: true };
+        },
+        cancel: async () => {},
+        releaseLock: () => {},
+      }),
     },
   });
   const now = () => (bodyConsumed ? 100 : 0);
@@ -55,6 +61,50 @@ test("waits for the response body before measuring duration", async () => {
   assert.equal(result.outcome, "response");
   assert.equal(result.durationMs, 100);
   assert.equal(bodyConsumed, true);
+});
+
+test("cancels oversized response bodies without parsing their metadata", async () => {
+  let cancelled = false;
+  let reads = 0;
+  const metadata = JSON.stringify({
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_request",
+      param: "model",
+    },
+  });
+  const responseText = `${metadata}${" ".repeat((16 * 1024) - metadata.length)}x`;
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Route": "free_shared",
+        "X-OCTG-Worker-Version": "version-123",
+      }),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            reads += 1;
+            return { done: false, value: new TextEncoder().encode(responseText) };
+          },
+          cancel: async () => {
+            cancelled = true;
+          },
+          releaseLock: () => {},
+        }),
+      },
+    }),
+  });
+
+  assert.equal(result.outcome, "response");
+  assert.equal(result.route, "free_shared");
+  assert.equal(result.workerVersion, "version-123");
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(reads, 1);
+  assert.equal(cancelled, true);
 });
 
 test("reports safe response metadata without exposing the error message", async () => {
@@ -76,7 +126,7 @@ test("reports safe response metadata without exposing the error message", async 
         "X-OCTG-Route": "free_shared",
         "X-OCTG-Worker-Version": "version-123",
       }),
-      arrayBuffer: async () => new TextEncoder().encode(responseBody).buffer,
+      body: new Response(responseBody).body,
     }),
   });
 
@@ -100,13 +150,13 @@ test("omits credential-shaped response metadata", async () => {
         "X-OCTG-Route": credentialShapedValue,
         "X-OCTG-Worker-Version": credentialShapedValue,
       }),
-      arrayBuffer: async () => new TextEncoder().encode(JSON.stringify({
+      body: new Response(JSON.stringify({
         error: {
           type: credentialShapedValue,
           code: credentialShapedValue,
           param: credentialShapedValue,
         },
-      })).buffer,
+      })).body,
     }),
   });
 
@@ -130,7 +180,7 @@ test("exposes only ULID-shaped OCTG request IDs", async () => {
       fetchImpl: async () => ({
         status: 200,
         headers: new Headers(header === null ? {} : { "X-OCTG-Request-Id": header }),
-        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
       }),
     });
 

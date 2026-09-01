@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { mergeSetupEnvironment, parseSetupEnvFile, resolveDeployInputs } from "./setup-env.mjs";
+import {
+  mergeSetupEnvironment,
+  parseSetupEnvFile,
+  resolveDeployInputs,
+  resolveLocalValue,
+} from "./setup-env.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
@@ -92,24 +97,20 @@ function loadSetupEnvironment() {
   return mergeSetupEnvironment(parseSetupEnvFile(readFileSync(path, "utf8")), process.env);
 }
 
-function localValue(environment, localName, legacyName, defaultValue) {
-  return environment[localName] || process.env[legacyName] || defaultValue;
-}
-
 async function setupLocal(environment) {
   const varsPath = `${root}/apps/gateway-worker/.dev.vars`;
   if (existsSync(varsPath) && !force) {
     throw new Error(`${varsPath} は既に存在します。既存値を保護するため中断しました。上書きする場合は --force を付けてください。`);
   }
 
-  const pepper = localValue(environment, "OCTG_LOCAL_KEY_PEPPER", "OCTG_KEY_PEPPER", "dev-pepper");
-  const upstream = localValue(environment, "OCTG_LOCAL_UPSTREAM_BASE_URL", "OCTG_UPSTREAM_BASE_URL", "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai");
-  const upstreamToken = localValue(environment, "OCTG_LOCAL_UPSTREAM_API_TOKEN", "OCTG_UPSTREAM_API_TOKEN", "dev-token");
-  const usageApiKey = localValue(environment, "OCTG_LOCAL_OPENAI_USAGE_API_KEY", "OPENAI_USAGE_API_KEY", "dev-usage-key");
-  const clientId = localValue(environment, "OCTG_LOCAL_CLIENT_ID", "OCTG_CLIENT_ID", "client_demo");
-  const clientName = localValue(environment, "OCTG_LOCAL_CLIENT_NAME", "OCTG_CLIENT_NAME", "Demo");
-  const clientKey = localValue(environment, "OCTG_LOCAL_CLIENT_KEY", "OCTG_CLIENT_KEY", `octg_sk_local_${randomBytes(18).toString("hex")}`);
-  const clientToolsMode = localValue(environment, "OCTG_LOCAL_CLIENT_TOOLS_MODE", "OCTG_CLIENT_TOOLS_MODE", "REJECT") === "ALLOW" ? "ALLOW" : "REJECT";
+  const pepper = resolveLocalValue(environment, "OCTG_LOCAL_KEY_PEPPER", "OCTG_KEY_PEPPER", "dev-pepper");
+  const upstream = resolveLocalValue(environment, "OCTG_LOCAL_UPSTREAM_BASE_URL", "OCTG_UPSTREAM_BASE_URL", "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/openai");
+  const upstreamToken = resolveLocalValue(environment, "OCTG_LOCAL_UPSTREAM_API_TOKEN", "OCTG_UPSTREAM_API_TOKEN", "dev-token");
+  const usageApiKey = resolveLocalValue(environment, "OCTG_LOCAL_OPENAI_USAGE_API_KEY", "OPENAI_USAGE_API_KEY", "dev-usage-key");
+  const clientId = resolveLocalValue(environment, "OCTG_LOCAL_CLIENT_ID", "OCTG_CLIENT_ID", "client_demo");
+  const clientName = resolveLocalValue(environment, "OCTG_LOCAL_CLIENT_NAME", "OCTG_CLIENT_NAME", "Demo");
+  const clientKey = resolveLocalValue(environment, "OCTG_LOCAL_CLIENT_KEY", "OCTG_CLIENT_KEY", `octg_sk_local_${randomBytes(18).toString("hex")}`);
+  const clientToolsMode = resolveLocalValue(environment, "OCTG_LOCAL_CLIENT_TOOLS_MODE", "OCTG_CLIENT_TOOLS_MODE", "REJECT") === "ALLOW" ? "ALLOW" : "REJECT";
   const vars = [
     `OCTG_KEY_PEPPER=${pepper}`,
     `OCTG_UPSTREAM_BASE_URL=${upstream}`,

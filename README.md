@@ -422,7 +422,8 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
    printf 'Preview client key: '
    read -r -s OCTG_PREVIEW_CLIENT_KEY
    printf '\n'
-   node scripts/seed-client.mjs client_ci_smoke "CI Smoke" "$OCTG_PREVIEW_CLIENT_KEY" REJECT > /tmp/octg-preview-seed.sql
+   OCTG_KEY_PEPPER="$OCTG_PREVIEW_KEY_PEPPER" \
+     node scripts/seed-client.mjs client_ci_smoke "CI Smoke" "$OCTG_PREVIEW_CLIENT_KEY" REJECT > /tmp/octg-preview-seed.sql
    unset OCTG_PREVIEW_CLIENT_KEY
    ```
 

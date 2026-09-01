@@ -93,6 +93,10 @@ export function mergeSetupEnvironment(fileEnvironment, processEnvironment, defau
   return merged;
 }
 
+export function resolveLocalValue(environment, localName, legacyName, defaultValue) {
+  return environment[localName] || environment[legacyName] || defaultValue;
+}
+
 export function resolveDeployInputs(environment, currentConfig) {
   const definitions = [
     ["databaseId", "OCTG_DATABASE_ID", currentConfig.databaseId],

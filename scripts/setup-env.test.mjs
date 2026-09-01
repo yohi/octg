@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   mergeSetupEnvironment,
   parseSetupEnvFile,
+  resolveLocalValue,
   resolveDeployInputs,
 } from "./setup-env.mjs";
 
@@ -34,6 +35,30 @@ test("process values override env-file values and defaults", () => {
     OCTG_UPSTREAM_BASE_URL: "from-file",
     ACCESS_AUD: "default-aud",
   });
+});
+
+test("uses the legacy local setting from the env file when the canonical setting is absent", () => {
+  assert.equal(
+    resolveLocalValue(
+      { OCTG_UPSTREAM_BASE_URL: "from-file" },
+      "OCTG_LOCAL_UPSTREAM_BASE_URL",
+      "OCTG_UPSTREAM_BASE_URL",
+      "default",
+    ),
+    "from-file",
+  );
+  assert.equal(
+    resolveLocalValue(
+      {
+        OCTG_LOCAL_UPSTREAM_BASE_URL: "from-local",
+        OCTG_UPSTREAM_BASE_URL: "from-legacy",
+      },
+      "OCTG_LOCAL_UPSTREAM_BASE_URL",
+      "OCTG_UPSTREAM_BASE_URL",
+      "default",
+    ),
+    "from-local",
+  );
 });
 
 test("resolves deploy inputs from existing config and reports only missing names", () => {

@@ -67,11 +67,12 @@ const sanitizeResponseValue = (value) => (
 
 const safeResponseMetadata = (response, body) => {
   let parsedBody;
-  try {
-    const responseText = new TextDecoder().decode(new Uint8Array(body).subarray(0, MAX_RESPONSE_METADATA_BYTES));
-    parsedBody = JSON.parse(responseText);
-  } catch {
-    parsedBody = undefined;
+  if (body !== null) {
+    try {
+      parsedBody = JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      parsedBody = undefined;
+    }
   }
   const responseError = parsedBody && typeof parsedBody === "object" && parsedBody !== null
     ? parsedBody.error
@@ -83,6 +84,41 @@ const safeResponseMetadata = (response, body) => {
     responseErrorCode: sanitizeResponseValue(responseError?.code),
     responseErrorParam: sanitizeResponseValue(responseError?.param),
   };
+};
+
+const readResponseBody = async (response) => {
+  if (response.body === null || response.body === undefined) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new TypeError("invalid response body");
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_METADATA_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The response is already being discarded.
+        }
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 };
 
 export async function requestCanary({
@@ -109,7 +145,7 @@ export async function requestCanary({
       signal: controller.signal,
       redirect: "error",
     });
-    const responseBody = await response.arrayBuffer();
+    const responseBody = await readResponseBody(response);
     return {
       event: "octg.canary.result",
       concurrency,
