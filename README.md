@@ -325,6 +325,7 @@ Durable Object storage に保存しません。
    ```bash
    npm install
    cp .env.example .env
+   chmod 600 .env
    # .env の Production セクションへ既存リソースの値を入力
    npm run setup:deploy -- --env-file=.env --dry-run
    npm run setup:deploy -- --env-file=.env
@@ -398,6 +399,7 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
 
    ```bash
    cp .env.example .env
+   chmod 600 .env
    zsh scripts/setup-preview.zsh --dry-run
    zsh scripts/setup-preview.zsh
    zsh scripts/setup-preview.zsh --github
