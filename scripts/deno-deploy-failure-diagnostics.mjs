@@ -1,5 +1,4 @@
-import { appendFileSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { appendFileSync } from "node:fs";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -31,11 +30,11 @@ export function extractRevision(output) {
 function extractRevisionFromHint(hint) {
   if (typeof hint !== "string") return undefined;
 
-  const urlMatch = hint.match(/https:\/\/console\.deno\.com\/[^\s]+/);
+  const urlMatch = /https:\/\/console\.deno\.com\/[^\s]+/.exec(hint);
   if (urlMatch === null) return undefined;
 
   try {
-    const url = new URL(urlMatch[0].replace(/[),.;]+$/, ""));
+    const url = new URL(trimTrailingUrlPunctuation(urlMatch[0]));
     if (url.origin !== CONSOLE_ORIGIN) return undefined;
 
     const segments = url.pathname.split("/").filter(Boolean);
@@ -49,6 +48,12 @@ function extractRevisionFromHint(hint) {
   } catch {
     return undefined;
   }
+}
+
+function trimTrailingUrlPunctuation(value) {
+  let end = value.length;
+  while (end > 0 && "),.;".includes(value[end - 1])) end -= 1;
+  return value.slice(0, end);
 }
 
 function isValidRevision(value) {
@@ -155,29 +160,47 @@ export function summarizeDeploymentFailure({ revision, output }) {
     return { status: "unknown", categories: [], error: "invalid_json" };
   }
 
-  const records = Array.isArray(parsed)
-    ? parsed
-    : [
-      parsed,
-      ...(Array.isArray(parsed?.revisions) ? parsed.revisions : []),
-      ...(Array.isArray(parsed?.deployments) ? parsed.deployments : []),
-      ...(Array.isArray(parsed?.data) ? parsed.data : []),
-      ...(Array.isArray(parsed?.items) ? parsed.items : []),
-    ];
-  const record = records.find((entry) =>
-    entry?.id === revision || entry?.revision === revision
-  );
+  const records = getDeploymentRecords(parsed);
+  const record = findDeploymentRecord(records, revision);
   if (record === undefined) {
     return { status: "unknown", categories: [] };
   }
 
-  const status = ["queued", "building", "succeeded", "failed", "skipped"].includes(record.status)
-    ? record.status
-    : "unknown";
-  const reason = typeof record.failure_reason === "string"
-    ? record.failure_reason
-    : typeof record.failureReason === "string" ? record.failureReason : "";
+  const status = getDeploymentStatus(record.status);
+  const reason = getFailureReason(record);
   return { status, categories: classifyText(reason) };
+}
+
+function getDeploymentRecords(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  return [
+    parsed,
+    ...getRecordList(parsed, "revisions"),
+    ...getRecordList(parsed, "deployments"),
+    ...getRecordList(parsed, "data"),
+    ...getRecordList(parsed, "items"),
+  ];
+}
+
+function getRecordList(parsed, key) {
+  return Array.isArray(parsed?.[key]) ? parsed[key] : [];
+}
+
+function findDeploymentRecord(records, revision) {
+  return records.find((entry) =>
+    entry?.id === revision || entry?.revision === revision
+  );
+}
+
+function getDeploymentStatus(status) {
+  const allowedStatuses = ["queued", "building", "succeeded", "failed", "skipped"];
+  return allowedStatuses.includes(status) ? status : "unknown";
+}
+
+function getFailureReason(record) {
+  if (typeof record?.failure_reason === "string") return record.failure_reason;
+  if (typeof record?.failureReason === "string") return record.failureReason;
+  return "";
 }
 
 export function classifyCliOutput(output) {
@@ -185,43 +208,6 @@ export function classifyCliOutput(output) {
     return { categories: [], skipped: true };
   }
   return { categories: classifyText(extractLogMessages(output)) };
-}
-
-export function readDiagnosticFile(outputPath) {
-  if (typeof outputPath !== "string" || outputPath.length === 0) {
-    throw new Error("diagnostic input path is invalid");
-  }
-
-  const candidatePath = resolve(outputPath);
-  const allowedRoots = [process.env.RUNNER_TEMP, process.cwd()]
-    .filter((root) => typeof root === "string" && root.length > 0)
-    .map((root) => resolve(root));
-  if (!allowedRoots.some((root) => isWithinDirectory(root, candidatePath))) {
-    throw new Error("diagnostic input path is outside an allowed directory");
-  }
-
-  const canonicalPath = realpathSync(candidatePath);
-  const canonicalRoots = allowedRoots.flatMap((root) => {
-    try {
-      return [realpathSync(root)];
-    } catch {
-      return [];
-    }
-  });
-  if (!canonicalRoots.some((root) => isWithinDirectory(root, canonicalPath))) {
-    throw new Error("diagnostic input path is outside an allowed directory");
-  }
-
-  return readFileSync(canonicalPath, "utf8");
-}
-
-function isWithinDirectory(root, candidate) {
-  const relativePath = relative(root, candidate);
-  return relativePath === "" || (
-    !isAbsolute(relativePath) &&
-    relativePath !== ".." &&
-    !relativePath.startsWith(`..${sep}`)
-  );
 }
 
 function extractLogMessages(output) {
@@ -291,101 +277,107 @@ function classifyText(text) {
 }
 
 async function main() {
-  const mode = process.argv[2];
+  const handler = new Map([
+    ["extract", handleExtract],
+    ["classify-cli", handleClassifyCli],
+    ["classify-runtime", handleClassifyRuntime],
+    ["summarize-deployment-failure", handleSummarizeDeploymentFailure],
+    ["classify", handleClassifyBuildLogs],
+  ]).get(process.argv[2]);
+  if (handler !== undefined) await handler();
+}
 
-  if (mode === "extract") {
-    const outputPath = process.argv[3];
-    if (outputPath === undefined) return;
+async function handleExtract() {
+  const revision = extractRevision(await readDiagnosticStdin());
+  const githubOutput = process.env.GITHUB_OUTPUT;
+  if (revision !== undefined && githubOutput !== undefined) {
+    appendFileSync(githubOutput, `revision=${revision}\n`);
+  } else if (revision === undefined) {
+    console.warn("Deno Deploy failure did not include a revision ID for build-log classification.");
+  }
+}
 
-    const revision = extractRevision(readDiagnosticFile(outputPath));
-    const githubOutput = process.env.GITHUB_OUTPUT;
-    if (revision !== undefined && githubOutput !== undefined) {
-      appendFileSync(githubOutput, `revision=${revision}\n`);
-    } else if (revision === undefined) {
-      console.warn("Deno Deploy failure did not include a revision ID for build-log classification.");
-    }
+async function handleClassifyCli() {
+  const result = classifyCliOutput(await readDiagnosticStdin());
+  console.log(`Deno Deploy CLI failure categories: ${result.categories.join(", ") || "none"}`);
+}
+
+async function handleClassifyRuntime() {
+  const revision = process.argv[3];
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    console.warn("Deno Deploy runtime-log classifier unavailable: read.");
     return;
   }
 
-  if (mode === "classify-cli") {
-    const outputPath = process.argv[3];
-    if (outputPath === undefined) return;
-    const result = classifyCliOutput(readDiagnosticFile(outputPath));
-    console.log(`Deno Deploy CLI failure categories: ${result.categories.join(", ") || "none"}`);
+  const result = classifyRuntimeLogs({
+    revision,
+    output: readResult.text,
+    inputTruncated: readResult.truncated,
+  });
+  if (result.skipped === true) {
+    console.warn("Deno Deploy runtime-log classifier skipped because its inputs are invalid.");
     return;
   }
 
-  if (mode === "classify-runtime") {
-    const revision = process.argv[3];
-    const readResult = await readBoundedText(
-      Readable.toWeb(process.stdin),
-      MAX_BUILD_LOG_BYTES,
-    );
+  console.log(`Deno Deploy runtime-log categories: ${result.categories.join(", ") || "none"}`);
+  if (result.truncated) {
+    console.log(`Deno Deploy runtime-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
+  }
+}
 
-    if (readResult.error !== undefined) {
-      console.warn("Deno Deploy runtime-log classifier unavailable: read.");
-      return;
-    }
-
-    const result = classifyRuntimeLogs({
-      revision,
-      output: readResult.text,
-      inputTruncated: readResult.truncated,
-    });
-
-    if (result.skipped === true) {
-      console.warn("Deno Deploy runtime-log classifier skipped because its inputs are invalid.");
-    } else {
-      console.log(`Deno Deploy runtime-log categories: ${result.categories.join(", ") || "none"}`);
-      if (result.truncated) {
-        console.log(`Deno Deploy runtime-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
-      }
-    }
+async function handleSummarizeDeploymentFailure() {
+  const revision = process.argv[3];
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    console.warn("Deno Deploy failure summary unavailable: read.");
     return;
   }
 
-  if (mode === "summarize-deployment-failure") {
-    const revision = process.argv[3];
-    const readResult = await readBoundedText(
-      Readable.toWeb(process.stdin),
-      MAX_BUILD_LOG_BYTES,
-    );
-    if (readResult.error !== undefined) {
-      console.warn("Deno Deploy failure summary unavailable: read.");
-      return;
-    }
-
-    const result = summarizeDeploymentFailure({
-      revision,
-      output: readResult.text,
-    });
-    if (result.skipped === true) {
-      console.warn("Deno Deploy failure summary skipped because its inputs are invalid.");
-      return;
-    }
-    console.log(`Deno Deploy failure status: ${result.status}`);
-    console.log(`Deno Deploy failure categories: ${result.categories.join(", ") || "none"}`);
+  const result = summarizeDeploymentFailure({
+    revision,
+    output: readResult.text,
+  });
+  if (result.skipped === true) {
+    console.warn("Deno Deploy failure summary skipped because its inputs are invalid.");
     return;
   }
+  console.log(`Deno Deploy failure status: ${result.status}`);
+  console.log(`Deno Deploy failure categories: ${result.categories.join(", ") || "none"}`);
+}
 
-  if (mode === "classify") {
-    const result = await classifyBuildLogs({
-      revision: process.env.DENO_DEPLOY_REVISION,
-      token: process.env.DENO_DEPLOY_TOKEN,
-      organization: process.env.DENO_DEPLOY_ORG,
-    });
+async function handleClassifyBuildLogs() {
+  const result = await classifyBuildLogs({
+    revision: process.env.DENO_DEPLOY_REVISION,
+    token: process.env.DENO_DEPLOY_TOKEN,
+    organization: process.env.DENO_DEPLOY_ORG,
+  });
 
-    if (result.skipped === true) {
-      console.warn("Deno Deploy build-log classifier skipped because its inputs are invalid.");
-    } else if (result.error !== undefined) {
-      console.warn(`Deno Deploy build-log classifier unavailable: ${result.error}.`);
-    } else {
-      console.log(`Deno Deploy build-log categories: ${result.categories.join(", ") || "none"}`);
-      if (result.truncated) {
-        console.log(`Deno Deploy build-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
-      }
+  if (result.skipped === true) {
+    console.warn("Deno Deploy build-log classifier skipped because its inputs are invalid.");
+  } else if (result.error !== undefined) {
+    console.warn(`Deno Deploy build-log classifier unavailable: ${result.error}.`);
+  } else {
+    console.log(`Deno Deploy build-log categories: ${result.categories.join(", ") || "none"}`);
+    if (result.truncated) {
+      console.log(`Deno Deploy build-log classifier truncated after ${MAX_BUILD_LOG_BYTES} bytes.`);
     }
   }
+}
+
+async function readDiagnosticInput() {
+  return readBoundedText(
+    Readable.toWeb(process.stdin),
+    MAX_BUILD_LOG_BYTES,
+  );
+}
+
+async function readDiagnosticStdin() {
+  const readResult = await readDiagnosticInput();
+  if (readResult.error !== undefined) {
+    throw new Error("diagnostic input unavailable");
+  }
+  return readResult.text;
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {

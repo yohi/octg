@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   classifyBuildLogs,
   classifyCliOutput,
   classifyRuntimeLogs,
   extractRevision,
-  readDiagnosticFile,
   summarizeDeploymentFailure,
 } from "./deno-deploy-failure-diagnostics.mjs";
 
@@ -152,12 +152,20 @@ test("classifies CLI failure output without returning the output", () => {
   assert.deepEqual(result, { categories: ["permission"] });
 });
 
-test("restricts CLI diagnostic files to trusted working directories", () => {
-  assert.match(readDiagnosticFile(resolve("package.json")), /"name": "octg"/);
-  assert.throws(
-    () => readDiagnosticFile(resolve("/")),
-    /outside an allowed directory/,
+test("classifies CLI diagnostics piped on stdin without a file path", () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./deno-deploy-failure-diagnostics.mjs", import.meta.url)), "classify-cli"],
+    {
+      encoding: "utf8",
+      input: JSON.stringify({
+        error: { message: "permission denied while collecting source files" },
+      }),
+    },
   );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /permission/);
 });
 
 test("classifies only runtime logs for the failed revision", () => {

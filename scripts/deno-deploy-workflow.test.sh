@@ -300,6 +300,16 @@ end
 unless deploy_run.include?("node \"$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs\" classify-cli")
   fail_contract('the "Deploy" step must classify CLI failures without printing raw output')
 end
+unless deploy_run.include?('extract <"$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must pipe the CLI log to revision extraction via stdin')
+end
+unless deploy_run.include?('classify-cli <"$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must pipe the CLI log to classification via stdin')
+end
+if deploy_run.include?('extract "$RUNNER_TEMP/deno-deploy.log"') ||
+    deploy_run.include?('classify-cli "$RUNNER_TEMP/deno-deploy.log"')
+  fail_contract('the "Deploy" step must not pass diagnostic paths as CLI arguments')
+end
 unless deploy_run.include?("status=$?") && deploy_run.include?("exit \"$status\"")
   fail_contract('the "Deploy" step must preserve the deno deploy exit status')
 end

@@ -153,10 +153,10 @@ jobs:
           status=$?
           set -e
           if [[ "$status" -ne 0 ]]; then
-            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" extract "$RUNNER_TEMP/deno-deploy.log"; then
+            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" extract <"$RUNNER_TEMP/deno-deploy.log"; then
               echo "::warning::Deno Deploy failure diagnostics could not extract a revision ID"
             fi
-            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" classify-cli "$RUNNER_TEMP/deno-deploy.log"; then
+            if ! node "$GITHUB_WORKSPACE/scripts/deno-deploy-failure-diagnostics.mjs" classify-cli <"$RUNNER_TEMP/deno-deploy.log"; then
               echo "::warning::Deno Deploy CLI failure classification unavailable"
             fi
             echo "::error::Deno Deploy failed; raw CLI output was suppressed"
