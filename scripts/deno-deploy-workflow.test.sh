@@ -334,9 +334,14 @@ if identity_run.include?("DENO_DEPLOY_TOKEN")
 end
 [
   "GITHUB_WORKSPACE/.deno-deploy-source",
+  'mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"',
   'cp deno.json',
   'cp -R apps/deno-tokenizer/src',
+  'cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"',
   'cp -R packages/shared/src',
+  'cp -R packages/shared/src/. "$staging/packages/shared/src"',
+  'deno check --config "$staging/deno.json"',
+  '"$staging/apps/deno-tokenizer/src/main.ts"',
   'deno cache --config apps/deno-tokenizer/deno.json',
   'npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm',
   'import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm")',
@@ -355,6 +360,18 @@ source_copy_index = identity_run.index('cp -R apps/deno-tokenizer/src')
 wasm_copy_index = identity_run.index('fs.copyFileSync')
 unless source_copy_index && wasm_copy_index && source_copy_index < wasm_copy_index
   fail_contract('the source tree must be staged before copying the WASM asset')
+end
+cache_index = identity_run.index('deno cache --config apps/deno-tokenizer/deno.json')
+resolve_index = identity_run.index('import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm")')
+config_override_index = identity_run.index('config.imports["tiktoken/lite/tiktoken_bg.wasm"]')
+unless cache_index && resolve_index && config_override_index &&
+    cache_index < config_override_index && resolve_index < config_override_index
+  fail_contract('the WASM source must be resolved before overriding the staged import map')
+end
+staged_config_copy_index = identity_run.index('cp deno.json "$staging/deno.json"')
+staged_check_index = identity_run.index('deno check --config "$staging/deno.json"')
+unless staged_config_copy_index && staged_check_index && staged_config_copy_index < staged_check_index
+  fail_contract('the staged deployment configuration must be checked before deployment')
 end
 
 begin

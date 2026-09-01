@@ -88,6 +88,27 @@ jobs:
       - name: Prepare Deno Deploy configuration
         working-directory: .
         run: |
+          staging="$GITHUB_WORKSPACE/.deno-deploy-source"
+          mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+          deno cache --config apps/deno-tokenizer/deno.json \
+            npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
+          wasm_source="$(
+            deno eval \
+              --config apps/deno-tokenizer/deno.json \
+              'console.log(import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm"));'
+          )"
+          if [[ "$wasm_source" != file://* ]]; then
+            echo "::error::tiktoken WASM did not resolve to a local file URL"
+            exit 2
+          fi
+          cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"
+          cp -R packages/shared/src/. "$staging/packages/shared/src"
+          node - "$wasm_source" "$staging/apps/deno-tokenizer/src/tiktoken_bg.wasm" <<'NODE'
+          const fs = require("node:fs");
+          const { fileURLToPath } = require("node:url");
+          const [source, destination] = process.argv.slice(2);
+          fs.copyFileSync(fileURLToPath(source), destination);
+          NODE
           node <<'NODE'
           const fs = require("node:fs");
           const path = "deno.json";
@@ -109,28 +130,9 @@ jobs:
             "./apps/deno-tokenizer/src/tiktoken_bg.wasm";
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
           NODE
-          staging="$GITHUB_WORKSPACE/.deno-deploy-source"
-          mkdir -p "$staging/apps/deno-tokenizer" "$staging/packages/shared"
           cp deno.json "$staging/deno.json"
-          cp -R apps/deno-tokenizer/src "$staging/apps/deno-tokenizer"
-          cp -R packages/shared/src "$staging/packages/shared"
-          deno cache --config apps/deno-tokenizer/deno.json \
-            npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
-          wasm_source="$(
-            deno eval \
-              --config apps/deno-tokenizer/deno.json \
-              'console.log(import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm"));'
-          )"
-          if [[ "$wasm_source" != file://* ]]; then
-            echo "::error::tiktoken WASM did not resolve to a local file URL"
-            exit 2
-          fi
-          node - "$wasm_source" "$staging/apps/deno-tokenizer/src/tiktoken_bg.wasm" <<'NODE'
-          const fs = require("node:fs");
-          const { fileURLToPath } = require("node:url");
-          const [source, destination] = process.argv.slice(2);
-          fs.copyFileSync(fileURLToPath(source), destination);
-          NODE
+          deno check --config "$staging/deno.json" \
+            "$staging/apps/deno-tokenizer/src/main.ts"
 
       - name: Deploy
         id: deploy
