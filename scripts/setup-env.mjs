@@ -113,9 +113,9 @@ export function resolveDeployInputs(environment, currentConfig) {
   const values = {};
   const missing = [];
   for (const [property, name, currentValue] of definitions) {
-    const candidate = environment[name] || currentValue || "";
-    const normalizedCandidate = String(candidate).trim();
-    const value = /<[^>]+>/.test(normalizedCandidate) ? "" : normalizedCandidate;
+    const value = [environment[name], currentValue]
+      .map((candidate) => String(candidate ?? "").trim())
+      .find((candidate) => candidate !== "" && !/<[^>]+>/.test(candidate)) ?? "";
     if (value === "") missing.push(name);
     else values[property] = value;
   }

@@ -122,6 +122,37 @@ test("resolves deploy inputs from existing config and reports only missing names
   );
 });
 
+test("falls back to existing config when env file contains a documentation placeholder", () => {
+  assert.deepEqual(
+    resolveDeployInputs(
+      {
+        CLOUDFLARE_ACCOUNT_ID: "account-123",
+        OCTG_DATABASE_ID: "<production-d1-database-id>",
+        OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
+        ACCESS_TEAM_DOMAIN: "https://team.example",
+        ACCESS_AUD: "aud-123",
+      },
+      {
+        accountId: "account-123",
+        databaseId: "existing-db",
+        upstream: "https://existing.example/openai",
+        teamDomain: "https://existing.team.example",
+        audience: "existing-aud",
+      },
+    ),
+    {
+      values: {
+        accountId: "account-123",
+        databaseId: "existing-db",
+        upstream: "https://gateway.example/openai",
+        teamDomain: "https://team.example",
+        audience: "aud-123",
+      },
+      missing: [],
+    },
+  );
+});
+
 test("requires a Cloudflare account ID for deploy inputs", () => {
   const result = resolveDeployInputs(
     {
