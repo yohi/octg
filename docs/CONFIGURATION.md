@@ -214,11 +214,32 @@ Secretは`wrangler secret put`でCloudflareへ登録され、リポジトリの�
 
 Previewの変数は全て`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`です。Productionの同名リソースを指定しないでください。`.env`からPreview setupへ渡すpepperは`OCTG_PREVIEW_KEY_PEPPER`です。GitHub Environmentへ同期する際だけSecret名`OCTG_KEY_PEPPER`へ変換されます。
 
+### GitHub Environment `preview`へ登録する値
+
+GitHub Actionsのworkflowが参照するSecret名は、ローカル`.env`のPreview名と一部異なります。
+`zsh scripts/setup-preview.zsh --github`を使う場合も、入力元は`.env`のPreview値です。
+
+| `.env`の入力名 | GitHub Environmentの登録名 | GitHubへ渡す実値 |
+| --- | --- | --- |
+| `CLOUDFLARE_PREVIEW_API_TOKEN` | Secret `CLOUDFLARE_PREVIEW_API_TOKEN` | Preview AccountのWorkers/D1などを操作できるCloudflare API token |
+| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのCloudflare API token。Custom tokenでAccount権限`AI Gateway: Run`を付与したもの |
+| `OCTG_PREVIEW_CLIENT_KEY` | Secret `OCTG_PREVIEW_SMOKE_API_KEY` | Preview D1へseedしたCI clientの実値（`octg_sk_*`） |
+| `OCTG_PREVIEW_KEY_PEPPER` | Secret `OCTG_KEY_PEPPER` | Preview D1のclient key hashに使ったpepperと同じ値 |
+
+`OCTG_UPSTREAM_API_TOKEN`は、Cloudflare Dashboardの **My Profile → API Tokens → Create Token → Custom token** で作成します。
+Account権限の **AI Gateway: Run** を選び、`OCTG_PREVIEW_UPSTREAM_BASE_URL`が指すPreview Gateway Bを所有するAccountを対象にします。
+GitHub Secretへは、作成後に一度だけ表示されるtoken全文を、`Bearer`や引用符なしで入力してください。
+
+Preview workflowでの`OCTG_UPSTREAM_API_TOKEN`は、Preview Gateway B（WorkerからOpenAIへ出る経路）のtokenです。
+Gateway A（OpenCodeからOCTGへ入るCustom Provider）の`OCTG_CF_API_TOKEN`、Wrangler管理用の
+`CLOUDFLARE_PREVIEW_API_TOKEN`、OpenAI Project API key、`octg_sk_*`は入力しません。
+Gateway BのURLは`https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-b-id>/openai`形式で、Gateway AのCustom Provider URLとは異なります。
+
 | 変数 | Secret | 設定先 | 取得・決定方法 |
 | --- | ---: | --- | --- |
 | `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | No | Preview Wrangler認証 | Preview専用AccountのID |
 | `CLOUDFLARE_PREVIEW_API_TOKEN` | Yes | Preview setup/GitHub Secret | Preview resourceだけに限定したtoken |
-| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Yes | Preview setup/GitHub Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのRun token。Production tokenと共有しない |
+| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Yes | Preview setup/GitHub Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのRun token。Production tokenと共有しない。Cloudflare Custom tokenの`AI Gateway: Run`権限を使用 |
 | `OCTG_PREVIEW_DATABASE_ID` | No | 一時Preview Wrangler config | Preview D1 Database ID。空欄なら既存名を検索し、なければ作成後にIDを入力 |
 | `OCTG_PREVIEW_DATABASE_NAME` | No | Preview D1 | 既定値は`octg-gateway-preview-db` |
 | `OCTG_PREVIEW_WORKER_NAME` | No | Preview Worker | 既定値は`octg-gateway-preview` |

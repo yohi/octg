@@ -445,22 +445,49 @@ GitHub Environment、別プロジェクト、別 Secret を追加して workflow
    ログへ残らない方法で事前に環境へ設定してください。
    GitHub Environment `preview` の `OCTG_PREVIEW_SMOKE_API_KEY` へ登録し、
    productionのclient keyは使わないでください。
-3. GitHub Environment `preview` の Secrets に以下を登録します:
-   - `CLOUDFLARE_PREVIEW_API_TOKEN` — preview resource専用 token
-   - `OCTG_UPSTREAM_API_TOKEN` — Preview Gateway B専用 Run token
-   - `OCTG_PREVIEW_SMOKE_API_KEY` — 手順 2 の preview client key
-   - `OCTG_KEY_PEPPER` — Preview WorkerとCI version uploadで共有するkey pepper
+3. GitHub Environment `preview` の **Secrets** に以下を登録します。表の「入力する値」が実値です。
+
+   | Secret名 | 入力する値 |
+   | --- | --- |
+   | `CLOUDFLARE_PREVIEW_API_TOKEN` | Preview Account用のCloudflare API token |
+   | `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway B用token（`AI Gateway: Run`） |
+   | `OCTG_PREVIEW_SMOKE_API_KEY` | Preview D1へseedしたCI clientの`octg_sk_*` key |
+   | `OCTG_KEY_PEPPER` | Preview D1のhashに使った`OCTG_PREVIEW_KEY_PEPPER` |
+
+   `OCTG_UPSTREAM_API_TOKEN`はCloudflare Dashboardの
+   **My Profile → API Tokens → Create Token → Custom token**で発行します。
+   Preview Gateway Bを所有するAccountを対象に、Account権限の
+   **AI Gateway: Run**を付与してください。
+   `OCTG_PREVIEW_UPSTREAM_BASE_URL`が指す`/openai` endpointのtokenです。
+   Gateway AのCustom Provider用tokenではありません。
+   Secretにはtoken全文だけを入力します。`Bearer`、引用符、Gateway URL、
+   OpenAI API keyは付けません。
+
+   ローカル`.env`の名前とGitHub Secretの名前は一部異なります。`--github`は次のように変換します。
+
+   | `.env`の名前 | GitHub Environmentの名前 |
+   | --- | --- |
+   | `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | `OCTG_UPSTREAM_API_TOKEN` |
+   | `OCTG_PREVIEW_KEY_PEPPER` | `OCTG_KEY_PEPPER` |
+   | `OCTG_PREVIEW_CLIENT_KEY` | `OCTG_PREVIEW_SMOKE_API_KEY` |
+   | `CLOUDFLARE_PREVIEW_API_TOKEN` | `CLOUDFLARE_PREVIEW_API_TOKEN` |
+
 4. **Actions Variables** に以下を登録します:
-   - `CLOUDFLARE_PREVIEW_ACCOUNT_ID` — preview Cloudflare account ID
-   - `OCTG_PREVIEW_DATABASE_ID` — preview D1 database ID
-   - `OCTG_PREVIEW_UPSTREAM_BASE_URL` — preview upstream URL（dedicated endpointまたは共有billing principalのendpoint）
-   - `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` — Preview STANDARD poolのbounded quota上限。`0`で無効化
-   - `OCTG_PREVIEW_QUOTA_LIMIT_MINI` — Preview MINI poolのbounded quota上限（正の整数）
-   - `OCTG_PREVIEW_BASE_URL` — preview Worker URL（例: `https://octg-gateway-preview.<subdomain>.workers.dev`）
-   - `OCTG_PREVIEW_WORKER_NAME` — 任意。未設定時は `octg-gateway-preview`
-   - `SMOKE_MODEL` — 任意。未設定時は `gpt-5-mini`
-5. production deploy用のSecret `CLOUDFLARE_API_TOKEN` とVariable `CLOUDFLARE_ACCOUNT_ID` は
-   production workflowだけへ登録し、preview environmentへ登録・参照しないでください。
+
+   | Variable名 | 入力する値 |
+   | --- | --- |
+   | `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | Preview Account ID（32桁hex。tokenではない） |
+   | `OCTG_PREVIEW_DATABASE_ID` | Preview D1 Database ID（UUID） |
+   | `OCTG_PREVIEW_UPSTREAM_BASE_URL` | Gateway B endpoint（`/openai`で終了） |
+   | `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` | Preview STANDARD pool上限（`0`で無効） |
+   | `OCTG_PREVIEW_QUOTA_LIMIT_MINI` | Preview MINI pool上限（正の整数） |
+   | `OCTG_PREVIEW_BASE_URL` | Preview Workerの公開URL |
+   | `OCTG_PREVIEW_WORKER_NAME` | 任意。未設定時は`octg-gateway-preview` |
+   | `SMOKE_MODEL` | 任意。未設定時は`gpt-5-mini` |
+
+5. production deploy用のSecret `CLOUDFLARE_API_TOKEN` と
+   Variable `CLOUDFLARE_ACCOUNT_ID`はproduction workflowだけへ登録し、
+   preview environmentへ登録・参照しないでください。
 
 ### 運用メモ
 
