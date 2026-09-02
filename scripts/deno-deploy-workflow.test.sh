@@ -136,6 +136,13 @@ end
 unless validate_runs.any? { |run| run.include?("deno task test") }
   fail_contract("jobs.validate must run deno task test")
 end
+node_dependencies_step = validate_steps.find do |step|
+  step.is_a?(Hash) && step["run"].to_s.include?("npm ci")
+end
+fail_contract("jobs.validate must install Node dependencies") unless node_dependencies_step
+unless node_dependencies_step["working-directory"] == "${{ github.workspace }}"
+  fail_contract("Node dependency installation must run from the repository root")
+end
 workflow_test_step = validate_steps.find do |step|
   step.is_a?(Hash) && step["run"].to_s.include?("npm run test:deno-deploy-workflow")
 end
