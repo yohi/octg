@@ -3,6 +3,8 @@
 本リポジトリは GitHub の [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。
 `git clone` せずにテンプレートから新規リポジトリを生成し、独自の OCTG インスタンスを構築できます。
 
+設定値の一覧、取得場所、Secretの扱いは [設定カタログ](./CONFIGURATION.md) に集約しています。
+
 OCTG の本番構成は Gateway Worker、`QuotaController` Durable Object、
 `TokenizerController` Durable Object で構成されます。TokenizerController は
 `tokenizer:primary` という固定 ID の RPC endpoint で exact `o200k_base` BPE を実行します。
@@ -160,10 +162,13 @@ fail-closedのまま保持し、Preview/Productionのcontrol-plane auditを混�
 
 ```bash
 npm install
-npm run setup:deploy
+cp .env.example .env
+# .env の Production セクションへ既存リソースの値を入力
+npm run setup:deploy -- --env-file=.env --dry-run
+npm run setup:deploy -- --env-file=.env
 ```
 
-スクリプトは以下の順で値を対話入力します。
+スクリプトは `.env`、process environment、既存の `wrangler.jsonc` から設定値を解決し、不足している値だけを対話入力します。
 
 | 質問 | 入力値 | 取得場所 | 必須 |
 |---|---|---|---|
@@ -172,7 +177,7 @@ npm run setup:deploy
 | `ACCESS_TEAM_DOMAIN` | `your-team.cloudflareaccess.com` | 2.5 の Access アプリ Overview | ✓ |
 | `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | ✓ |
 
-`setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定がすべて入力されている場合にのみ実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順で Access アプリを作成し、取得した値を入力してください。
+`setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定が揃っている場合に実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順でAccessアプリを作成し、取得した値を`.env`へ入力してください。
 その後、`wrangler secret put` を使って **3 つの Secret を順番に入力**します。順序は以下の通りです。
 
 | 順 | Secret | 入力する値 | 取得場所 |

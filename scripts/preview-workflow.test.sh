@@ -13,12 +13,23 @@ function blockBetween(startMarker, endMarker) {
   return workflow.slice(start, end);
 }
 
+const testJob = blockBetween("  test:\n", "  version-smoke:");
+if (!testJob.includes("      - name: Install zsh")) {
+  throw new Error("test job must install zsh before running the Preview contract test");
+}
+if (!testJob.includes("sudo apt-get install --yes zsh")) {
+  throw new Error("test job must install zsh through the runner package manager");
+}
+
 const upload = blockBetween(
   "      - name: Upload worker version",
   "      - name: Add uploaded version at 0% traffic",
 );
 if (!upload.includes('--secrets-file "$secrets_file"')) {
   throw new Error("version upload must include the Preview Worker secrets file");
+}
+if (!upload.includes("OCTG_UPSTREAM_API_TOKEN: ${{ secrets.OCTG_UPSTREAM_API_TOKEN }}")) {
+  throw new Error("version upload must receive the Preview upstream token secret");
 }
 const uploadRun = upload.slice(upload.indexOf("        run: |"));
 if (!upload.includes("PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}")) {
@@ -35,6 +46,9 @@ if (!uploadRun.includes('--tag "pr-${PULL_REQUEST_NUMBER}"')) {
 }
 if (!uploadRun.includes('--message "pr-${PULL_REQUEST_NUMBER} ${PULL_REQUEST_HEAD_SHA}"')) {
   throw new Error("version upload must use env-backed pull request metadata for its message");
+}
+if (!upload.includes("OCTG_UPSTREAM_API_TOKEN: process.env.OCTG_UPSTREAM_API_TOKEN")) {
+  throw new Error("Preview Worker secrets file must include the upstream token");
 }
 
 const restore = blockBetween(

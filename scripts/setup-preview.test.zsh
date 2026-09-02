@@ -13,6 +13,7 @@ trap cleanup EXIT
 cat > "$TEMP_DIR/valid.env" <<'EOF'
 CLOUDFLARE_PREVIEW_ACCOUNT_ID=4bc6b4d26ae21d2b0d5bbb7ce91f1cda
 CLOUDFLARE_PREVIEW_API_TOKEN=test-token
+OCTG_PREVIEW_UPSTREAM_API_TOKEN=preview-upstream-token
 OCTG_PREVIEW_DATABASE_ID=814c8fdb-dc9d-4a83-9065-001729ccd169
 OCTG_PREVIEW_DATABASE_NAME=octg-gateway-preview-db
 OCTG_PREVIEW_WORKER_NAME=octg-gateway-preview
@@ -23,7 +24,7 @@ OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME="CI Smoke"
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_test
-OCTG_KEY_PEPPER=test-pepper
+OCTG_PREVIEW_KEY_PEPPER=test-pepper
 GITHUB_REPOSITORY=yohi/octg
 EOF
 
@@ -32,7 +33,52 @@ output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" zsh "$SCRIPT_PATH" --dry-r
 [[ "$output" == *"binding=DB"* ]] || { print -u2 "dry-run did not normalize the D1 binding"; exit 1; }
 [[ "$output" == *"database_id=814c8fdb-dc9d-4a83-9065-001729ccd169"* ]] || { print -u2 "dry-run did not retain the Preview D1 ID"; exit 1; }
 [[ "$output" == *"STANDARD=0"* && "$output" == *"MINI=100000"* ]] || { print -u2 "dry-run did not report quota limits"; exit 1; }
-[[ "$output" != *"test-token"* && "$output" != *"test-pepper"* && "$output" != *"octg_sk_test"* ]] || { print -u2 "dry-run leaked a secret value"; exit 1; }
+[[ "$output" != *"test-token"* && "$output" != *"preview-upstream-token"* && "$output" != *"test-pepper"* && "$output" != *"octg_sk_test"* ]] || { print -u2 "dry-run leaked a secret value"; exit 1; }
+
+MARKER="$TEMP_DIR/command-substitution-ran"
+cat > "$TEMP_DIR/consolidated.env" <<EOF
+# Production values remain in the same file but must not be executed by zsh.
+CLOUDFLARE_ACCOUNT_ID=<production-account-id>
+OCTG_LOCAL_UPSTREAM_BASE_URL=https://gateway.example.test/v1/<account_id>/<gateway_id>/openai
+OCTG_PREVIEW_DATABASE_ID=814c8fdb-dc9d-4a83-9065-001729ccd169
+CLOUDFLARE_PREVIEW_ACCOUNT_ID=4bc6b4d26ae21d2b0d5bbb7ce91f1cda
+CLOUDFLARE_PREVIEW_API_TOKEN=preview-token
+OCTG_PREVIEW_UPSTREAM_API_TOKEN=preview-upstream-token
+OCTG_PREVIEW_DATABASE_NAME=octg-gateway-preview-db
+OCTG_PREVIEW_WORKER_NAME=octg-gateway-preview
+OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/openai
+OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
+OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
+OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
+OCTG_PREVIEW_CLIENT_NAME=CI Smoke
+OCTG_PREVIEW_CLIENT_KEY=octg_sk_preview
+OCTG_PREVIEW_KEY_PEPPER=preview-pepper
+UNRELATED_COMMAND=\$(touch "$MARKER")
+EOF
+if ! consolidated_output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/consolidated.env" zsh "$SCRIPT_PATH" --dry-run)"; then
+  print -u2 "consolidated .env dry-run failed"
+  exit 1
+fi
+[[ ! -e "$MARKER" ]] || { print -u2 "consolidated .env executed an unrelated command"; exit 1; }
+[[ "$consolidated_output" != *"preview-token"* && "$consolidated_output" != *"preview-upstream-token"* && "$consolidated_output" != *"preview-pepper"* && "$consolidated_output" != *"octg_sk_preview"* ]] || {
+  print -u2 "consolidated .env dry-run leaked a secret value"
+  exit 1
+}
+
+sed '/^OCTG_PREVIEW_KEY_PEPPER=/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/missing-preview-pepper.env"
+if OCTG_KEY_PEPPER=production-pepper \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/missing-preview-pepper.env" \
+  zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup reused a Production pepper"
+  exit 1
+fi
+
+sed '/^OCTG_PREVIEW_UPSTREAM_API_TOKEN=/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/missing-preview-upstream-token.env"
+if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/missing-preview-upstream-token.env" zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup accepted a missing upstream API token"
+  exit 1
+fi
 
 sed 's/OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000/OCTG_PREVIEW_QUOTA_LIMIT_MINI=0/' \
   "$TEMP_DIR/valid.env" > "$TEMP_DIR/invalid.env"
@@ -82,7 +128,7 @@ reuse_output="$(
   print -u2 "existing Preview D1 was not reused"
   exit 1
 }
-[[ "$reuse_output" != *"test-token"* && "$reuse_output" != *"test-pepper"* && "$reuse_output" != *"octg_sk_test"* ]] || {
+[[ "$reuse_output" != *"test-token"* && "$reuse_output" != *"preview-upstream-token"* && "$reuse_output" != *"test-pepper"* && "$reuse_output" != *"octg_sk_test"* ]] || {
   print -u2 "reuse flow leaked a secret value"
   exit 1
 }
@@ -138,7 +184,11 @@ gh_log="$(< "$TEMP_DIR/gh.log")"
   print -u2 "GitHub setup did not synchronize the Worker pepper secret"
   exit 1
 }
-[[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"octg_sk_test"* ]] || {
+[[ "$gh_log" == *"secret set OCTG_UPSTREAM_API_TOKEN --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview upstream token secret"
+  exit 1
+}
+[[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"preview-upstream-token"* && "$gh_log" != *"octg_sk_test"* ]] || {
   print -u2 "GitHub setup leaked a secret value"
   exit 1
 }

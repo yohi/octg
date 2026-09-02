@@ -43,9 +43,15 @@ test("waits for the response body before measuring duration", async () => {
   const fetchImpl = async () => ({
     status: 200,
     headers: new Headers({ "X-OCTG-Request-Id": "req-body" }),
-    arrayBuffer: async () => {
-      bodyConsumed = true;
-      return new ArrayBuffer(0);
+    body: {
+      getReader: () => ({
+        read: async () => {
+          bodyConsumed = true;
+          return { done: true };
+        },
+        cancel: async () => {},
+        releaseLock: () => {},
+      }),
     },
   });
   const now = () => (bodyConsumed ? 100 : 0);
@@ -55,6 +61,139 @@ test("waits for the response body before measuring duration", async () => {
   assert.equal(result.outcome, "response");
   assert.equal(result.durationMs, 100);
   assert.equal(bodyConsumed, true);
+});
+
+test("cancels oversized response bodies without parsing their metadata", async () => {
+  let cancelled = false;
+  let reads = 0;
+  const metadata = JSON.stringify({
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_request",
+      param: "model",
+    },
+  });
+  const responseText = `${metadata}${" ".repeat((16 * 1024) - metadata.length)}x`;
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Route": "free_shared",
+        "X-OCTG-Worker-Version": "version-123",
+      }),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            reads += 1;
+            return { done: false, value: new TextEncoder().encode(responseText) };
+          },
+          cancel: async () => {
+            cancelled = true;
+          },
+          releaseLock: () => {},
+        }),
+      },
+    }),
+  });
+
+  assert.equal(result.outcome, "response");
+  assert.equal(result.route, "free_shared");
+  assert.equal(result.workerVersion, "version-123");
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(reads, 1);
+  assert.equal(cancelled, true);
+});
+
+test("reports safe response metadata without exposing the error message", async () => {
+  const sensitiveMessage = "upstream private detail: user=secret@example.test";
+  const responseBody = JSON.stringify({
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_request",
+      param: "model",
+      message: sensitiveMessage,
+    },
+  });
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Request-Id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "X-OCTG-Route": "free_shared",
+        "X-OCTG-Worker-Version": "version-123",
+      }),
+      body: new Response(responseBody).body,
+    }),
+  });
+
+  assert.equal(result.status, 400);
+  assert.equal(result.route, "free_shared");
+  assert.equal(result.workerVersion, "version-123");
+  assert.equal(result.responseErrorType, "invalid_request_error");
+  assert.equal(result.responseErrorCode, "invalid_request");
+  assert.equal(result.responseErrorParam, "model");
+  assert.equal(JSON.stringify(result).includes(sensitiveMessage), false);
+});
+
+test("omits credential-shaped response metadata", async () => {
+  const credentialShapedValue = "octg_sk_test_secret_value";
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Request-Id": "req_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "X-OCTG-Route": credentialShapedValue,
+        "X-OCTG-Worker-Version": credentialShapedValue,
+      }),
+      body: new Response(JSON.stringify({
+        error: {
+          type: credentialShapedValue,
+          code: credentialShapedValue,
+          param: credentialShapedValue,
+        },
+      })).body,
+    }),
+  });
+
+  assert.equal(result.route, null);
+  assert.equal(result.workerVersion, null);
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(JSON.stringify(result).includes(credentialShapedValue), false);
+});
+
+test("omits temporary AWS access keys from response metadata", async () => {
+  const temporaryAccessKey = `ASIA${"A".repeat(16)}`;
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Route": temporaryAccessKey,
+        "X-OCTG-Worker-Version": temporaryAccessKey,
+      }),
+      body: new Response(JSON.stringify({
+        error: {
+          type: temporaryAccessKey,
+          code: temporaryAccessKey,
+          param: temporaryAccessKey,
+        },
+      })).body,
+    }),
+  });
+
+  assert.equal(result.route, null);
+  assert.equal(result.workerVersion, null);
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(JSON.stringify(result).includes(temporaryAccessKey), false);
 });
 
 test("exposes only ULID-shaped OCTG request IDs", async () => {
@@ -69,7 +208,7 @@ test("exposes only ULID-shaped OCTG request IDs", async () => {
       fetchImpl: async () => ({
         status: 200,
         headers: new Headers(header === null ? {} : { "X-OCTG-Request-Id": header }),
-        arrayBuffer: async () => new ArrayBuffer(0),
+        body: null,
       }),
     });
 

@@ -5,7 +5,10 @@ import { resolve } from "node:path";
 
 const MAX_CANARY_CONCURRENCY = 64;
 const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
+const MAX_RESPONSE_METADATA_BYTES = 16 * 1024;
 const OCTG_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+const SAFE_RESPONSE_VALUE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const AWS_ACCESS_KEY_ID = /^(?:AKIA|ASIA)[0-9A-Z]{16}$/;
 const SAFE_ERROR_NAMES = new Set(["AbortError", "Error", "TypeError"]);
 const SAFE_ERROR_CODES = new Set([
   "EAI_AGAIN",
@@ -52,6 +55,72 @@ const safeErrorMetadata = (error) => {
   }
 };
 
+const sanitizeResponseValue = (value) => (
+  typeof value === "string" &&
+  SAFE_RESPONSE_VALUE.test(value) &&
+  !value.startsWith("octg_sk_") &&
+  !value.startsWith("sk-") &&
+  !AWS_ACCESS_KEY_ID.test(value)
+    ? value
+    : null
+);
+
+const safeResponseMetadata = (response, body) => {
+  let parsedBody;
+  if (body !== null) {
+    try {
+      parsedBody = JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      parsedBody = undefined;
+    }
+  }
+  const responseError = parsedBody && typeof parsedBody === "object" && parsedBody !== null
+    ? parsedBody.error
+    : undefined;
+  return {
+    route: sanitizeResponseValue(response.headers.get("X-OCTG-Route")),
+    workerVersion: sanitizeResponseValue(response.headers.get("X-OCTG-Worker-Version")),
+    responseErrorType: sanitizeResponseValue(responseError?.type),
+    responseErrorCode: sanitizeResponseValue(responseError?.code),
+    responseErrorParam: sanitizeResponseValue(responseError?.param),
+  };
+};
+
+const readResponseBody = async (response) => {
+  if (response.body === null || response.body === undefined) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new TypeError("invalid response body");
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_RESPONSE_METADATA_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The response is already being discarded.
+        }
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+};
+
 export async function requestCanary({
   url,
   apiKey,
@@ -76,7 +145,7 @@ export async function requestCanary({
       signal: controller.signal,
       redirect: "error",
     });
-    await response.arrayBuffer();
+    const responseBody = await readResponseBody(response);
     return {
       event: "octg.canary.result",
       concurrency,
@@ -85,6 +154,7 @@ export async function requestCanary({
       status: response.status,
       durationMs: now() - startedAt,
       requestId: response.headers.get("X-OCTG-Request-Id")?.match(OCTG_REQUEST_ID)?.[0] ?? null,
+      ...safeResponseMetadata(response, responseBody),
     };
   } catch (error) {
     const metadata = safeErrorMetadata(error);

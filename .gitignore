@@ -3,6 +3,8 @@ node_modules/
 .wrangler/
 .dev.vars*
 .env*
+!.env.example
+admin.env
 .justice/
 .codegraph/
 .worktrees/
