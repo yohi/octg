@@ -136,6 +136,25 @@ end
 unless validate_runs.any? { |run| run.include?("deno task test") }
   fail_contract("jobs.validate must run deno task test")
 end
+node_dependencies_step = validate_steps.find do |step|
+  step.is_a?(Hash) && step["run"].to_s.include?("npm ci")
+end
+fail_contract("jobs.validate must install Node dependencies") unless node_dependencies_step
+unless node_dependencies_step["working-directory"] == "${{ github.workspace }}"
+  fail_contract("Node dependency installation must run from the repository root")
+end
+workflow_test_step = validate_steps.find do |step|
+  step.is_a?(Hash) && step["run"].to_s.include?("npm run test:deno-deploy-workflow")
+end
+fail_contract("jobs.validate must run the Deno Deploy workflow contract test") unless workflow_test_step
+node_dependencies_index = validate_steps.index(node_dependencies_step)
+workflow_test_index = validate_steps.index(workflow_test_step)
+unless node_dependencies_index < workflow_test_index
+  fail_contract("jobs.validate must install Node dependencies before running the workflow contract test")
+end
+unless workflow_test_step["working-directory"] == "${{ github.workspace }}"
+  fail_contract("the workflow contract test must run from the repository root")
+end
 
 unless validate_steps.any? { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("denoland/setup-deno@") }
   fail_contract("jobs.validate must use denoland/setup-deno")
@@ -334,10 +353,22 @@ end
   "DENO_DEPLOY_APP",
   "deploy.org",
   "deploy.app",
+  'cp deno.json "$staging/deno.json"',
+  'node - "$staging/deno.json"',
+  "const path = process.argv[2]",
 ].each do |fragment|
   unless identity_run.include?(fragment)
     fail_contract("the configuration step is missing: #{fragment}")
   end
+end
+if identity_run.match?(/const path = ["']deno\.json["']/) ||
+    identity_run.match?(/writeFileSync\(\s*["']deno\.json["']/)
+  fail_contract("the configuration step must not mutate the checked-out root deno.json")
+end
+config_copy_index = identity_run.index('cp deno.json "$staging/deno.json"')
+config_materialization_index = identity_run.index('node - "$staging/deno.json"')
+unless config_copy_index < config_materialization_index
+  fail_contract("the configuration step must copy deno.json before materializing deployment identity")
 end
 if identity_run.include?("DENO_DEPLOY_TOKEN")
   fail_contract("the configuration step must not write DENO_DEPLOY_TOKEN")

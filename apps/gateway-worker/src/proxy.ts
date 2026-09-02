@@ -248,7 +248,17 @@ export async function handleProxy(
     const auth = await authenticate(request, env, requestId);
     if (!("id" in auth)) return errorResponse(auth);
     const denoTokenizerConfig = resolveDenoTokenizerConfig(env);
-    if (denoTokenizerConfig.kind === "invalid") return errorResponse(errInternal(requestId));
+    if (denoTokenizerConfig.kind === "invalid") {
+      const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");
+      finishResourceStage(env, requestId, "tokenize", tokenizeStartedAt, "exception", {
+        route: "error:tokenizer_unavailable",
+        tokenizationProvider: "deno",
+        tokenizationFailureCategory: "configuration",
+        quotaReserved: false,
+        upstreamReached: false,
+      });
+      return errorResponse(errInternal(requestId));
+    }
     const parsedIdempotencyKey = parseIdempotencyKey(request.headers.get("Idempotency-Key"));
     if (parsedIdempotencyKey.kind === "invalid") {
       return errorResponse(

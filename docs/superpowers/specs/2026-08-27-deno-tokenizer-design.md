@@ -163,7 +163,9 @@ content type、JSON shape、UTF-8 input byte ceiling、認証を検証し、認�
 1. **raw JSON envelope:** Worker は whitespace を含めない canonical
    `JSON.stringify({ inputText })` を送る。Deno は raw body ceiling を
    `6 * effectiveInputBytes + 16` bytes として導出する。`Content-Length` がこの値を超える場合は
-   read 前に拒否し、欠落・不正・偽装 header の場合も bounded stream read で同じ ceiling を強制する。
+   read 前に拒否する。欠落または偽装（宣言値より大きい）header の場合は bounded stream read で
+   同じ ceiling を強制する。数値として解釈できない不正な `Content-Length` は read 前に HTTP 400 で
+   拒否する。
    この ceiling は JSON escape による raw body の増加を許容するためのものであり、inputText の
    上限判定には用いない。
 2. **parsed `inputText`:** JSON shape の検証後に `TextEncoder` で UTF-8 byte length を測定し、
