@@ -1,4 +1,4 @@
-import { resolveDeployInputs } from "./setup-env.mjs";
+import { hasPlaceholder, resolveDeployInputs } from "./setup-env.mjs";
 
 export const DEPLOY_CONFIG_NAMES = Object.freeze({
   accountId: "CLOUDFLARE_ACCOUNT_ID",
@@ -20,7 +20,7 @@ const DEPLOY_INPUT_SECRET_NAMES = Object.freeze([
 ]);
 
 export function validateDeployValue(name, value) {
-  if (!value.trim() || /<[^>]+>/.test(value)) {
+  if (!value.trim() || hasPlaceholder(value)) {
     throw new Error(`${name} は実際の設定値を入力してください（空値や <...> プレースホルダーは使用できません）`);
   }
 }

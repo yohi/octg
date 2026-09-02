@@ -91,67 +91,63 @@ test("treats local angle-bracket placeholders as unset", () => {
   );
 });
 
-test("resolves deploy inputs from existing config and reports only missing names", () => {
-  assert.deepEqual(
-    resolveDeployInputs(
-      {
-        CLOUDFLARE_ACCOUNT_ID: "",
-        OCTG_DATABASE_ID: "",
-        OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
-        ACCESS_TEAM_DOMAIN: "",
-        ACCESS_AUD: "aud-123",
-      },
-      {
-        accountId: "existing-account",
-        databaseId: "existing-db",
-        upstream: "https://existing.example/openai",
-        teamDomain: "https://team.example",
-        audience: "existing-aud",
-      },
-    ),
-    {
-      values: {
-        accountId: "existing-account",
-        databaseId: "existing-db",
-        upstream: "https://gateway.example/openai",
-        teamDomain: "https://team.example",
-        audience: "aud-123",
-      },
-      missing: [],
-    },
-  );
+const deployEnvironment = (overrides = {}) => ({
+  CLOUDFLARE_ACCOUNT_ID: "",
+  OCTG_DATABASE_ID: "",
+  OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
+  ACCESS_TEAM_DOMAIN: "",
+  ACCESS_AUD: "aud-123",
+  ...overrides,
 });
 
-test("falls back to existing config when env file contains a documentation placeholder", () => {
-  assert.deepEqual(
-    resolveDeployInputs(
-      {
-        CLOUDFLARE_ACCOUNT_ID: "account-123",
-        OCTG_DATABASE_ID: "<production-d1-database-id>",
-        OCTG_UPSTREAM_BASE_URL: "https://gateway.example/openai",
-        ACCESS_TEAM_DOMAIN: "https://team.example",
-        ACCESS_AUD: "aud-123",
-      },
-      {
-        accountId: "account-123",
-        databaseId: "existing-db",
-        upstream: "https://existing.example/openai",
-        teamDomain: "https://existing.team.example",
-        audience: "existing-aud",
-      },
-    ),
-    {
-      values: {
-        accountId: "account-123",
-        databaseId: "existing-db",
-        upstream: "https://gateway.example/openai",
-        teamDomain: "https://team.example",
-        audience: "aud-123",
-      },
-      missing: [],
+const existingDeployConfig = {
+  accountId: "existing-account",
+  databaseId: "existing-db",
+  upstream: "https://existing.example/openai",
+  teamDomain: "https://team.example",
+  audience: "existing-aud",
+};
+
+for (const {
+  name,
+  environment,
+  currentConfig,
+  expectedValues,
+} of [
+  {
+    name: "resolves deploy inputs from existing config and reports only missing names",
+    environment: deployEnvironment(),
+    currentConfig: existingDeployConfig,
+    expectedValues: {
+      ...existingDeployConfig,
+      upstream: "https://gateway.example/openai",
+      audience: "aud-123",
     },
-  );
-});
+  },
+  {
+    name: "falls back to existing config when env file contains a documentation placeholder",
+    environment: deployEnvironment({
+      CLOUDFLARE_ACCOUNT_ID: "account-123",
+      OCTG_DATABASE_ID: "<production-d1-database-id>",
+      ACCESS_TEAM_DOMAIN: "https://team.example",
+    }),
+    currentConfig: { ...existingDeployConfig, accountId: "account-123" },
+    expectedValues: {
+      ...existingDeployConfig,
+      accountId: "account-123",
+      upstream: "https://gateway.example/openai",
+      teamDomain: "https://team.example",
+      audience: "aud-123",
+    },
+  },
+]) {
+  test(name, () => {
+    assert.deepEqual(resolveDeployInputs(environment, currentConfig), {
+      values: expectedValues,
+      missing: [],
+    });
+  });
+}
 
 test("requires a Cloudflare account ID for deploy inputs", () => {
   const result = resolveDeployInputs(

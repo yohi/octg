@@ -1,3 +1,5 @@
+import { parseEnvFile } from "./parse-env-file.mjs";
+
 const SETUP_ENV_NAMES = new Set([
   "CLOUDFLARE_ACCOUNT_ID",
   "CLOUDFLARE_API_TOKEN",
@@ -69,21 +71,12 @@ function parseValue(rawValue, lineNumber) {
 }
 
 export function parseSetupEnvFile(source) {
-  const values = {};
-  for (const [index, line] of source.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-
-    const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (!match) {
-      const name = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
-      if (SETUP_ENV_NAMES.has(name)) throw new TypeError(`invalid env file line: ${index + 1}`);
-      continue;
-    }
-    if (!SETUP_ENV_NAMES.has(match[1])) continue;
-    values[match[1]] = parseValue(match[2], index + 1);
-  }
-  return values;
+  return parseEnvFile(
+    source,
+    SETUP_ENV_NAMES,
+    parseValue,
+    (lineNumber) => new TypeError(`invalid env file line: ${lineNumber}`),
+  );
 }
 
 export function mergeSetupEnvironment(fileEnvironment, processEnvironment, defaults = {}) {
@@ -97,9 +90,19 @@ export function mergeSetupEnvironment(fileEnvironment, processEnvironment, defau
 
 export function resolveLocalValue(environment, localName, legacyName, defaultValue) {
   for (const value of [environment[localName], environment[legacyName], defaultValue]) {
-    if (typeof value === "string" && value.trim() !== "" && !/<[^>]+>/.test(value)) return value;
+    if (typeof value === "string" && value.trim() !== "" && !hasPlaceholder(value)) return value;
   }
   return "";
+}
+
+export function hasPlaceholder(value) {
+  let opening = value.indexOf("<");
+  while (opening !== -1) {
+    const closing = value.indexOf(">", opening + 1);
+    if (closing > opening + 1) return true;
+    opening = value.indexOf("<", opening + 1);
+  }
+  return false;
 }
 
 export function resolveDeployInputs(environment, currentConfig) {
@@ -115,7 +118,7 @@ export function resolveDeployInputs(environment, currentConfig) {
   for (const [property, name, currentValue] of definitions) {
     const value = [environment[name], currentValue]
       .map((candidate) => String(candidate ?? "").trim())
-      .find((candidate) => candidate !== "" && !/<[^>]+>/.test(candidate)) ?? "";
+      .find((candidate) => candidate !== "" && !hasPlaceholder(candidate)) ?? "";
     if (value === "") missing.push(name);
     else values[property] = value;
   }

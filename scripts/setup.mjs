@@ -81,12 +81,6 @@ function updateConfig(values) {
   writeFileSync(`${root}/${config}`, source);
 }
 
-function validateDeployValue(name, value) {
-  if (!value.trim() || /<[^>]+>/.test(value)) {
-    throw new Error(`${name} は実際の設定値を入力してください（空値や <...> プレースホルダーは使用できません）`);
-  }
-}
-
 async function prompt(question, defaultValue) {
   const rl = createInterface({ input, output });
   const answer = await rl.question(`${question}${defaultValue ? ` [${defaultValue}]` : ""}: `);
@@ -103,7 +97,7 @@ function loadSetupEnvironment() {
   return mergeSetupEnvironment(parseSetupEnvFile(readFileSync(path, "utf8")), process.env);
 }
 
-async function setupLocal(environment) {
+function setupLocal(environment) {
   const varsPath = `${root}/apps/gateway-worker/.dev.vars`;
   if (existsSync(varsPath) && !force) {
     throw new Error(`${varsPath} は既に存在します。既存値を保護するため中断しました。上書きする場合は --force を付けてください。`);
@@ -198,7 +192,11 @@ async function setupDeploy(environment) {
 
 try {
   const environment = loadSetupEnvironment();
-  await (mode === "local" ? setupLocal(environment) : setupDeploy(environment));
+  if (mode === "local") {
+    setupLocal(environment);
+  } else {
+    await setupDeploy(environment);
+  }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);

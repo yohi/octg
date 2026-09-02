@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseEnvFile as parseEnvironmentFile } from "./parse-env-file.mjs";
+
 export const DEFAULT_CANARY_CONCURRENCY = "1,2";
 export const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
 export const DEFAULT_CANARY_ENV_FILE = "admin.env";
@@ -25,28 +27,22 @@ const defaultInputText = "The quick brown fox jumps over the lazy dog.\n".repeat
 export class CanaryConfigError extends TypeError {}
 
 export function parseEnvFile(source) {
-  const values = {};
-  for (const [index, line] of source.replace(/^\uFEFF/, "").split(/\r?\n/).entries()) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (!match) {
-      const name = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\b/)?.[1];
-      if (CANARY_ENV_NAMES.has(name)) throw new CanaryConfigError(`invalid env file line: ${index + 1}`);
-      continue;
-    }
-    if (!CANARY_ENV_NAMES.has(match[1])) continue;
-    let value = match[2].trim();
-    const quote = value[0];
-    if (quote === "'" || quote === '"') {
-      if (value.length < 2 || value.at(-1) !== quote) {
-        throw new CanaryConfigError(`invalid env file line: ${index + 1}`);
+  return parseEnvironmentFile(
+    source,
+    CANARY_ENV_NAMES,
+    (rawValue, lineNumber) => {
+      let value = rawValue.trim();
+      const quote = value[0];
+      if (quote === "'" || quote === '"') {
+        if (value.length < 2 || value.at(-1) !== quote) {
+          throw new CanaryConfigError(`invalid env file line: ${lineNumber}`);
+        }
+        value = value.slice(1, -1);
       }
-      value = value.slice(1, -1);
-    }
-    values[match[1]] = value;
-  }
-  return values;
+      return value;
+    },
+    (lineNumber) => new CanaryConfigError(`invalid env file line: ${lineNumber}`),
+  );
 }
 
 function positiveIntegers(name, raw) {
