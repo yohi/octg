@@ -174,22 +174,14 @@ between Production and Preview.
 
 ### 2.1 Monitoring
 
-The Deno tokenizer logs structured events to stdout. In Deno Deploy, these appear in the project logs.
-
-**Successful request**:
-```json
-{"event":"deno_tokenizer.request","requestId":"req_abc123","method":"POST","durationMs":12,"status":200}
-```
-
-**Failed request** (e.g., auth failure):
-```json
-{"event":"deno_tokenizer.request","requestId":"req_abc123","method":"POST","durationMs":1,"status":401}
-```
+The Deno tokenizer itself does **not** emit structured stdout logs. It intentionally receives only `inputText` (no request ID, auth material, or upstream metadata) and returns only the BPE count. All observability is owned by the Gateway Worker (`resource-observation.ts`).
 
 **Gateway Worker observability** (`resource-observation.ts`):
 - When Deno tokenizer is used: `tokenizationProvider: "deno"`
-- When Deno fails and fallback occurs: `tokenizationProvider: "deno"`, `tokenizationFailureCategory: "timeout" | "network" | ...`
 - When Cloudflare DO is used: `tokenizationProvider: "cloudflare_do"`
+- When Deno configuration is invalid: `tokenizationProvider: "deno"`, `tokenizationFailureCategory: "configuration"`
+- When Deno fails at runtime: `tokenizationProvider: "deno"`, `tokenizationFailureCategory: "timeout" | "network" | "upstream_status" | "malformed_response" | "arithmetic"`
+
 
 ### 2.2 Health Check
 
@@ -200,19 +192,14 @@ curl https://<your-project>.deno.dev/health
 
 ### 2.3 Troubleshooting
 
-| Symptom | Likely Cause | Fix |
+| Gateway returns `500` with `error:internal_error` (public) / `error:tokenizer_unavailable` (internal event) | Deno endpoint unreachable or auth failure | Check `DENO_TOKENIZER_ENDPOINT` and `DENO_TOKENIZER_AUTH_TOKEN` match. Check Deno Deploy logs. |
 |---|---|---|
-| Gateway returns `500` with `error:tokenizer_unavailable` | Deno endpoint unreachable or auth failure | Check `DENO_TOKENIZER_ENDPOINT` and `DENO_TOKENIZER_AUTH_TOKEN` match. Check Deno Deploy logs. |
-| All requests use `cloudflare_do` despite large inputs | Threshold not set or Deno config invalid | Verify `DENO_TOKENIZER_THRESHOLD_BYTES` is a positive integer. Verify `resolveDenoTokenizerConfig` returns `"enabled"`. |
 | High latency on large inputs | Deno Deploy cold start | Ensure the Deno project is on a paid tier or keep it warm with periodic health checks. |
 | Auth errors (`401`) in Deno logs | `Authorization` header mismatch | Regenerate token and update both Deno Deploy env and Gateway Worker secret/var. |
 
-### 2.4 Fail-Closed Behavior
-
-The Deno tokenizer is **fail-closed by design**:
 - If the Deno service is unreachable, times out, or returns an error, the Gateway Worker returns `500 internal_error` to the client.
-- It does **not** fall back to approximate token counting, local BPE, or unverified estimation.
-- The `tokenizationFailureCategory` field in observability events records the exact failure mode (`timeout`, `network`, `upstream_status`, `malformed_response`, `arithmetic`).
+- It does **not** fall back to approximate token counting, local BPE, unverified estimation, or the Cloudflare DO tokenizer.
+- The `tokenizationFailureCategory` field in observability events records the exact failure mode (`configuration`, `timeout`, `network`, `upstream_status`, `malformed_response`, `arithmetic`).
 
 ## 3. Canary Acceptance Criteria
 
@@ -231,8 +218,8 @@ Before enabling the Deno tokenizer in production, verify the following:
 
 - [ ] **Resource stage events** include `tokenizationProvider` (`"deno"` or `"cloudflare_do"`).
 - [ ] **Deno failure events** include `tokenizationFailureCategory` (`timeout`, `network`, etc.).
+- [ ] **Invalid configuration events** include `tokenizationProvider: "deno"` and `tokenizationFailureCategory: "configuration"`.
 - [ ] **No credential leakage**: Logs and events do not contain `inputText`, `authToken`, or API keys.
-- [ ] **Request correlation**: Gateway request ID appears in both Gateway Worker and Deno tokenizer logs.
 
 ### 3.3 Performance Criteria
 

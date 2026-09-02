@@ -200,7 +200,7 @@ describe("Deno tokenizer routing", () => {
     expect(denoCalls).toBe(0);
   });
 
-  it("fails authenticated requests for invalid Deno config", async () => {
+  it("fails authenticated requests for invalid Deno config and emits a configuration resource stage event", async () => {
     installTokenizer();
     let denoCalls = 0;
     let upstreamCalls = 0;
@@ -213,6 +213,7 @@ describe("Deno tokenizer routing", () => {
       authToken: denoAuthToken,
       // missing timeout and threshold => invalid
     });
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
       method: "POST",
@@ -233,6 +234,23 @@ describe("Deno tokenizer routing", () => {
       env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${new Date().toISOString().slice(0, 10)}`),
     );
     const state = await quotaStub.getState();
-    expect(state.reservedTokens).toBe(0);
+    const stageEvents = info.mock.calls
+      .map(([arg]) => arg)
+      .filter((arg) => typeof arg === "object" && arg !== null && arg.event === "octg.resource_stage");
+    expect(stageEvents).toHaveLength(2);
+    const finishEvent = stageEvents.find((arg) => arg.phase === "finish");
+    expect(finishEvent).toMatchObject({
+      stage: "tokenize",
+      phase: "finish",
+      outcome: "exception",
+      route: "error:tokenizer_unavailable",
+      tokenizationProvider: "deno",
+      tokenizationFailureCategory: "configuration",
+      quotaReserved: false,
+      upstreamReached: false,
+    });
+    expect(finishEvent).not.toHaveProperty("inputBytes");
+    expect(finishEvent).not.toHaveProperty("inputTextBytes");
+    expect(finishEvent).not.toHaveProperty("opaqueInputBytes");
   });
 });

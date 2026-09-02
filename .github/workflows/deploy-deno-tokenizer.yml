@@ -50,6 +50,18 @@ jobs:
       - name: Unit tests
         run: deno task test
 
+      - name: Setup Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c1c034f0042ae # v4.1.0
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Workflow contract tests
+        run: npm run test:deno-deploy-workflow
+
   deploy:
     name: Deploy to Deno Deploy
     needs: validate

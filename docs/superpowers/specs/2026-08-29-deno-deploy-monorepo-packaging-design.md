@@ -32,29 +32,29 @@ created revision `wjz57t1v8bvt`, and received `REVISION_FAILED`. Local
 
 Add a repository-root `deno.json` containing a Deno Deploy source
 configuration. Its `deploy.include` list will include the root configuration,
-the tokenizer app, and `packages/shared/src`. Its dynamic runtime entrypoint
-will be `./apps/deno-tokenizer/src/main.ts`.
+the tokenizer app source (`./apps/deno-tokenizer/src/**`), and `packages/shared/src`.
+Its dynamic runtime entrypoint will be `./apps/deno-tokenizer/src/main.ts`.
 
 Deno CLI requires `deploy.org` whenever a `deploy` object is present. The
 checked-in root config will therefore omit deployment identity so the template
 does not hard-code one account. The production job will inject the non-secret
 `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the checked-out root config
-immediately before `deno deploy`; the access token will never be written to the
+immediately before preparing the deploy artifact; the access token will never be written to the
 file and is scoped to the Deploy step rather than the whole job.
 
 Keep the existing validation commands in `apps/deno-tokenizer`, where the app's
 tasks and tests run unchanged. The root `deno.json` owns the import map used by
 root-based deployment and maps `@octg/shared` and the required `tiktoken`
-specifiers relative to the repository root. Change only the deploy step's
-working directory to the repository root so the CLI collector can see every
-included path. Materialize the deployment identity in the ephemeral CI
-checkout before the deploy step. The app's `deno.json` remains in the manifest
-for app-local validation, but it is not relied upon for root-based deployment
-dependency resolution.
+specifiers relative to the repository root. Prepare a dedicated staging directory
+(`<repo>/.deno-deploy-source`) that copies the included paths and the materialized
+root `deno.json`, then run `deno deploy` from that staging directory so the CLI collector
+can see every included path while keeping the workspace root unmodified. Materialize the
+deployment identity and resolve the `tiktoken` WASM file into the staging copy before the deploy
+step. The app's `deno.json` remains at the app root for app-local validation, but it is not included
+in the deploy manifest or relied upon for root-based deployment dependency resolution.
 
-The workflow contract test will require the root deploy working directory, the
-identity materialization step, and will parse `deno.json` to require the three
-packaging paths and the dynamic entrypoint. This prevents a future change from
+The workflow contract test will require the staging deploy working directory
+(`${{ github.workspace }}/.deno-deploy-source`), the identity materialization step, and will parse `deno.json` to require the three packaging paths and the dynamic entrypoint. This prevents a future change from
 silently restoring an app-only manifest or hard-coding deployment identity.
 
 ## Verification
