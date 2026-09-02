@@ -8,7 +8,7 @@ const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
 const MAX_RESPONSE_METADATA_BYTES = 16 * 1024;
 const OCTG_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
 const SAFE_RESPONSE_VALUE = /^[A-Za-z0-9_.:-]{1,128}$/;
-const AWS_ACCESS_KEY_ID = /^AKIA[0-9A-Z]{16}$/;
+const AWS_ACCESS_KEY_ID = /^(?:AKIA|ASIA)[0-9A-Z]{16}$/;
 const SAFE_ERROR_NAMES = new Set(["AbortError", "Error", "TypeError"]);
 const SAFE_ERROR_CODES = new Set([
   "EAI_AGAIN",

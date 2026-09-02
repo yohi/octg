@@ -264,9 +264,15 @@ Deno tokenizerはopt-inです。全ての設定を一緒に用意し、Productio
 | `DENO_DEPLOY_APP` | Deno Deploy manifest/GitHub Variable | Deno Deployのapplication |
 | `DENO_DEPLOY_TOKEN` | Deno Deploy Secret | Deno Deploy access token。ファイルへ保存しない |
 | `DENO_TOKENIZER_ENDPOINT` | Worker vars | Deno Deployの`/tokenize` HTTPS endpoint |
-| `DENO_TOKENIZER_AUTH_TOKEN` | Deno Deploy/Worker Secret | WorkerとDenoで共有する認証token |
+| `DENO_TOKENIZER_AUTH_TOKEN` | Worker Secret | Gateway WorkerからDeno tokenizerへ送る認証token |
+| `OCTG_TOKENIZER_AUTH_TOKEN` | Deno Deploy runtime Secret | Deno tokenizerが受け取る認証token。Worker Secretと同じ値 |
 | `DENO_TOKENIZER_THRESHOLD_BYTES` | Worker vars | 測定済みの有効化threshold |
 | `DENO_TOKENIZER_TIMEOUT_MS` | Worker vars | 測定済みのtimeout |
+
+`.env`の`DENO_TOKENIZER_AUTH_TOKEN`の値を、Worker Secret
+`DENO_TOKENIZER_AUTH_TOKEN`とDeno Deploy runtime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`の両方へ設定してください。変数名はruntimeごとに異なりますが、
+認証tokenは同じ値です。Deno Deploy runtime SecretはGitHub Environmentやworkflowへ渡しません。
 
 `DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
 

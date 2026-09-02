@@ -11,9 +11,15 @@ import { stdin as input, stdout as output } from "node:process";
 import {
   mergeSetupEnvironment,
   parseSetupEnvFile,
-  resolveDeployInputs,
   resolveLocalValue,
 } from "./setup-env.mjs";
+import {
+  DEPLOY_CONFIG_NAMES,
+  DEPLOY_SECRET_NAMES,
+  buildCloudflareEnv,
+  resolveDeployConfig,
+  validateProvidedDeploySecrets,
+} from "./setup-deploy.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
@@ -153,35 +159,26 @@ function currentDeployConfig() {
   };
 }
 
+function putDeploySecrets(environment, accountId) {
+  const cloudflareEnv = buildCloudflareEnv(environment, accountId);
+  for (const secret of DEPLOY_SECRET_NAMES) {
+    const value = environment[secret];
+    run(node, [wrangler, "secret", "put", secret, "--config", config], {
+      input: value ? `${value}\n` : undefined,
+      env: cloudflareEnv,
+    });
+  }
+  return cloudflareEnv;
+}
+
 async function setupDeploy(environment) {
   console.log("本番環境の設定を開始します。Cloudflare にログイン済みであることを確認してください。\n");
-  for (const name of [
-    "CLOUDFLARE_API_TOKEN",
-    "OCTG_KEY_PEPPER",
-    "OCTG_UPSTREAM_API_TOKEN",
-    "OPENAI_USAGE_API_KEY",
-  ]) {
-    if (environment[name]) validateDeployValue(name, environment[name]);
-  }
-  const resolved = resolveDeployInputs(environment, currentDeployConfig());
-  const values = { ...resolved.values };
-  const names = {
-    accountId: "CLOUDFLARE_ACCOUNT_ID",
-    databaseId: "OCTG_DATABASE_ID",
-    upstream: "OCTG_UPSTREAM_BASE_URL",
-    teamDomain: "ACCESS_TEAM_DOMAIN",
-    audience: "ACCESS_AUD",
-  };
-  for (const name of resolved.missing) {
-    const property = Object.keys(names).find((key) => names[key] === name);
-    if (!property) throw new Error(`未対応の設定値です: ${name}`);
-    values[property] = await prompt(name, "");
-  }
-  for (const [property, name] of Object.entries(names)) validateDeployValue(name, values[property]);
+  validateProvidedDeploySecrets(environment);
+  const values = await resolveDeployConfig(environment, currentDeployConfig(), prompt);
 
   if (dryRun) {
     console.log("dry-run: wrangler.jsoncのvars更新、Secret登録、D1 migration、Worker deployを省略しました。");
-    console.log(`dry-run: 対象設定 ${Object.values(names).join(", ")}`);
+    console.log(`dry-run: 対象設定 ${Object.values(DEPLOY_CONFIG_NAMES).join(", ")}`);
     return;
   }
 
@@ -192,20 +189,7 @@ async function setupDeploy(environment) {
     ACCESS_AUD: values.audience,
   });
 
-  for (const secret of ["OCTG_KEY_PEPPER", "OCTG_UPSTREAM_API_TOKEN", "OPENAI_USAGE_API_KEY"]) {
-    const value = environment[secret];
-    run(node, [wrangler, "secret", "put", secret, "--config", config], {
-      input: value ? `${value}\n` : undefined,
-      env: {
-        ...(values.accountId ? { CLOUDFLARE_ACCOUNT_ID: values.accountId } : {}),
-        ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
-      },
-    });
-  }
-  const cloudflareEnv = {
-    ...(values.accountId ? { CLOUDFLARE_ACCOUNT_ID: values.accountId } : {}),
-    ...(environment.CLOUDFLARE_API_TOKEN ? { CLOUDFLARE_API_TOKEN: environment.CLOUDFLARE_API_TOKEN } : {}),
-  };
+  const cloudflareEnv = putDeploySecrets(environment, values.accountId);
   run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config], { env: cloudflareEnv });
   run(node, [wrangler, "deploy", "--config", config], { env: cloudflareEnv });
   console.log("\n本番セットアップが完了しました。");

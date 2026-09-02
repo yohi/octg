@@ -168,6 +168,34 @@ test("omits credential-shaped response metadata", async () => {
   assert.equal(JSON.stringify(result).includes(credentialShapedValue), false);
 });
 
+test("omits temporary AWS access keys from response metadata", async () => {
+  const temporaryAccessKey = `ASIA${"A".repeat(16)}`;
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 400,
+      headers: new Headers({
+        "X-OCTG-Route": temporaryAccessKey,
+        "X-OCTG-Worker-Version": temporaryAccessKey,
+      }),
+      body: new Response(JSON.stringify({
+        error: {
+          type: temporaryAccessKey,
+          code: temporaryAccessKey,
+          param: temporaryAccessKey,
+        },
+      })).body,
+    }),
+  });
+
+  assert.equal(result.route, null);
+  assert.equal(result.workerVersion, null);
+  assert.equal(result.responseErrorType, null);
+  assert.equal(result.responseErrorCode, null);
+  assert.equal(result.responseErrorParam, null);
+  assert.equal(JSON.stringify(result).includes(temporaryAccessKey), false);
+});
+
 test("exposes only ULID-shaped OCTG request IDs", async () => {
   const validRequestId = "req_01ARZ3NDEKTSV4RRFFQ69G5FAV";
   for (const [header, expectedRequestId] of [
