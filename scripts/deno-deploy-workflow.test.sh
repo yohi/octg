@@ -136,6 +136,13 @@ end
 unless validate_runs.any? { |run| run.include?("deno task test") }
   fail_contract("jobs.validate must run deno task test")
 end
+workflow_test_step = validate_steps.find do |step|
+  step.is_a?(Hash) && step["run"].to_s.include?("npm run test:deno-deploy-workflow")
+end
+fail_contract("jobs.validate must run the Deno Deploy workflow contract test") unless workflow_test_step
+unless workflow_test_step["working-directory"] == "${{ github.workspace }}"
+  fail_contract("the workflow contract test must run from the repository root")
+end
 
 unless validate_steps.any? { |step| step.is_a?(Hash) && step["uses"].to_s.start_with?("denoland/setup-deno@") }
   fail_contract("jobs.validate must use denoland/setup-deno")

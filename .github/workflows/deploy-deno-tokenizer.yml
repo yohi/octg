@@ -60,6 +60,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Workflow contract tests
+        working-directory: ${{ github.workspace }}
         run: npm run test:deno-deploy-workflow
 
   deploy:
