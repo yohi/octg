@@ -59,10 +59,12 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
      fork pull requests remain validation-only.
    - The workflow runs the pinned `@deno/deploy@0.0.9904` implementation with
      `deno run -A jsr:@deno/deploy@0.0.9904 --prod --json --non-interactive`
-     from the repository root. This avoids a Deno 2.9.6 wrapper bug that
-     duplicates passthrough arguments. Immediately before deployment it injects the non-secret
-     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into the ephemeral root
-     `deno.json`; `DENO_DEPLOY_TOKEN` is never written to that file.
+     from the ephemeral staging directory `.deno-deploy-source`. This avoids a
+     Deno 2.9.6 wrapper bug that duplicates passthrough arguments. Immediately
+     before deployment it copies the root `deno.json` and injects the non-secret
+     `DENO_DEPLOY_ORG` and `DENO_DEPLOY_APP` values into that staging copy;
+     `DENO_DEPLOY_TOKEN` is never written to the file and the repository root
+     remains unchanged.
 
 2. **Push to Git** (if using Deno Deploy's integrated Git deployment instead):
    ```bash
@@ -85,29 +87,49 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
 4. **Manual Deploy (without GitHub Actions)**:
    ```bash
    # Run these commands from the repository root.
+   staging="$PWD/.deno-deploy-source"
+   mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+   cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"
+   cp -R packages/shared/src/. "$staging/packages/shared/src"
+   deno cache --config apps/deno-tokenizer/deno.json \
+     npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
+   wasm_source="$(
+     deno eval \
+       --config apps/deno-tokenizer/deno.json \
+       'console.log(import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm"));'
+   )"
+   node - "$wasm_source" "$staging/apps/deno-tokenizer/src/tiktoken_bg.wasm" <<'NODE'
+   const fs = require("node:fs");
+   const { fileURLToPath } = require("node:url");
+   const [source, destination] = process.argv.slice(2);
+   fs.copyFileSync(fileURLToPath(source), destination);
+   NODE
    printf 'Deno Deploy access token: '
    read -r -s DENO_DEPLOY_TOKEN
    printf '\n'
    export DENO_DEPLOY_TOKEN
    export DENO_DEPLOY_ORG="your-org"
    export DENO_DEPLOY_APP="your-app"
-   node <<'NODE'
+   cp deno.json "$staging/deno.json"
+   node - "$staging/deno.json" <<'NODE'
    const fs = require("node:fs");
-   const path = "deno.json";
+   const path = process.argv[2];
    const config = JSON.parse(fs.readFileSync(path, "utf8"));
    config.deploy.org = process.env.DENO_DEPLOY_ORG;
    config.deploy.app = process.env.DENO_DEPLOY_APP;
    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
    NODE
-   deno run -A jsr:@deno/deploy@0.0.9904 \
-     --prod --json --non-interactive
+   (
+     cd "$staging"
+     deno run -A jsr:@deno/deploy@0.0.9904 \
+       --prod --json --non-interactive
+   )
    unset DENO_DEPLOY_TOKEN
    unset DENO_DEPLOY_ORG DENO_DEPLOY_APP
    ```
 
-   The preparation command changes only the local checkout. Use a clean
-   checkout or remove the two generated `deploy` identity fields before
-   committing unrelated changes.
+   The preparation command writes deployment identity only to the staging copy;
+   the checked-out root remains portable and unmodified.
 
 ### 1.3 Environment Variables
 
@@ -174,7 +196,7 @@ between Production and Preview.
 
 ### 2.1 Monitoring
 
-The Deno tokenizer itself does **not** emit structured stdout logs. It intentionally receives only `inputText` (no request ID, auth material, or upstream metadata) and returns only the BPE count. All observability is owned by the Gateway Worker (`resource-observation.ts`).
+The Deno tokenizer itself does **not** emit structured stdout logs. Its JSON request body contains only `inputText`; the HTTP transport still requires the `Authorization: Bearer <token>` header. It does not receive a request ID or upstream metadata and returns only the BPE count. All observability is owned by the Gateway Worker (`resource-observation.ts`).
 
 **Gateway Worker observability** (`resource-observation.ts`):
 - When Deno tokenizer is used: `tokenizationProvider: "deno"`

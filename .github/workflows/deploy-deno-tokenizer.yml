@@ -104,6 +104,7 @@ jobs:
         run: |
           staging="$GITHUB_WORKSPACE/.deno-deploy-source"
           mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+          cp deno.json "$staging/deno.json"
           deno cache --config apps/deno-tokenizer/deno.json \
             npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
           wasm_source="$(
@@ -123,9 +124,9 @@ jobs:
           const [source, destination] = process.argv.slice(2);
           fs.copyFileSync(fileURLToPath(source), destination);
           NODE
-          node <<'NODE'
+          node - "$staging/deno.json" <<'NODE'
           const fs = require("node:fs");
-          const path = "deno.json";
+          const path = process.argv[2];
           const config = JSON.parse(fs.readFileSync(path, "utf8"));
           if (!config.deploy || typeof config.deploy !== "object") {
             throw new Error("deno.json must contain a deploy configuration");
@@ -144,7 +145,6 @@ jobs:
             "./apps/deno-tokenizer/src/tiktoken_bg.wasm";
           fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
           NODE
-          cp deno.json "$staging/deno.json"
           deno check --config "$staging/deno.json" \
             "$staging/apps/deno-tokenizer/src/main.ts"
 

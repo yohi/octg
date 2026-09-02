@@ -65,7 +65,30 @@ test("--force overwrites .dev.vars and generates a client key when none is provi
   assert.equal(result.status, 0, result.stderr);
   assert.equal(vars.includes("old-value"), false);
   assert.match(result.stdout, /開発用 API キー: octg_sk_local_[0-9a-f]{36}/);
-  assert.equal(readFileSync(logPath, "utf8").trim().split("\n").length, 2);
+  const wranglerCalls = readFileSync(logPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(wranglerCalls.length, 2);
+  assert.deepEqual(wranglerCalls[0], [
+    "d1",
+    "migrations",
+    "apply",
+    "octg",
+    "--local",
+    "--config",
+    "apps/gateway-worker/wrangler.jsonc",
+  ]);
+  assert.equal(wranglerCalls[1][0], "d1");
+  assert.equal(wranglerCalls[1][1], "execute");
+  assert.equal(wranglerCalls[1][2], "octg");
+  assert.equal(wranglerCalls[1][3], "--local");
+  assert.equal(wranglerCalls[1][4], "--file");
+  assert.match(wranglerCalls[1][5], /\/octg-seed-[^/]+\/seed\.sql$/);
+  assert.deepEqual(wranglerCalls[1].slice(6), [
+    "--config",
+    "apps/gateway-worker/wrangler.jsonc",
+  ]);
 });
 
 test("deploy --dry-run does not modify wrangler.jsonc or invoke wrangler", (t) => {

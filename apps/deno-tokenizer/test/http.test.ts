@@ -260,6 +260,31 @@ Deno.test("cancels an oversized streamed body", async () => {
   assertEquals(cancellations, 1);
 });
 
+Deno.test("rejects a nonnumeric declared content length without reading the body", async () => {
+  const fixture = createFixture(2);
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.close();
+    },
+  });
+  const request = new Request(tokenizeUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "application/json",
+      "content-length": "not-a-number",
+    },
+    body,
+  });
+
+  await expectRejection({
+    fixture,
+    request,
+    status: 400,
+  });
+  assertEquals(request.bodyUsed, false);
+});
+
 Deno.test("rejects an oversized declared content length without reading the body", async () => {
   const fixture = createFixture(2);
   const body = new ReadableStream<Uint8Array>({

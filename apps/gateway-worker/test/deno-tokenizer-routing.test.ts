@@ -238,7 +238,15 @@ describe("Deno tokenizer routing", () => {
       .map(([arg]) => arg)
       .filter((arg) => typeof arg === "object" && arg !== null && arg.event === "octg.resource_stage");
     expect(stageEvents).toHaveLength(2);
-    const finishEvent = stageEvents.find((arg) => arg.phase === "finish");
+    const startEvents = stageEvents.filter((arg) => arg.phase === "start");
+    const finishEvents = stageEvents.filter((arg) => arg.phase === "finish");
+    expect(startEvents).toHaveLength(1);
+    expect(finishEvents).toHaveLength(1);
+    expect(startEvents[0]).toMatchObject({
+      stage: "tokenize",
+      phase: "start",
+    });
+    const finishEvent = finishEvents[0];
     expect(finishEvent).toMatchObject({
       stage: "tokenize",
       phase: "finish",

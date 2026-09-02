@@ -360,13 +360,14 @@ npm run dev -w apps/gateway-worker   # ローカルで Worker 起動
   通過した後に実デプロイできます。また、master へマージする前は同一リポジトリの PR に
   `deploy-deno` ラベルを付けると同じ経路を起動できます（fork PR は対象外）。これにより
   master へマージする前に Deno Deploy の revision build / warmup まで検証できます。
-  検証は `apps/deno-tokenizer` から実行し、Deploy は
-  repository root の `deno.json` manifest（`./deno.json`、
-  `apps/deno-tokenizer/src/**`、`packages/shared/src/**` のみを upload 対象とし、
-  `package.json` / `package-lock.json` は含めない）を使用します。GitHub Environment `deno-production` には
-  `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` と
-  Secret `DENO_DEPLOY_TOKEN` を設定します。現行の `deno deploy` CLI を使用し、Classic の
-  `deployctl` は使用しません。
+  検証は `apps/deno-tokenizer` から実行します。Deploy job は repository root の
+  `deno.json` を staging ディレクトリへコピーし、`./deno.json`、
+  `apps/deno-tokenizer/src/**`、`packages/shared/src/**` のみを upload 対象として、
+  `package.json` / `package-lock.json` は含めません。非 secret の
+  `DENO_DEPLOY_ORG` / `DENO_DEPLOY_APP` は staging 側の manifest にだけ注入し、
+  root の checkout は変更しません。GitHub Environment `deno-production` には
+  これらの値と Secret `DENO_DEPLOY_TOKEN` を設定します。Deno 2.9.6 の pinned wrapper
+  (`deno run -A jsr:@deno/deploy@0.0.9904`) を使用し、Classic の `deployctl` は使用しません。
 - `preview-smoke.yml`: `master` 向け PR の更新を受け、専用 preview Worker の新 version を
   0% traffic で deployment し、preview URL に Version Override header を付けて
   `POST /v1/chat/completions` を最大 3 回試行します。HTTP 200、応答本文、
