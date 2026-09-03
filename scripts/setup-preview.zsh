@@ -223,6 +223,14 @@ if (!productionDatabase) {
 config.name = workerName;
 config.main = resolve(root, "apps/gateway-worker/src/index.ts");
 config.assets.directory = resolve(root, "apps/gateway-worker/public");
+for (const name of [
+  "DENO_TOKENIZER_ENDPOINT",
+  "DENO_TOKENIZER_AUTH_TOKEN",
+  "DENO_TOKENIZER_THRESHOLD_BYTES",
+  "DENO_TOKENIZER_TIMEOUT_MS",
+]) {
+  delete config.vars?.[name];
+}
 config.vars = {
   ...config.vars,
   QUOTA_LIMIT_STANDARD: standardLimit,
