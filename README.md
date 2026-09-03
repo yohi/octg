@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # OCTG — OpenAI Complimentary Token Gateway
 
 OpenAI Data Sharing Program (Tier 3) の無料枠を複数クライアントで共有するための OpenAI 互換 API Gateway。Cloudflare Workers + Durable Objects + D1 で構成される。
@@ -8,9 +10,8 @@ Deno tokenizer の有効化、Secret 設定、canary 手順は
 [docs/deno-tokenizer.md](./docs/deno-tokenizer.md) を参照してください。
 既定の Gateway 設定では Deno tokenizer は無効です。
 
-全環境の変数、Secret、取得場所、Production/Preview の境界は
-[docs/CONFIGURATION.md](./docs/CONFIGURATION.md) にまとめています。入力テンプレートは
-[.env.example](./.env.example) を使用してください。
+Secrets/Variablesの完全な一覧と設定順序は docs/CONFIGURATION.md を参照してください。
+入力テンプレートは [.env.example](./.env.example) を使用してください。
 
 [![Use this template](https://img.shields.io/badge/Use%20this%20template-yohi/octg-blue)](https://github.com/yohi/octg/generate)
 
@@ -58,7 +59,7 @@ Cron Trigger ──► Reconciliation（OpenAI Usage API との突合）
 このリポジトリに関わる人は次の 3 つの立場があります。自分に該当する手順だけを読んでください。
 
 | 立場 | やること | 参照先 |
-|------|---------|--------|
+| ------ | --------- | ------ |
 | **利用するだけ** | デプロイ済みの Gateway を OpenAI 互換クライアントから呼ぶ | [クイックスタート（利用するだけ）](#クイックスタート利用するだけ) |
 | **開発する** | ローカルで Worker を起動し、コードを変更・テストする | [セットアップ（開発する場合）](#セットアップ開発する場合) |
 | **デプロイする** | 自分専用のインスタンスを Cloudflare に建てる | [テンプレートから新規作成（デプロイする場合）](#テンプレートから新規作成デプロイする場合) |
@@ -92,7 +93,7 @@ curl https://octg-gateway.<subdomain>.workers.dev/v1/chat/completions \
 #### 利用可能なモデル
 
 | モデル | 無料枠プール | 用途の目安 |
-|---|---|---|
+| --- | --- | --- |
 | `gpt-5.6-sol` | STANDARD | 高度な推論・複雑な処理 |
 | `gpt-5.6-terra` | MINI | 性能とコストのバランス |
 | `gpt-5.6-luna` | MINI | 高ボリューム・低コスト |
