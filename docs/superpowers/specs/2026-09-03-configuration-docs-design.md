@@ -61,6 +61,10 @@ Production/Previewの境界を判断しにくい。
 - Production Worker Deno integration:
   `DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、
   `DENO_TOKENIZER_TIMEOUT_MS`はWorker Variable。
+- Shared input ceiling:
+  `MAX_INPUT_BYTES`はVariable。ConsumerはGateway WorkerおよびDeno tokenizerで、
+  Set inはWorker varsおよびDeno Deploy runtime environment、Applyは各runtimeのdeployとする。
+  両runtimeへ同じraw値を設定し、`resolveMaxInputBytes`でresolved valueを照合する。
 - Shared Deno authentication:
   `DENO_TOKENIZER_AUTH_TOKEN`はWorker Secret、
   `OCTG_TOKENIZER_AUTH_TOKEN`はDeno Deploy runtime Secret。
@@ -84,16 +88,22 @@ Production/Previewの境界を判断しにくい。
 
 ## First-Deploy Flow
 
-初回デプロイ手順は、次の一本道として記載する。
+初回デプロイ手順は、Deno無効のbaseline canaryとDeno経路canaryを分けた次の一本道として記載する。
 
 1. Production用のCloudflare Account IDとAPI tokenを用意する。
-2. Worker runtime SecretをCloudflareへ登録する。
-3. Deno Deployのapplication、org/app Variable、deploy tokenを用意する。
-4. Deno Deploy runtime Secret `OCTG_TOKENIZER_AUTH_TOKEN`を設定する。
-5. Worker varsとmatching Secret `DENO_TOKENIZER_AUTH_TOKEN`を設定する。
-6. `wrangler deploy`でWorker varsとSecretを含むversionを反映する。
-7. Productionの既存`OCTG_KEY_PEPPER`を使ってclientをseedする。
-8. raw client keyを一時的な0600 fileまたはprocess environmentへ渡し、canaryを実行する。
+2. Worker runtime Secretと通常Variablesを設定し、`MAX_INPUT_BYTES`のraw値を決める。
+3. Deno integrationの4設定を未設定にしたbaseline configでinactive versionをuploadし、
+   `versions secret put`でWorker Secretを揃える。既存の`DENO_TOKENIZER_AUTH_TOKEN`は
+   `versions secret delete`で除去してから`versions deploy`で一度だけactiveにする。
+4. Productionの既存`OCTG_KEY_PEPPER`を使ってclientをseedし、Deno無効の初回canaryを実行する。
+   `cloudflare_do`のtokenization、Worker resource limit、quota reserve/settle、upstream到達を確認する。
+5. 初回canary合格後、Deno Deploy applicationをdeployし、runtime Secret
+   `OCTG_TOKENIZER_AUTH_TOKEN`、Worker vars、matching Secret `DENO_TOKENIZER_AUTH_TOKEN`を設定する。
+   `MAX_INPUT_BYTES`はDeno runtimeにも同じraw値を設定する。
+6. Deno integrationのWorker varsをinactive versionへuploadし、`versions secret put`で
+   `DENO_TOKENIZER_AUTH_TOKEN`を同じversionへ追加してから`versions deploy`で反映する。
+7. 両runtimeのresolved `MAX_INPUT_BYTES`を照合し、Deno経路canaryを実行する。
+   `deno` provider、Deno stage、exact token count、quota lifecycle、upstream到達を確認する。
 
 `DENO_TOKENIZER_*`の一部だけを設定した場合はfail-closedになるため、Deno連携を有効に
 する場合はendpoint、auth token、threshold、timeoutを同じ変更として扱う。
@@ -112,7 +122,10 @@ Production/Previewの境界を判断しにくい。
 - 初回デプロイ担当者が各値のSecret/Variable区分と設定先を一つの表で確認できる。
 - `DENO_DEPLOY_TOKEN`とruntime tokenizer tokenの用途が明確に分離される。
 - `DENO_TOKENIZER_AUTH_TOKEN`と`OCTG_TOKENIZER_AUTH_TOKEN`が同一値・別設定先であることが明示される。
+- `MAX_INPUT_BYTES`のConsumer、設定先、各runtime deployでのApply、raw値とresolved valueの照合方法が明示される。
+- 既存WorkerのSecret更新がinactive versionで完結し、設定未完了のversionをactiveにしない。
 - ProductionとPreviewの共有禁止が、設定名・リソース・pepper・client keyの全てに適用される。
 - 設定変更後に必要なdeploy、seed、canaryの順序が一度だけ記載される。
+- Preview quotaのprovider ceiling、共有billing principal時の合算判定、quota受け入れ時のreserve/upstream条件が確認できる。
 - 4文書間に重複した完全一覧、古いコマンド、相互矛盾が残らない。
 - markdownlintとリンクチェックが通過する。

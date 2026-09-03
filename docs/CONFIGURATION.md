@@ -54,43 +54,79 @@ zsh scripts/setup-preview.zsh --github
 
 ## Production初回デプロイの設定順
 
-既存リソースを使うProductionでは、次の順序で設定します。各値の取得場所と
+既存リソースを使うProductionでは、最初にDeno無効のWorkerをcanaryし、そこで
+Worker本体・quota・resource limitを確認してからDeno経路を有効化します。各値の取得場所と
 設定先は、後述のカタログを正とします。
 
 1. Cloudflare Account、D1、Gateway B、Access applicationを準備し、
    `CLOUDFLARE_API_TOKEN`を対象Accountに限定して注入します。
-2. Worker runtime Secretを登録します。
+2. Workerの通常Variablesを設定し、`MAX_INPUT_BYTES`のraw値を決めます。
+   Deno integrationの4設定（endpoint、Worker auth Secret、threshold、timeout）はbaseline versionへ
+   まだ設定しません。Production用の既存`wrangler.jsonc`にDeno値がある場合は、4設定を除外した
+   baseline用の一時設定を使います。
+3. 既存Workerでは、VariablesとSecretsをinactive versionへ揃えてから一度だけactiveにします。
+   `versions upload`はdeployせず、後続の`versions secret put`もinactive versionだけを作成します。
 
    ```bash
-   npx wrangler secret put OCTG_KEY_PEPPER \
-     --config apps/gateway-worker/wrangler.jsonc
-   npx wrangler secret put OCTG_UPSTREAM_API_TOKEN \
-     --config apps/gateway-worker/wrangler.jsonc
-   npx wrangler secret put OPENAI_USAGE_API_KEY \
-     --config apps/gateway-worker/wrangler.jsonc
+   baseline_config="${BASELINE_WRANGLER_CONFIG:?Deno設定を除外したbaseline config pathを指定してください}"
+   npx wrangler versions upload \
+     --config "$baseline_config" \
+     --message "OCTG baseline"
+   npx wrangler versions secret put OCTG_KEY_PEPPER \
+     --config "$baseline_config"
+   npx wrangler versions secret put OCTG_UPSTREAM_API_TOKEN \
+     --config "$baseline_config"
+   npx wrangler versions secret put OPENAI_USAGE_API_KEY \
+     --config "$baseline_config"
    ```
 
-3. Deno Deployを使う場合だけ、GitHub Environment `deno-production`へ
+   `versions secret put`は対話入力またはstdinからSecretを受け取り、値をコマンドラインや文書へ
+   書きません。既存versionに`DENO_TOKENIZER_AUTH_TOKEN`がある場合は、baselineをdeployする前に
+   最新のinactive versionから削除します。未登録の場合はこの削除操作を省略します。
+
+   ```bash
+   npx wrangler versions secret delete DENO_TOKENIZER_AUTH_TOKEN \
+     --config "$baseline_config"
+   ```
+
+   deploy前に`wrangler versions view <version-id>`またはDashboardで、endpoint、threshold、timeout、
+   `DENO_TOKENIZER_AUTH_TOKEN`が全てunsetであること、通常Variablesと3つのProduction Secret bindingが
+   揃っていることを確認します。初回Worker作成では`versions upload`を使えないため、
+   [テンプレート手順](./DEPLOY_FROM_TEMPLATE.md)の初回作成フローを使います。
+
+   ```bash
+   npx wrangler versions deploy --config "$baseline_config"
+   ```
+
+   段階的deployを使えない既存Workerでは、baseline設定を用意した後に標準コマンドで既存Deno Secretを
+   削除し、直ちにbaselineをdeployします。`wrangler secret delete`は即時deployを伴うため、通常の
+   更新でSecretsを個別に`wrangler secret put`しないでください。
+
+   ```bash
+   npx wrangler secret delete DENO_TOKENIZER_AUTH_TOKEN \
+     --config "$baseline_config"
+   npx wrangler deploy --config "$baseline_config"
+   ```
+
+4. Deno Deployを使う場合だけ、GitHub Environment `deno-production`へ
    `DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、Secret `DENO_DEPLOY_TOKEN`を登録します。
-4. Deno Deploy runtime Secret `OCTG_TOKENIZER_AUTH_TOKEN`をDenoアプリへ登録します。
-   `DENO_DEPLOY_TOKEN`とは別のSecretです。
-5. 対象Workerへ`DENO_TOKENIZER_ENDPOINT`、
-   `DENO_TOKENIZER_THRESHOLD_BYTES`、`DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、
-   `DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして設定します。Denoを使わない場合は
-   4と5を省略し、4設定すべてを未設定のままにします。
-6. Workerをdeployして、active versionへVariablesとSecret bindingが揃ったことを確認します。
-
-   ```bash
-   npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
-   ```
-
-   `wrangler secret put`だけでは`wrangler.jsonc`のVariablesを含むactive versionに
-   ならないため、Secret変更後も必ずdeployします。
-7. Productionの既存`OCTG_KEY_PEPPER`を使って専用clientを一度だけseedし、raw keyを
+   これはDeno Deployの管理用であり、runtime認証には使いません。
+5. Productionの既存`OCTG_KEY_PEPPER`を使って専用clientを一度だけseedし、raw keyを
    Secret Managerへ保存します。raw keyをログ、shell history、repositoryへ残しません。
-8. `OCTG_CANARY_URL`と`OCTG_CANARY_CLIENT_KEY`をSecret Managerから注入して
-   `npm run canary:worker -- --env-file=.env`を実行します。Denoを有効化する場合は、
-   canary合格後にだけWorker varsを設定してください。
+6. `OCTG_CANARY_URL`と`OCTG_CANARY_CLIENT_KEY`をSecret Managerから注入して初回canaryを実行します。
+   このcanaryはCloudflare Durable Object tokenizer経路を対象とし、Worker resource limit、quota
+   reserve/settle、upstream到達を確認します。判定基準は「Worker canary設定」と「Quota受け入れ条件」に従います。
+7. 初回canary合格後、Deno Deploy applicationをdeployしてhealthを確認し、Deno runtime Secret
+   `OCTG_TOKENIZER_AUTH_TOKEN`を登録します。`DENO_DEPLOY_TOKEN`とは別のSecretです。
+8. 対象Workerへ`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、
+   `DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、`DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして
+   設定します。`MAX_INPUT_BYTES`はWorkerとDeno Deployへ同じraw値を設定し、4つのDeno integration設定を
+   部分適用しません。
+   既存Workerでは`wrangler versions upload`でinactive versionを作成し、
+   `wrangler versions secret put DENO_TOKENIZER_AUTH_TOKEN`でSecretを同じversionへ追加してから、
+   `wrangler versions deploy`で一度だけactiveにします。通常の`wrangler secret put`を途中で使いません。
+9. WorkerとDenoのresolved `MAX_INPUT_BYTES`を照合した後、同じcanary clientでDeno経路canaryを実行します。
+    Deno providerの選択、tokenization stage、quota lifecycle、upstream到達を初回canaryと比較します。
 
 ## 取得・確認用URLとコマンド
 
@@ -147,7 +183,8 @@ Access applicationを先に作成し、`/admin/*`を保護するpolicyを設定�
 openssl rand -hex 32
 ```
 
-表示された値をshell historyへ残さず、`wrangler secret put`の入力またはSecret Managerへ登録してください。`OCTG_KEY_PEPPER`は既存clientをseedした値と一致させます。
+表示された値をshell historyへ残さず、既存Workerでは`wrangler versions secret put`の入力または
+Secret Managerへ登録してください。`OCTG_KEY_PEPPER`は既存clientをseedした値と一致させます。
 
 ### Preview resource
 
@@ -230,6 +267,7 @@ env fileはshellとして実行せず、単純な`KEY=value`または`export KEY
 | `OCTG_UPSTREAM_BASE_URL` | No | `wrangler.jsonc`のvars | Gateway BのOpenAI endpoint。Gateway AのCustom Provider URLではない |
 | `ACCESS_TEAM_DOMAIN` | No | `wrangler.jsonc`のvars | Access applicationのOverviewに表示されるteam domain |
 | `ACCESS_AUD` | No | `wrangler.jsonc`のvars | Access applicationのApplication Audience (AUD) Tag |
+| `MAX_INPUT_BYTES` | No | `wrangler.jsonc`のvars。Deno Deploy runtime environmentにも同じraw値を設定 | Gateway WorkerとDeno tokenizerで共有するinput ceiling。未設定・不正値時は1 MiB、`MAX_INPUT_TEXT_BYTES`を上限にclamp |
 
 `OCTG_UPSTREAM_BASE_URL`は次のGateway B形式です。
 
@@ -248,7 +286,10 @@ Gateway AのCustom Provider URLは利用者側OpenCode設定用であり、Worke
 | `OCTG_UPSTREAM_API_TOKEN` | Production Worker Secret | Gateway BのAI Gateway Run token |
 | `OPENAI_USAGE_API_KEY` | Production Worker Secret | OpenAI Organization Usage APIの読み取り用key |
 
-Secretは`wrangler secret put`でCloudflareへ登録され、リポジトリのファイルへ保存されません。`OCTG_KEY_PEPPER`を変更すると既存client keyのhashと一致しなくなるため、通常のSecret rotationと分けて計画してください。
+既存WorkerのSecret更新は`wrangler versions secret put`でinactive versionへ登録し、
+`wrangler versions deploy`で設定済みのversionを反映します。Secretはリポジトリのファイルへ保存されません。
+初回Worker作成時の標準`wrangler secret put`は[テンプレート手順](./DEPLOY_FROM_TEMPLATE.md)に限定します。
+`OCTG_KEY_PEPPER`を変更すると既存client keyのhashと一致しなくなるため、通常のSecret rotationと分けて計画してください。
 
 ## Preview設定
 
@@ -314,6 +355,10 @@ Deno tokenizerはopt-inです。全ての設定を一緒に用意し、Productio
 `OCTG_TOKENIZER_AUTH_TOKEN`の両方へ設定してください。変数名はruntimeごとに異なりますが、
 認証tokenは同じ値です。Deno Deploy runtime SecretはGitHub Environmentやworkflowへ渡しません。
 
+`MAX_INPUT_BYTES`はProduction Worker vars表にある共有設定です。Deno Deploy runtime environmentにも
+同じraw値を設定し、WorkerとDenoの各deploy後に`resolveMaxInputBytes`でresolved valueを確認します。
+raw値またはresolved valueが一致しない場合は、Deno経路canaryを実行せず設定を修正してください。
+
 `DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
 
 ### GitHub Actionsへの設定
@@ -343,9 +388,10 @@ Secretの実値はGitHubから読み戻せません。未登録またはロー�
 
 ## Worker canary設定
 
-```bash
-npm run canary:worker -- --env-file=.env
-```
+Worker canaryはProduction quotaを消費するため、次の順序を変更しません。初回canaryは
+Deno integrationを無効にしたWorker version、2回目のcanaryは再deploy後のDeno経路を対象にします。
+
+### Canary共通設定
 
 | 変数 | Secret | 設定先 | 取得・決定方法 |
 | --- | ---: | --- | --- |
@@ -371,15 +417,79 @@ OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください
   npm run seed:client:remote -- \
     --id=canary_cpu --name="CPU Canary" --tools-mode=REJECT \
     --key-output-file="$key_file"
+```
 
+`--key-output-file`はmode `0600`のファイルへkeyを一度だけ書き込み、登録完了メッセージへ
+raw keyを含めません。Secret Managerやprocess environmentを使えない場合は、登録を中断し、
+raw keyをログへ残さない別の受け渡し方法を用意してください。
+
+### 初回canary（Deno無効）
+
+1. endpoint、threshold、timeout、Worker auth SecretのDeno integration設定が未設定であることを確認します。
+2. 次のcanaryを実行します。
+
+   ```bash
+   OCTG_CANARY_CLIENT_KEY="$(<"$key_file")" \
+     npm run canary:worker -- --env-file=.env
+   ```
+
+3. `cloudflare_do`のtokenization stageが成功し、各requestのquota reserve/settleとupstream到達が
+   request IDで相関できること、Worker Observabilityに予期しないCPU/memory limitがないことを確認します。
+   この段階でDeno providerが選択された場合は初回canaryを受け入れず、Deno設定を無効化して再実行します。
+
+### Deno runtime SecretとWorker設定の適用
+
+初回canaryが合格した後、Deno Deploy applicationをdeployしてhealthを確認し、runtime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`をDeno applicationへ登録します。同時に対象Workerへ
+`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、`DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、
+`DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして設定します。`DENO_DEPLOY_TOKEN`はCI管理用の別Secretです。
+`MAX_INPUT_BYTES`は両runtimeへ同じraw値を設定します。4つのDeno integration設定を部分適用しません。
+
+### 再deploy
+
+WorkerのDeno設定を変更した後、次のコマンドでWorkerを再deployします。
+
+```bash
+npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
+```
+
+active versionのVariablesとSecret bindingを確認し、WorkerとDenoのresolved `MAX_INPUT_BYTES`が一致することを確認してから、Deno経路canaryへ進みます。
+
+### Deno経路canary
+
+同じkey fileとcanary設定で再度canaryを実行します。
+
+```bash
 OCTG_CANARY_CLIENT_KEY="$(<"$key_file")" \
   npm run canary:worker -- --env-file=.env
 ```
 
-`--key-output-file`はmode `0600`のファイルへkeyを一度だけ書き込み、登録完了メッセージへ
-raw keyを含めません。canary終了時にtrapで削除されます。Secret Managerやprocess
-environmentを使えない場合は、登録を中断し、raw keyをログへ残さない別の受け渡し方法を
-用意してください。
+`deno`のtokenization provider、Deno tokenizerのstage、exact token count、quota reserve/settle、
+upstream到達を確認し、初回canaryとquota accountingが一致することを判定します。Denoのtimeout、
+network、upstream status、malformed responseでgeneric 500となった場合は、quota reserve、in-flight
+admission、upstream callが発生していないことを確認します。
+
+## Quota受け入れ条件と判定基準
+
+### Preview quota
+
+`OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`は0以上の安全整数（`0`は無効）、
+`OCTG_PREVIEW_QUOTA_LIMIT_MINI`は正の安全整数にします。PreviewとProductionが同じupstream billing
+principalを使う場合は、両環境の配分合計をprovider ceiling以下にします。ceilingはSTANDARDが
+1,000,000 tokens、MINIが10,000,000 tokensです。coordinationが未設定・不明な場合はPreviewからの
+upstream送信をfail-closedにします。
+
+### Canaryとquotaの受け入れ
+
+次の全条件を満たした場合だけquota設定とcanaryを受け入れます。
+
+1. Tokenizer成功前に`quota_reserve`、in-flight admission、upstream callが発生しない。
+2. 初回canaryの`cloudflare_do`経路とDeno経路canaryの`deno`経路がrequest ID・revisionで特定できる。
+3. 成功requestのreserve/settleと`/quota`の残量変化がrequest結果と整合し、D1監査書き込みの成否に依存しない。
+4. 74,000 token級payloadで予期しないCPU/memory limit、quota超過、upstream retryが発生しない。
+5. Tokenizer timeout、network、upstream status、malformed responseではquota状態を消費せず、後続処理が実行されない。
+
+いずれかを確認できない場合、quota設定を受け入れず、未確定requestをfail-closedのまま保持します。
 
 ## OpenCode設定
 

@@ -170,12 +170,21 @@ This is a deployment-provisioning step, not a checked-in default. Replace the
 example values with measured values for the target deployment, and do not commit
 the placeholders or the authentication Secret.
 
-Set the matching Worker secret separately and deploy the same target:
+For an existing Worker, use Wrangler 4.92.0 or later and upload the configured
+values to an inactive version, preserving deployment-managed Variables. Add
+the matching Worker secret to that version, and promote it only after all four
+settings are ready:
 
 ```bash
-npx wrangler secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
-npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions upload --keep-vars --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions deploy --config apps/gateway-worker/wrangler.jsonc
 ```
+
+`wrangler secret put` creates and immediately deploys a version, so do not use it
+for intermediate Deno configuration updates. On a new Worker, use the initial
+creation procedure in [CONFIGURATION.md](./CONFIGURATION.md); `versions upload`
+requires an already-created Worker.
 
 The four values must be configured together. Do not reuse an endpoint or secret
 between Production and Preview.

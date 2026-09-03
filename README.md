@@ -434,8 +434,7 @@ npm test -w durable-objects/tokenizer-controller
 ```
 
 Tokenizer/quotaの受け入れ条件とWorker resource-limit canaryの判定基準は、
-[設定カタログ](./docs/CONFIGURATION.md)と[Deno tokenizer運用手順](./docs/deno-tokenizer.md)
-を参照してください。
+[設定カタログ](./docs/CONFIGURATION.md)を参照してください。
 
 ## Secret ローテーション
 
