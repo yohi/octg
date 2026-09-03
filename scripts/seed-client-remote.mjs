@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
+import { writeClientKey } from "./write-client-key.mjs";
+
 const root = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const config = "apps/gateway-worker/wrangler.jsonc";
 const node = process.execPath;
@@ -18,6 +20,7 @@ const args = process.argv.slice(2).reduce((acc, arg) => {
 const id = args.id || process.env.OCTG_CLIENT_ID;
 const name = args.name || process.env.OCTG_CLIENT_NAME;
 const rawKey = args.key || process.env.OCTG_CLIENT_KEY;
+const keyOutputFile = args.keyOutputFile || process.env.OCTG_CLIENT_KEY_OUTPUT_FILE;
 
 function normalizeToolsMode(value) {
   return value === "ALLOW" ? "ALLOW" : "REJECT";
@@ -26,7 +29,7 @@ function normalizeToolsMode(value) {
 const toolsMode = normalizeToolsMode(args.toolsMode ?? process.env.OCTG_CLIENT_TOOLS_MODE);
 
 if (!process.env.OCTG_KEY_PEPPER || !id || !name) {
-  console.error("usage: OCTG_KEY_PEPPER=... npm run seed:client:remote -- --id=<id> --name=<name> [--key=octg_sk_...] [--tools-mode=REJECT|ALLOW]");
+  console.error("usage: OCTG_KEY_PEPPER=... npm run seed:client:remote -- --id=<id> --name=<name> [--key=octg_sk_...] [--key-output-file=PATH] [--tools-mode=REJECT|ALLOW]");
   console.error("  --name にスペースを含む場合は OCTG_CLIENT_NAME=\"...\" 環境変数を使用してください");
   process.exit(1);
 }
@@ -61,10 +64,24 @@ try {
     process.exit(1);
   }
   writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
-  run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
+  if (keyOutputFile) {
+    writeClientKey(keyOutputFile, clientKey);
+  }
+  try {
+    run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
+  } catch (error) {
+    if (keyOutputFile) {
+      rmSync(keyOutputFile, { force: true });
+    }
+    throw error;
+  }
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
 }
 
-console.log(`\n本番クライアントを登録しました: ${clientKey}`);
-console.log("このキーを利用者に渡してください。");
+if (keyOutputFile) {
+  console.log(`\n本番クライアントを登録しました。key file: ${keyOutputFile}`);
+} else {
+  console.log(`\n本番クライアントを登録しました: ${clientKey}`);
+  console.log("このキーを利用者に渡してください。");
+}

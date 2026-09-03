@@ -132,6 +132,10 @@ jobs:
           config.vars.QUOTA_LIMIT_STANDARD = process.env.PREVIEW_QUOTA_LIMIT_STANDARD;
           config.vars.QUOTA_LIMIT_MINI = process.env.PREVIEW_QUOTA_LIMIT_MINI;
           config.vars.OCTG_UPSTREAM_BASE_URL = process.env.PREVIEW_UPSTREAM_BASE_URL;
+          // Preview has no Deno Deploy control plane; use its isolated DO tokenizer.
+          delete config.vars.DENO_TOKENIZER_ENDPOINT;
+          delete config.vars.DENO_TOKENIZER_THRESHOLD_BYTES;
+          delete config.vars.DENO_TOKENIZER_TIMEOUT_MS;
           await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
           NODE
           echo "config=$PREVIEW_CONFIG_PATH" >> "$GITHUB_OUTPUT"

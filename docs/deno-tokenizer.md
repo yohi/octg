@@ -133,15 +133,15 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
 
 ### 1.3 Environment Variables
 
-Configure these in the Deno Deploy dashboard or via CLI:
+The complete variable and Secret catalog, including where each value is obtained and
+which environment owns it, is maintained in
+[`docs/CONFIGURATION.md`](./CONFIGURATION.md). Use that catalog when provisioning a
+new Production or Preview deployment.
 
-| Variable | Required | Description |
-|---|---|---|
-| `OCTG_TOKENIZER_AUTH_TOKEN` | **Yes** | Deno secret shared with the Worker. |
-| `MAX_INPUT_BYTES` | No | Raw limit shared with the matching Worker. |
-
-`OCTG_TOKENIZER_AUTH_TOKEN` is a Deno Deploy runtime secret. Configure it in the
-Deno app and do not add it to the GitHub Environment or workflow.
+The Deno app requires `OCTG_TOKENIZER_AUTH_TOKEN` as a Deno Deploy runtime Secret.
+The matching Worker Secret is `DENO_TOKENIZER_AUTH_TOKEN`; both values must be the
+same, but the Deno runtime Secret must not be added to GitHub or the workflow.
+`MAX_INPUT_BYTES` is optional and must match the corresponding Worker limit.
 
 The shared resolver supplies the default and clamps the effective input limit.
 
@@ -170,12 +170,21 @@ This is a deployment-provisioning step, not a checked-in default. Replace the
 example values with measured values for the target deployment, and do not commit
 the placeholders or the authentication Secret.
 
-Set the matching Worker secret separately and deploy the same target:
+For an existing Worker, use Wrangler 4.92.0 or later and upload the configured
+values to an inactive version, preserving deployment-managed Variables. Add
+the matching Worker secret to that version, and promote it only after all four
+settings are ready:
 
 ```bash
-npx wrangler secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
-npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions upload --keep-vars --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions deploy --config apps/gateway-worker/wrangler.jsonc
 ```
+
+`wrangler secret put` creates and immediately deploys a version, so do not use it
+for intermediate Deno configuration updates. On a new Worker, use the initial
+creation procedure in [CONFIGURATION.md](./CONFIGURATION.md); `versions upload`
+requires an already-created Worker.
 
 The four values must be configured together. Do not reuse an endpoint or secret
 between Production and Preview.

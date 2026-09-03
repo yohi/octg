@@ -178,7 +178,8 @@ npm run setup:deploy -- --env-file=.env
 | `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | ✓ |
 
 `setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定が揃っている場合に実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順でAccessアプリを作成し、取得した値を`.env`へ入力してください。
-その後、`wrangler secret put` を使って **3 つの Secret を順番に入力**します。順序は以下の通りです。
+その後、`wrangler secret put` を使って3つのProduction Secretを順番に入力します。
+値の意味・取得場所・Production/Preview間の境界は[設定カタログ](./CONFIGURATION.md)を参照してください。
 
 | 順 | Secret | 入力する値 | 取得場所 |
 |---:|---|---|---|
@@ -239,13 +240,8 @@ TokenizerController を追加する migration `v2` が定義されています�
 - migration を追加・変更した場合は、D1 migration だけでなく Gateway Worker の deploy で
   Durable Object migration も適用されることを確認してください。
 
-| Secret | 用途 | 取得場所 |
-|---|---|---|
-| `OCTG_KEY_PEPPER` | クライアントキー `key_hash` の keyed hash 用 pepper | 任意の長いランダム文字列を生成して使用 |
-| `OCTG_UPSTREAM_API_TOKEN` | AI Gateway REST 呼び出し用 Cloudflare API token | 2.2 で作成 |
-| `OPENAI_USAGE_API_KEY` | OpenAI Organization Usage API 読み取り用 admin key | 2.6 で作成 |
-
-> Secrets の値をコード・ログ・コミットに含めないこと。[Secret ローテーション手順](../README.md#secret-ローテーション) も参照。
+> Secretsの値をコード・ログ・コミットに含めないこと。Secretの取得場所とローテーションは
+> [設定カタログ](./CONFIGURATION.md)を参照してください。
 
 ## 4.2 デプロイ前の検証
 
@@ -293,39 +289,41 @@ npm test -w durable-objects/tokenizer-controller
 初回クライアントを本番 D1 に登録します。
 
 ```bash
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  node scripts/seed-client.mjs client_demo "Demo Client" octg_sk_xxx > /tmp/octg-seed.sql
-
-npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=REJECT \
+    --key-output-file="$key_file"
 ```
 
 ツール使用を許可する場合は、第 4 引数に `ALLOW` を指定してください。
 
 ```bash
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  node scripts/seed-client.mjs client_demo "Demo Client" octg_sk_xxx ALLOW > /tmp/octg-seed.sql
-
-npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=ALLOW \
+    --key-output-file="$key_file"
 ```
 
 または、より簡単に `npm run seed:client:remote` を使用します。`--key` を省略すると、`octg_sk_remote_` 形式のランダムな本番クライアントキーを自動生成して本番 D1 に登録します。
 
 ```bash
-# 本番クライアントキーを自動生成する場合（ツール使用を許可）
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient --tools-mode=ALLOW
-
-# 独自のキーを指定する場合
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient --key=octg_sk_my_custom_key --tools-mode=ALLOW
-
-# --name にスペースを含む場合は環境変数を使用
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  OCTG_CLIENT_ID=client_demo \
-  OCTG_CLIENT_NAME="Demo Client" \
-  OCTG_CLIENT_TOOLS_MODE=ALLOW \
-  npm run seed:client:remote
+# raw keyは0600ファイルへ出力し、標準出力へ表示しない
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=ALLOW \
+    --key-output-file="$key_file"
 ```
+
+`--key-output-file`の内容は登録直後にSecret Managerへ保存するか、canary実行の
+`OCTG_CANARY_CLIENT_KEY`へprocess environmentとして一時注入してください。同じclient IDを
+key省略で再実行すると既存keyが無効になります。`OCTG_KEY_PEPPER`は既存Production
+Workerと同じ値を使用し、新しいpepperを生成して置き換えないでください。
 
 ## 6. デプロイ後の確認と運用
 

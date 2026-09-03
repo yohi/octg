@@ -17,12 +17,15 @@
     "not_found_handling": "none",
     "run_worker_first": ["/admin/*"]
   },
-  // Deno tokenizer is opt-in. Keep all DENO_TOKENIZER_* bindings absent from
-  // this checked-in default configuration; see docs/deno-tokenizer.md.
+  // Deno tokenizer is enabled for this production deployment. Keep its auth
+  // token in the separately managed Worker secret.
   "vars": {
     "QUOTA_LIMIT_STANDARD": "1000000",
     "QUOTA_LIMIT_MINI": "9950000",
     "MAX_INPUT_BYTES": "1048576",
+    "DENO_TOKENIZER_ENDPOINT": "https://octg.yohi.deno.net/tokenize",
+    "DENO_TOKENIZER_THRESHOLD_BYTES": "262144",
+    "DENO_TOKENIZER_TIMEOUT_MS": "5000",
     "MAX_IN_FLIGHT_REQUESTS": "2",
     "IN_FLIGHT_LEASE_TTL_MS": "120000",
     "IN_FLIGHT_LEASE_RENEWAL_MS": "30000",

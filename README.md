@@ -388,157 +388,43 @@ Deno Deploy の workflow は通常の PR と fork からの PR では検証だ�
 Secret として設定してください。Preview 用 Deno Deploy を使う場合は、Production と別の
 GitHub Environment、別プロジェクト、別 Secret を追加して workflow を拡張します。
 
-### 事前に必要な設定（一度だけ）
+### 設定・Preview・Canary
 
-1. production と分離した preview Worker、preview D1、preview Durable Object、
-   client/policy/model registry、監査・reconciliation state を用意し、preview用
-   Cloudflare API tokenをpreview control-plane resourceだけへ限定します。upstream billing
-   principal は共有できますが、その場合は Preview の利用上限、quota coordination、監視、
-   coordination 未設定時の fail-closed 条件を先に定義してください。
-   D1作成・migration・CI client seed・GitHub Environment設定は、次のスクリプトで一括実行できます。
-   `.env.example` を `.env` へコピーして Preview セクションへ実値を入力し、まずdry-runで確認してください。
+Secret、Variables、取得場所、Production/Previewの境界、Preview setup、
+Worker canaryの設定は [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) を唯一の参照先にします。
+READMEではコマンドの再掲やSecret名の一覧を持たせません。
 
-   ```bash
-   cp .env.example .env
-   chmod 600 .env
-   zsh scripts/setup-preview.zsh --dry-run
-   zsh scripts/setup-preview.zsh
-   zsh scripts/setup-preview.zsh --github
-   ```
+ProductionとPreviewではWorker、D1、Durable Objects、registry、監査・reconciliation stateを
+分離します。upstream billing principalを共有する場合も、Previewには明示的な上限とcoordinationを
+設定し、未設定時はfail-closedにしてください。
 
-   `--github` は `preview` Environment の Variables と、
-   `CLOUDFLARE_PREVIEW_API_TOKEN` / `OCTG_UPSTREAM_API_TOKEN` /
-   `OCTG_PREVIEW_SMOKE_API_KEY` / `OCTG_KEY_PEPPER` Secretsを更新します。
-   Scriptはcanonical configの`DB` bindingだけを使った一時configを生成するため、
-   canonical configに複数のD1 bindingがあってもProduction D1を変更しません。
+Previewの初回セットアップは次の順で実行します。
 
-2. （スクリプトを使わず手動で行う場合）CI 専用クライアントキーを preview D1 に登録します。preview用の
-   `OCTG_PREVIEW_KEY_PEPPER` と control-plane credential は production と別の値を
-   Cloudflare側で管理します。セットアップスクリプトは入力した
-   `OCTG_PREVIEW_KEY_PEPPER` をGitHub preview Environment Secret
-   `OCTG_KEY_PEPPER`へ設定し、`OCTG_PREVIEW_UPSTREAM_API_TOKEN`を
-   GitHub preview Environment Secret `OCTG_UPSTREAM_API_TOKEN`へ設定します。
-   workflowの対象version uploadとCI client seedでPreview専用の値を使用します。
-   upstream billing principalを共有する場合も、preview workflowへproduction
-   D1/Worker credentialやUsage API keyを渡してはいけません。`scripts/seed-client.mjs` でseed SQLを生成し、
-   preview D1へ適用してください。
+```bash
+cp .env.example .env
+chmod 600 .env
+zsh scripts/setup-preview.zsh --dry-run
+zsh scripts/setup-preview.zsh
+zsh scripts/setup-preview.zsh --github
+```
 
-   ```bash
-   printf 'Preview client key: '
-   read -r -s OCTG_PREVIEW_CLIENT_KEY
-   printf '\n'
-   OCTG_KEY_PEPPER="$OCTG_PREVIEW_KEY_PEPPER" \
-     node scripts/seed-client.mjs client_ci_smoke "CI Smoke" "$OCTG_PREVIEW_CLIENT_KEY" REJECT > /tmp/octg-preview-seed.sql
-   unset OCTG_PREVIEW_CLIENT_KEY
-   ```
-
-   生成したSQLをpreview D1へ適用します（preview accountのcredentialだけを使用してください）。
-
-   `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、preview D1 名は、shell の環境変数または
-   Cloudflare の認証済み profile へ事前に設定し、値をコマンドラインへ直接記載しないでください。
-
-   ```bash
-   ./node_modules/.bin/wrangler d1 execute "$OCTG_PREVIEW_DATABASE_NAME" --remote \
-     --file /tmp/octg-preview-seed.sql
-   ```
-
-   `OCTG_PREVIEW_KEY_PEPPER` と `OCTG_PREVIEW_CLIENT_KEY` は、ローカルシェル履歴や
-   ログへ残らない方法で事前に環境へ設定してください。
-   GitHub Environment `preview` の `OCTG_PREVIEW_SMOKE_API_KEY` へ登録し、
-   productionのclient keyは使わないでください。
-3. GitHub Environment `preview` の **Secrets** に以下を登録します。表の「入力する値」が実値です。
-
-   | Secret名 | 入力する値 |
-   | --- | --- |
-   | `CLOUDFLARE_PREVIEW_API_TOKEN` | Preview Account用のCloudflare API token |
-   | `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway B用token（`AI Gateway: Run`） |
-   | `OCTG_PREVIEW_SMOKE_API_KEY` | Preview D1へseedしたCI clientの`octg_sk_*` key |
-   | `OCTG_KEY_PEPPER` | Preview D1のhashに使った`OCTG_PREVIEW_KEY_PEPPER` |
-
-   `OCTG_UPSTREAM_API_TOKEN`はCloudflare Dashboardの
-   **My Profile → API Tokens → Create Token → Custom token**で発行します。
-   Preview Gateway Bを所有するAccountを対象に、Account権限の
-   **AI Gateway: Run**を付与してください。
-   `OCTG_PREVIEW_UPSTREAM_BASE_URL`が指す`/openai` endpointのtokenです。
-   Gateway AのCustom Provider用tokenではありません。
-   Secretにはtoken全文だけを入力します。`Bearer`、引用符、Gateway URL、
-   OpenAI API keyは付けません。
-
-   ローカル`.env`の名前とGitHub Secretの名前は一部異なります。`--github`は次のように変換します。
-
-   | `.env`の名前 | GitHub Environmentの名前 |
-   | --- | --- |
-   | `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | `OCTG_UPSTREAM_API_TOKEN` |
-   | `OCTG_PREVIEW_KEY_PEPPER` | `OCTG_KEY_PEPPER` |
-   | `OCTG_PREVIEW_CLIENT_KEY` | `OCTG_PREVIEW_SMOKE_API_KEY` |
-   | `CLOUDFLARE_PREVIEW_API_TOKEN` | `CLOUDFLARE_PREVIEW_API_TOKEN` |
-
-4. **Actions Variables** に以下を登録します:
-
-   | Variable名 | 入力する値 |
-   | --- | --- |
-   | `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | Preview Account ID（32桁hex。tokenではない） |
-   | `OCTG_PREVIEW_DATABASE_ID` | Preview D1 Database ID（UUID） |
-   | `OCTG_PREVIEW_UPSTREAM_BASE_URL` | Gateway B endpoint（`/openai`で終了） |
-   | `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` | Preview STANDARD pool上限（`0`で無効） |
-   | `OCTG_PREVIEW_QUOTA_LIMIT_MINI` | Preview MINI pool上限（正の整数） |
-   | `OCTG_PREVIEW_BASE_URL` | Preview Workerの公開URL |
-   | `OCTG_PREVIEW_WORKER_NAME` | 任意。未設定時は`octg-gateway-preview` |
-   | `SMOKE_MODEL` | 任意。未設定時は`gpt-5-mini` |
-
-5. production deploy用のSecret `CLOUDFLARE_API_TOKEN` と
-   Variable `CLOUDFLARE_ACCOUNT_ID`はproduction workflowだけへ登録し、
-   preview environmentへ登録・参照しないでください。
-
-### 運用メモ
-
-- preview smokeは1つの論理テストとして最大3回POSTします。各試行は独立したrequestのため、
-  preview MINI poolのquotaを最大3回分消費し得ます。上限値はActions Variablesから一時
-  configへ注入し、共有upstreamを使う場合はProduction側のquota配分からPreview分を差し引きます。
-- Preview D1/DOのquota stateはProductionと共有しません。同じupstream billing principalを使う場合でも、
-  D1共有はquota coordinationの代替になりません。coordination上限を超えるrequestはupstreamへ送らず、
-  fail-closedにしてください。
-- workflowは専用preview Workerの新 versionを0% trafficでactive deploymentに追加し、
-  テスト後に現行version 100%へ復元します。PR smokeとproduction deployは
-  `octg-deployment` concurrency groupで直列化されます。
-- smoke失敗時のログにはHTTP status、形式検証済みrequest ID、sanitize/truncate済みmessage
-  だけを出力し、response bodyやcredentialを出力しません。
-- 本番デプロイ失敗時の rollback は Cloudflare deployment version rollback を手動実施します。
-- Secret 値は workflow ログへ出力されません。`octg_sk_*` や OpenAI API key をドキュメントやコードへ記載しないでください。
+`--github`はPreview Environmentだけを更新します。Productionのcredential、D1、client key、
+Usage API keyはPreviewへ渡しません。
 
 ### Durable Object migration の不変条件
 
-`apps/gateway-worker/wrangler.jsonc` の migration は次の順序を維持します。
-
-```jsonc
-"migrations": [
-  { "tag": "v1", "new_sqlite_classes": ["QuotaController"] },
-  { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] }
-]
-```
-
-- 既に適用した tag を削除・改名・内容変更しないでください。
-- TokenizerController は SQLite class として登録されますが、現在の実装は
-  `ctx.storage` を使用せず、入力本文・tokenizer state を永続化しません。
-- 変更は必ず新しい migration tag の追加として行い、`apps/gateway-worker/wrangler.jsonc`
-  を使って Gateway Worker と一緒に deploy します。
+適用済みmigration tagは削除・改名・内容変更せず、変更時は新しいtagを追加します。
+TokenizerControllerの登録とDeno tokenizerの設定詳細は[設定カタログ](./docs/CONFIGURATION.md)へ集約しています。
 
 ## デプロイ前の必須プロビジョニング（手動）
 
-1. `wrangler d1 create octg` → 発行された `database_id` を `apps/gateway-worker/wrangler.jsonc` に設定する。
-2. AI Gateway を作成し、OpenAI Project A（shared-free, Data Sharing ON）の API キーを **BYOK + Secrets Store** に登録する。OCTG のコード・クライアントには OpenAI キーを配布しない。
-3. AI Gateway の Spend Limit を無料枠と同額に設定する（二次防御。authoritative ではない）。
-4. `wrangler.jsonc` の vars を実値に差し替える: `OCTG_UPSTREAM_BASE_URL`（アカウント ID 込み）、`ACCESS_TEAM_DOMAIN` / `ACCESS_AUD`（Admin API 用 Cloudflare Access アプリケーション）。
-5. Secrets を設定する:
-   - `npx wrangler secret put OCTG_KEY_PEPPER --config apps/gateway-worker/wrangler.jsonc` — クライアントキーの keyed hash 用 pepper
-   - `npx wrangler secret put OCTG_UPSTREAM_API_TOKEN --config apps/gateway-worker/wrangler.jsonc` — AI Gateway REST 用 Cloudflare API token（AI Gateway Run 権限）
-   - `npx wrangler secret put OPENAI_USAGE_API_KEY --config apps/gateway-worker/wrangler.jsonc` — OpenAI Organization Usage API 読み取り用 admin key
-6. `npx wrangler d1 migrations apply octg --remote --config apps/gateway-worker/wrangler.jsonc` で remote D1 migration を適用する。
-7. `npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc`（CI からのデプロイを推奨）。
+手動デプロイの全手順、Secret登録順、D1/AI Gateway/Accessの準備は
+[docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md) にまとめています。
+設定値の一覧や取得場所は[docs/CONFIGURATION.md](./docs/CONFIGURATION.md)を参照してください。
 
-### デプロイ前の Tokenizer / quota 確認
+### デプロイ前の検証
 
-本番 credential や入力本文をログへ出さず、次の順で確認します。
+本番credentialや入力本文をログへ出さず、次の検証を実行します。
 
 ```bash
 npm run typecheck
@@ -547,140 +433,8 @@ npm test -w apps/gateway-worker
 npm test -w durable-objects/tokenizer-controller
 ```
 
-少なくとも、次の条件を満たすことを確認してください。
-
-- `TokenizerController` の exact BPE success 後にだけ `quota_reserve` が発生する。
-- `work_limit` は HTTP 413 / `request_too_large` / `reject:request_too_large` となり、
-  reservation、in-flight admission、upstream call が発生しない。
-- RPC failure、malformed result、RPC preflight ceiling 超過は HTTP 500 /
-  `api_error` / `internal_error` / `error:internal_error` となり、reservation、in-flight
-  admission、upstream call が発生しない。
-- `MAX_INPUT_TEXT_BYTES = 16 * 1024 * 1024 - 65_536` の `inputText` UTF-8 byte 境界を確認する。
-  - `MAX_INPUT_TEXT_BYTES - 1` bytes: 受け入れる。
-  - `MAX_INPUT_TEXT_BYTES` bytes: 受け入れる。
-  - `MAX_INPUT_TEXT_BYTES + 1` bytes: Tokenizer RPC では HTTP 500 / `error:internal_error` で拒否し、
-    reservation、in-flight admission、upstream call を実行しない。Worker の HTTP 正規化経路では
-    RPC より前に HTTP 413 / `reject:request_too_large` で拒否する。
-- token budget の算術異常は HTTP 500 / `api_error` / `internal_error` となり、公開 route は
-  `error:internal_error`、resource stage route は `error:arithmetic_error` になる。
-- 74,000 token 級 fixture で tokenization 結果が安定し、success response の実 usage で settle される。
-- `apps/gateway-worker/wrangler.jsonc` の `TOKENIZER_CONTROLLER` binding と migration `v2` が残っている。
-
-### Worker resource-limit canary
-
-Worker の CPU / memory limit を確認するための canary は、次の wrapper で実行します。
-共通の `.env` を使う場合は `--env-file=.env` を明示してください。従来の `admin.env` も後方互換として利用できます。
-
-```bash
-npm run canary:worker
-```
-
-このコマンドは次の処理を自動で行います。
-
-1. `--env-file` を指定した場合はそのファイルを読み込みます。未指定時は従来どおり root の `admin.env` を読み込みます。ファイルがない状態が通常運用であり、process environment だけでも実行できます。process environment の値が優先されます。
-2. `OCTG_CANARY_URL` の hostname から `OCTG_CANARY_ALLOWED_HOSTS` を導出します。明示値を指定する場合も wildcard は使用できません。
-3. 74,000 token 級の `gpt-5` chat payload を一時ファイルへ生成し、canary 終了後に削除します。入力本文は出力しません。
-4. `CANARY_CONCURRENCY` の既定値 `1,2` と `CANARY_REQUEST_TIMEOUT_MS` の既定値 `120000` を設定します。
-5. 検証済みの canary script を起動し、結果 JSON Lines をそのまま出力します。client key、payload、例外文字列は出力しません。
-
-#### 設定値
-
-通常は Secret Manager または CI の環境変数から注入してください。複数の設定を一箇所で管理する場合は root の `.env` を使い、`admin.env` は既存運用との互換用または一時的なローカル実行用に限定してください。
-
-| 変数 | 必須 | 既定値 | 設定内容 |
-|---|---:|---|---|
-| `OCTG_CANARY_URL` | Yes | なし | Production Worker の `https://<worker-host>/v1/chat/completions`。`OCTG_UPSTREAM_BASE_URL` は使用しない。 |
-| `OCTG_CANARY_CLIENT_KEY` | Yes | なし | `/v1/chat/completions` を呼べる専用 Production client key。raw key を commit・共有しない。 |
-| `OCTG_CANARY_ALLOWED_HOSTS` | No | URLの hostname | URLの exact hostname を comma 区切りで指定する。port、scheme、wildcard は不可。 |
-| `CANARY_CONCURRENCY` | No | `1,2` | 必ず `1` と `2` を含む正の整数。実際の想定ピークを検証する場合は `1,2,8` のように追加する。 |
-| `CANARY_REQUEST_TIMEOUT_MS` | No | `120000` | 各 request の timeout。正の safe integer。 |
-| `CANARY_PAYLOAD_PATH` | No | 自動生成 | 独自の JSON fixture を使う場合だけ指定する。通常は指定不要。 |
-
-env file から読み込むのは上表の canary 用6変数だけです。Grafana、Terraform、Cloudflare
-など他ツールの設定行は無視するため、canary と無関係な行の構文不備で実行を止めません。
-canary 用変数の形式は、shell を実行しない単純な assignment だけです。
-
-```text
-OCTG_CANARY_URL=https://octg-gateway.example.workers.dev/v1/chat/completions
-OCTG_CANARY_ALLOWED_HOSTS=octg-gateway.example.workers.dev
-OCTG_CANARY_CLIENT_KEY=<Secret Managerから注入する値>
-```
-
-canary 用の行では shell command、command substitution、`${...}` 展開を使用しないでください。
-値を Secret Manager から process environment へ注入できる場合は、`admin.env` を作成せずに
-`npm run canary:worker` を実行してください。`admin.env` を作成する場合は、次のコマンドで
-repository の外からも読み取り権限を制限してください。
-
-```bash
-chmod 600 admin.env
-```
-
-#### Client key の準備
-
-既存の canary key がある場合は、毎回 seed せずに `OCTG_CANARY_CLIENT_KEY` として注入します。
-key がない場合だけ、次の remote seed を一度実行します。
-
-```bash
-npm run seed:client:remote -- \
-  --id=canary_cpu \
-  --name="CPU Canary" \
-  --tools-mode=REJECT
-```
-
-この seed は Production D1 を変更する write 操作です。`OCTG_KEY_PEPPER`、
-`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` が必要です。`OCTG_KEY_PEPPER` は
-Production Worker に設定済みの元の値を Secret Manager から注入してください。新しい pepper を
-生成すると既存 client key と一致しなくなります。
-
-`seed:client:remote` は client key の raw 値を生成・表示します。出力を CI log や repository に
-残さず、Secret Manager に一度だけ保存してください。D1 から raw key を復元することはできません。
-key の登録後は seed を繰り返さず、canary の読み取り専用実行だけを行います。
-
-#### Wrapper のオプション
-
-`.env` 以外の一時ファイルを使う場合は `--env-file` を指定します。env file より
-process environment の値が優先されます。`--concurrency`、`--timeout-ms`、
-`--payload-path` は実行単位の上書き値として使用できます。
-
-```bash
-npm run canary:worker -- --env-file=operator-canary.env
-npm run canary:worker -- --concurrency=1,2,8
-npm run canary:worker -- --timeout-ms=180000
-npm run canary:worker -- --payload-path=fixtures/canary.json
-```
-
-設定エラーの場合は、次のように不足している変数名だけが表示されます。
-
-```text
-octg.canary.config_error
-missing: OCTG_CANARY_URL, OCTG_CANARY_CLIENT_KEY
-```
-
-この marker は HTTP request を送る前のエラーです。`admin.env` がないこと自体はエラーでは
-ありません。`OCTG_KEY_PEPPER` の不足は canary ではなく `seed:client:remote` の設定エラーです。
-
-#### 結果の判定
-
-wrapper の出力は request ごとの status、duration、形式検証済み request ID に加えて、レスポンスから
-安全に抽出できる `X-OCTG-Route`、`X-OCTG-Worker-Version`、構造化された error の type / code / param
-だけを含みます。response message、response body、credential、例外文字列は出力しません。
-CPU limit の判定は出力だけで完了しないため、request ID と worker version を Cloudflare Observability と相関してください。
-`route` が `free_shared` の場合は Worker が upstream response を返しており、`responseErrorType`、
-`responseErrorCode`、`responseErrorParam` で本文を開示せずに upstream の構造化エラーを確認できます。
-`route` が null の場合は Worker 内の入力検証などで返された可能性があるため、同じ request ID の
-resource stage event と相関してください。
-
-- canary revision が Production deploy の対象 revision と一致する。
-- concurrency `1`、`2`、および指定した想定ピークで accepted request が成功する。
-- `$workers.outcome` に `exceededCpu` / `exceededMemory` がない。
-- `$workers.cpuTimeMs`、`$workers.wallTimeMs`、memory が実効 limit 内にある。
-- `tokenize` stage が成功してから `quota_reserve` が開始される。
-- 成功した upstream request が actual usage で settle される。
-- canary は Production quota と upstream billing を消費するため、専用 client key と
-  upstream が受け付ける最小値 `max_completion_tokens: 16` を使用する。
-
-いずれかの revision、limit、invocation outcome、stage event、quota/upstream 相関が欠ける場合は、
-Error 1102 を解消済みと判定せず、未確認として扱います。
+Tokenizer/quotaの受け入れ条件とWorker resource-limit canaryの判定基準は、
+[設定カタログ](./docs/CONFIGURATION.md)を参照してください。
 
 ## Secret ローテーション
 
