@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+
+import { writeClientKey } from "./write-client-key.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const seedClient = `${root}/scripts/seed-client.mjs`;
@@ -22,4 +25,15 @@ function seed(toolsMode) {
 
 assert.match(seed("ALLOW"), /tools_mode\) VALUES \([^\n]*, 'ALLOW'\)/);
 assert.match(seed("REJECT"), /tools_mode\) VALUES \([^\n]*, 'REJECT'\)/);
+
+const tempDir = mkdtempSync(`${tmpdir()}/octg-seed-test-`);
+try {
+  const keyPath = `${tempDir}/client-key`;
+  writeClientKey(keyPath, "octg_sk_generated_test");
+  assert.equal(readFileSync(keyPath, "utf8"), "octg_sk_generated_test\n");
+  assert.equal(statSync(keyPath).mode & 0o777, 0o600);
+} finally {
+  rmSync(tempDir, { recursive: true, force: true });
+}
+
 console.log("seed-client tools mode propagation: ok");

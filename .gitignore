@@ -5,6 +5,7 @@ node_modules/
 .env*
 !.env.example
 admin.env
+deno.env
 .justice/
 .codegraph/
 .worktrees/

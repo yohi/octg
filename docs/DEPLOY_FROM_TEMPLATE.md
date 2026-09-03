@@ -293,39 +293,41 @@ npm test -w durable-objects/tokenizer-controller
 初回クライアントを本番 D1 に登録します。
 
 ```bash
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  node scripts/seed-client.mjs client_demo "Demo Client" octg_sk_xxx > /tmp/octg-seed.sql
-
-npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=REJECT \
+    --key-output-file="$key_file"
 ```
 
 ツール使用を許可する場合は、第 4 引数に `ALLOW` を指定してください。
 
 ```bash
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  node scripts/seed-client.mjs client_demo "Demo Client" octg_sk_xxx ALLOW > /tmp/octg-seed.sql
-
-npx wrangler d1 execute octg --remote --file /tmp/octg-seed.sql --config apps/gateway-worker/wrangler.jsonc
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=ALLOW \
+    --key-output-file="$key_file"
 ```
 
 または、より簡単に `npm run seed:client:remote` を使用します。`--key` を省略すると、`octg_sk_remote_` 形式のランダムな本番クライアントキーを自動生成して本番 D1 に登録します。
 
 ```bash
-# 本番クライアントキーを自動生成する場合（ツール使用を許可）
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient --tools-mode=ALLOW
-
-# 独自のキーを指定する場合
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  npm run seed:client:remote -- --id=client_demo --name=DemoClient --key=octg_sk_my_custom_key --tools-mode=ALLOW
-
-# --name にスペースを含む場合は環境変数を使用
-OCTG_KEY_PEPPER=<your-production-pepper> \
-  OCTG_CLIENT_ID=client_demo \
-  OCTG_CLIENT_NAME="Demo Client" \
-  OCTG_CLIENT_TOOLS_MODE=ALLOW \
-  npm run seed:client:remote
+# raw keyは0600ファイルへ出力し、標準出力へ表示しない
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=client_demo --name="Demo Client" --tools-mode=ALLOW \
+    --key-output-file="$key_file"
 ```
+
+`--key-output-file`の内容は登録直後にSecret Managerへ保存するか、canary実行の
+`OCTG_CANARY_CLIENT_KEY`へprocess environmentとして一時注入してください。同じclient IDを
+key省略で再実行すると既存keyが無効になります。`OCTG_KEY_PEPPER`は既存Production
+Workerと同じ値を使用し、新しいpepperを生成して置き換えないでください。
 
 ## 6. デプロイ後の確認と運用
 

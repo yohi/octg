@@ -276,6 +276,31 @@ Deno tokenizerはopt-inです。全ての設定を一緒に用意し、Productio
 
 `DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
 
+### GitHub Actionsへの設定
+
+GitHub Actionsの設定画面はリポジトリの **Settings → Secrets and variables → Actions** です。
+Production Worker workflowはリポジトリスコープ、Deno Deploy workflowはEnvironment
+`deno-production`スコープへ設定します。
+
+| Workflow | 設定先 | Variables | Secrets |
+| --- | --- | --- | --- |
+| `.github/workflows/deploy-production.yml` | Repository | `CLOUDFLARE_ACCOUNT_ID` | `CLOUDFLARE_API_TOKEN` |
+| `.github/workflows/deploy-deno-tokenizer.yml` | Environment `deno-production` | `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP` | `DENO_DEPLOY_TOKEN` |
+
+GitHub CLIでは値を表示せず、登録済みの名前だけを確認できます。
+
+```bash
+gh variable list
+gh secret list
+gh variable list --env deno-production
+gh secret list --env deno-production
+```
+
+Secretの実値はGitHubから読み戻せません。未登録またはローテーション時は、各取得元で
+新しいtokenを発行し、同じ設定画面の **New repository secret** または
+**New environment secret** から登録してください。Deno tokenizerのruntime secret
+`OCTG_TOKENIZER_AUTH_TOKEN`はGitHubではなくDeno Deployへ登録します。
+
 ## Worker canary設定
 
 ```bash
@@ -292,6 +317,29 @@ npm run canary:worker -- --env-file=.env
 | `CANARY_REQUEST_TIMEOUT_MS` | No | canary実行環境 | 既定値`120000` |
 
 canaryの結果にはresponse bodyやmessageを出さず、request ID・Worker version・安全なstructured errorだけを出力します。CPU/memory制限はrequest IDとrevisionをCloudflare Observabilityで相関して確認します。
+
+専用clientがない場合はProduction D1へ一度だけ登録します。既存Productionの
+`OCTG_KEY_PEPPER`をSecret Managerからprocess environmentへ注入し、raw keyを標準出力や
+コマンドラインへ出さないため、`--key-output-file`を使用してください。同じclient IDを
+key省略で再実行すると既存keyが無効になるため、登録後は再seedしません。
+
+```bash
+key_file="$(mktemp)"
+trap 'rm -f -- "$key_file"' EXIT
+
+OCTG_KEY_PEPPER="${OCTG_KEY_PEPPER:?Secret Managerから注入してください}" \
+  npm run seed:client:remote -- \
+    --id=canary_cpu --name="CPU Canary" --tools-mode=REJECT \
+    --key-output-file="$key_file"
+
+OCTG_CANARY_CLIENT_KEY="$(<"$key_file")" \
+  npm run canary:worker -- --env-file=.env
+```
+
+`--key-output-file`はmode `0600`のファイルへkeyを一度だけ書き込み、登録完了メッセージへ
+raw keyを含めません。canary終了時にtrapで削除されます。Secret Managerやprocess
+environmentを使えない場合は、登録を中断し、raw keyをログへ残さない別の受け渡し方法を
+用意してください。
 
 ## OpenCode設定
 
