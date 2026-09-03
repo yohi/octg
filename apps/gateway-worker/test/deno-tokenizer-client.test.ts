@@ -68,6 +68,26 @@ describe("tokenizeWithDeno", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a rejected response body stream as a network failure", async () => {
+    const bodyError = new TypeError("body read failed");
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(bodyError);
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expectOutcome(
+      tokenizeWithDeno({ endpoint, authToken, timeoutMs: 1000, inputText, fetchImpl }),
+      { kind: "unavailable", failureCategory: "network", networkErrorName: "TypeError" },
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("reports upstream_status on non-2xx", async () => {
     let cancelled = false;
     const fetchImpl = vi.fn<typeof fetch>(async () =>

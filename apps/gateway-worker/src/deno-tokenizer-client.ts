@@ -91,6 +91,13 @@ export async function tokenizeWithDeno(args: {
         return { kind: "unavailable", failureCategory: "timeout" };
       }
       if (!readResult.ok) {
+        if (readResult.reason === "network") {
+          return {
+            kind: "unavailable",
+            failureCategory: "network",
+            networkErrorName: networkErrorNameOf(readResult.error),
+          };
+        }
         return { kind: "unavailable", failureCategory: "malformed_response" };
       }
 
@@ -133,7 +140,8 @@ function isJsonContentType(value: string | null): boolean {
 
 type BoundedReadResult =
   | { readonly ok: true; readonly value: unknown }
-  | { readonly ok: false; readonly reason: "malformed_response" };
+  | { readonly ok: false; readonly reason: "malformed_response" }
+  | { readonly ok: false; readonly reason: "network"; readonly error: unknown };
 
 async function readBoundedJson(
   reader: ReadableStreamDefaultReader<Uint8Array> | undefined,
@@ -157,9 +165,9 @@ async function readBoundedJson(
       }
       chunks.push(chunk.value);
     }
-  } catch {
+  } catch (error) {
     await reader.cancel().catch(() => undefined);
-    return { ok: false, reason: "malformed_response" };
+    return { ok: false, reason: "network", error };
   }
 
   const bytes = new Uint8Array(length);
