@@ -12,7 +12,7 @@
 
 - `packages/shared` remains the single source of shared quota/tokenization arithmetic.
 - `apps/deno-tokenizer` validation remains unchanged and runs before deployment.
-- The deployment manifest must include `./deno.json`, `./apps/deno-tokenizer/**`, and `./packages/shared/src/**`.
+- The deployment manifest must include `./deno.json`, `./apps/deno-tokenizer/src/**`, and `./packages/shared/src/**`.
 - The runtime entrypoint must be `./apps/deno-tokenizer/src/main.ts` with dynamic runtime mode.
 - Runtime secrets remain in Deno Deploy and are never added to GitHub Actions.
 - The checked-in root `deno.json` must not hard-code deployment identity; the deploy job injects only non-secret org/app values in its ephemeral checkout.
@@ -64,7 +64,7 @@ fail_contract("deno.json.deploy.include must be a list") unless include_paths.is
 
 required_deploy_paths = [
   "./deno.json",
-  "./apps/deno-tokenizer/**",
+  "./apps/deno-tokenizer/src/**",
   "./packages/shared/src/**",
 ]
 missing_deploy_paths = required_deploy_paths - include_paths
@@ -224,7 +224,7 @@ Expected: PASS with `Deno Deploy workflow contract: ok`.
 
 - [x] **Step 1: Update the deployment instructions**
 
-Change the GitHub Actions and manual deployment instructions to state that the repository root is the local deploy root, that root `deno.json` includes `apps/deno-tokenizer/**` and `packages/shared/src/**`, and that the runtime entrypoint is `apps/deno-tokenizer/src/main.ts`. The manual command must prepare a staging source from the repository root and inject the non-secret deployment identity into the staging copy:
+Change the GitHub Actions and manual deployment instructions to state that the repository root is the local deploy root, that root `deno.json` includes `apps/deno-tokenizer/src/**` and `packages/shared/src/**`, and that the runtime entrypoint is `apps/deno-tokenizer/src/main.ts`. The manual command must prepare a staging source from the repository root and inject the non-secret deployment identity into the staging copy:
 
 ```bash
 # Run these commands from the repository root after preparing the included source paths in staging.
