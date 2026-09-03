@@ -64,13 +64,22 @@ try {
     process.exit(1);
   }
   writeFileSync(sqlPath, seed.stdout, { mode: 0o600 });
-  run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
+  if (keyOutputFile) {
+    writeClientKey(keyOutputFile, clientKey);
+  }
+  try {
+    run(node, [wrangler, "d1", "execute", "octg", "--remote", "--file", sqlPath, "--config", config]);
+  } catch (error) {
+    if (keyOutputFile) {
+      rmSync(keyOutputFile, { force: true });
+    }
+    throw error;
+  }
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
 }
 
 if (keyOutputFile) {
-  writeClientKey(keyOutputFile, clientKey);
   console.log(`\n本番クライアントを登録しました。key file: ${keyOutputFile}`);
 } else {
   console.log(`\n本番クライアントを登録しました: ${clientKey}`);
