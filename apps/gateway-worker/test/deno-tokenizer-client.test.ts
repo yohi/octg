@@ -29,6 +29,7 @@ describe("tokenizeWithDeno", () => {
     expect(requestUrl).toBe(endpoint);
     const requestInit = call[1] as RequestInit;
     expect(requestInit.method).toBe("POST");
+    expect(requestInit.redirect).toBe("manual");
     const headers = new Headers(requestInit.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${authToken}`);
     expect(headers.get("content-type")).toBe("application/json");
@@ -55,14 +56,14 @@ describe("tokenizeWithDeno", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("reports network failure on fetch rejection", async () => {
+  it("reports the safe error class on fetch rejection", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => {
       throw new TypeError("fetch failed");
     });
 
     await expectOutcome(
       tokenizeWithDeno({ endpoint, authToken, timeoutMs: 1000, inputText, fetchImpl }),
-      { kind: "unavailable", failureCategory: "network" },
+      { kind: "unavailable", failureCategory: "network", networkErrorName: "TypeError" },
     );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });

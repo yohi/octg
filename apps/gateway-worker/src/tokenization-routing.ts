@@ -1,6 +1,10 @@
 import { estimatedInputTokensOf } from "@octg/shared";
 import type { TokenizeRequest, TokenizeResult } from "@octg/tokenizer-controller/contracts";
-import { tokenizeWithDeno, type DenoTokenizationFailure } from "./deno-tokenizer-client";
+import {
+  tokenizeWithDeno,
+  type DenoNetworkErrorName,
+  type DenoTokenizationFailure,
+} from "./deno-tokenizer-client";
 import type { DenoTokenizerConfig } from "./deno-tokenizer-config";
 import { assertNever } from "./exhaustiveness";
 import { tokenizeInput, type TokenizerNamespace, type TokenizerOutcome } from "./tokenizer";
@@ -23,6 +27,7 @@ export type RoutedTokenizationOutcome =
       readonly kind: "unavailable";
       readonly provider: TokenizationProvider;
       readonly failureCategory?: "configuration" | "arithmetic" | DenoTokenizationFailure;
+      readonly networkErrorName?: DenoNetworkErrorName;
     };
 
 type RoutedTokenizeRequest = TokenizeRequest & {
@@ -66,6 +71,9 @@ export async function routeTokenization<Id>(args: {
             kind: "unavailable",
             provider: "deno",
             failureCategory: outcome.failureCategory,
+            ...(outcome.networkErrorName === undefined
+              ? {}
+              : { networkErrorName: outcome.networkErrorName }),
           };
         case "resolved":
           try {

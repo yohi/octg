@@ -147,6 +147,7 @@ type ResourceStageFields = {
   readonly upstreamReached?: boolean;
   readonly tokenizationProvider?: TokenizationProvider;
   readonly tokenizationFailureCategory?: TokenizationFailureCategory;
+  readonly tokenizationNetworkErrorName?: "TypeError" | "Error" | "unknown";
 };
 
 function revisionIdOf(env: Env): string {
@@ -189,6 +190,7 @@ function finishResourceStage(
     ...(fields.upstreamReached === undefined ? {} : { upstreamReached: fields.upstreamReached }),
     ...(fields.tokenizationProvider === undefined ? {} : { tokenizationProvider: fields.tokenizationProvider }),
     ...(fields.tokenizationFailureCategory === undefined ? {} : { tokenizationFailureCategory: fields.tokenizationFailureCategory }),
+    ...(fields.tokenizationNetworkErrorName === undefined ? {} : { tokenizationNetworkErrorName: fields.tokenizationNetworkErrorName }),
   };
   emitResourceStage({
     event: "octg.resource_stage",
@@ -428,6 +430,7 @@ export async function handleProxy(
           upstreamReached: false,
           tokenizationProvider: tokenizeOutcome.provider,
           tokenizationFailureCategory: tokenizeOutcome.failureCategory,
+          tokenizationNetworkErrorName: tokenizeOutcome.networkErrorName,
         });
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errInternal(requestId, { quota: snapshot, route: "error:internal_error" }));

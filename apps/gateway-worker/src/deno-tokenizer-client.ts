@@ -4,11 +4,14 @@ export type DenoTokenizationFailure =
   | "upstream_status"
   | "malformed_response";
 
+export type DenoNetworkErrorName = "TypeError" | "Error" | "unknown";
+
 export type DenoTokenizationOutcome =
   | { readonly kind: "resolved"; readonly baseTokenCount: number }
   | {
       readonly kind: "unavailable";
       readonly failureCategory: DenoTokenizationFailure;
+      readonly networkErrorName?: DenoNetworkErrorName;
     };
 
 const MAX_RESPONSE_BYTES = 1024;
@@ -60,7 +63,8 @@ export async function tokenizeWithDeno(args: {
           "content-type": "application/json",
         },
         body: JSON.stringify({ inputText: args.inputText }),
-        redirect: "error",
+        // Workers supports "manual" but rejects the Fetch-standard "error" mode.
+        redirect: "manual",
         signal: controller.signal,
       });
 
@@ -96,18 +100,28 @@ export async function tokenizeWithDeno(args: {
       }
 
       return { kind: "resolved", baseTokenCount };
-    } catch {
+    } catch (error) {
       if (timedOut || controller.signal.aborted) {
         await startCancel();
         return { kind: "unavailable", failureCategory: "timeout" };
       }
-      return { kind: "unavailable", failureCategory: "network" };
+      return {
+        kind: "unavailable",
+        failureCategory: "network",
+        networkErrorName: networkErrorNameOf(error),
+      };
     }
   })();
 
   const outcome = await Promise.race([runPromise, timeoutPromise]);
   if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   return outcome;
+}
+
+function networkErrorNameOf(error: unknown): DenoNetworkErrorName {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof Error) return "Error";
+  return "unknown";
 }
 
 function isJsonContentType(value: string | null): boolean {

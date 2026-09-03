@@ -17,6 +17,8 @@ export type TokenizationFailureCategory =
   | "malformed_response"
   | "arithmetic";
 
+export type TokenizationNetworkErrorName = "TypeError" | "Error" | "unknown";
+
 export type ResourceStageRoute =
   | "free_shared"
   | "reject:request_too_large"
@@ -50,6 +52,7 @@ type ResourceStageEventBase = {
   readonly upstreamReached?: boolean;
   readonly tokenizationProvider?: TokenizationProvider;
   readonly tokenizationFailureCategory?: TokenizationFailureCategory;
+  readonly tokenizationNetworkErrorName?: TokenizationNetworkErrorName;
 };
 
 export type ResourceStageEvent =
@@ -84,6 +87,7 @@ export function emitResourceStage(event: ResourceStageEvent): void {
     ...(event.upstreamReached === undefined ? {} : { upstreamReached: event.upstreamReached }),
     ...(event.tokenizationProvider === undefined ? {} : { tokenizationProvider: event.tokenizationProvider }),
     ...(event.tokenizationFailureCategory === undefined ? {} : { tokenizationFailureCategory: event.tokenizationFailureCategory }),
+    ...(event.tokenizationNetworkErrorName === undefined ? {} : { tokenizationNetworkErrorName: event.tokenizationNetworkErrorName }),
     ...(event.phase === "finish" ? { durationMs: event.durationMs, outcome: event.outcome } : {}),
   };
   console.info(runtimeEvent);
