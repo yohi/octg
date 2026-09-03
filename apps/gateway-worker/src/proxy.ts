@@ -53,6 +53,7 @@ import {
   type ResourceStageRoute,
   type TokenizationProvider,
   type TokenizationFailureCategory,
+  type TokenizationNetworkErrorName,
 } from "./resource-observation";
 import { proxyStream } from "./stream";
 import type { TokenizeResult } from "@octg/tokenizer-controller/contracts";
@@ -147,7 +148,7 @@ type ResourceStageFields = {
   readonly upstreamReached?: boolean;
   readonly tokenizationProvider?: TokenizationProvider;
   readonly tokenizationFailureCategory?: TokenizationFailureCategory;
-  readonly tokenizationNetworkErrorName?: "TypeError" | "Error" | "unknown";
+  readonly tokenizationNetworkErrorName?: TokenizationNetworkErrorName;
 };
 
 function revisionIdOf(env: Env): string {
