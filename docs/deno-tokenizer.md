@@ -133,15 +133,15 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
 
 ### 1.3 Environment Variables
 
-Configure these in the Deno Deploy dashboard or via CLI:
+The complete variable and Secret catalog, including where each value is obtained and
+which environment owns it, is maintained in
+[`docs/CONFIGURATION.md`](./CONFIGURATION.md). Use that catalog when provisioning a
+new Production or Preview deployment.
 
-| Variable | Required | Description |
-|---|---|---|
-| `OCTG_TOKENIZER_AUTH_TOKEN` | **Yes** | Deno secret shared with the Worker. |
-| `MAX_INPUT_BYTES` | No | Raw limit shared with the matching Worker. |
-
-`OCTG_TOKENIZER_AUTH_TOKEN` is a Deno Deploy runtime secret. Configure it in the
-Deno app and do not add it to the GitHub Environment or workflow.
+The Deno app requires `OCTG_TOKENIZER_AUTH_TOKEN` as a Deno Deploy runtime Secret.
+The matching Worker Secret is `DENO_TOKENIZER_AUTH_TOKEN`; both values must be the
+same, but the Deno runtime Secret must not be added to GitHub or the workflow.
+`MAX_INPUT_BYTES` is optional and must match the corresponding Worker limit.
 
 The shared resolver supplies the default and clamps the effective input limit.
 

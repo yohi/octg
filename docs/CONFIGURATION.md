@@ -52,6 +52,46 @@ Preview用の値は`.env`の`PREVIEW`セクションへ入力します。`--gith
 zsh scripts/setup-preview.zsh --github
 ```
 
+## Production初回デプロイの設定順
+
+既存リソースを使うProductionでは、次の順序で設定します。各値の取得場所と
+設定先は、後述のカタログを正とします。
+
+1. Cloudflare Account、D1、Gateway B、Access applicationを準備し、
+   `CLOUDFLARE_API_TOKEN`を対象Accountに限定して注入します。
+2. Worker runtime Secretを登録します。
+
+   ```bash
+   npx wrangler secret put OCTG_KEY_PEPPER \
+     --config apps/gateway-worker/wrangler.jsonc
+   npx wrangler secret put OCTG_UPSTREAM_API_TOKEN \
+     --config apps/gateway-worker/wrangler.jsonc
+   npx wrangler secret put OPENAI_USAGE_API_KEY \
+     --config apps/gateway-worker/wrangler.jsonc
+   ```
+
+3. Deno Deployを使う場合だけ、GitHub Environment `deno-production`へ
+   `DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、Secret `DENO_DEPLOY_TOKEN`を登録します。
+4. Deno Deploy runtime Secret `OCTG_TOKENIZER_AUTH_TOKEN`をDenoアプリへ登録します。
+   `DENO_DEPLOY_TOKEN`とは別のSecretです。
+5. 対象Workerへ`DENO_TOKENIZER_ENDPOINT`、
+   `DENO_TOKENIZER_THRESHOLD_BYTES`、`DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、
+   `DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして設定します。Denoを使わない場合は
+   4と5を省略し、4設定すべてを未設定のままにします。
+6. Workerをdeployして、active versionへVariablesとSecret bindingが揃ったことを確認します。
+
+   ```bash
+   npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
+   ```
+
+   `wrangler secret put`だけでは`wrangler.jsonc`のVariablesを含むactive versionに
+   ならないため、Secret変更後も必ずdeployします。
+7. Productionの既存`OCTG_KEY_PEPPER`を使って専用clientを一度だけseedし、raw keyを
+   Secret Managerへ保存します。raw keyをログ、shell history、repositoryへ残しません。
+8. `OCTG_CANARY_URL`と`OCTG_CANARY_CLIENT_KEY`をSecret Managerから注入して
+   `npm run canary:worker -- --env-file=.env`を実行します。Denoを有効化する場合は、
+   canary合格後にだけWorker varsを設定してください。
+
 ## 取得・確認用URLとコマンド
 
 ### Cloudflare accountとWrangler認証

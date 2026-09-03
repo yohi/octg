@@ -178,7 +178,8 @@ npm run setup:deploy -- --env-file=.env
 | `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | ✓ |
 
 `setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定が揃っている場合に実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順でAccessアプリを作成し、取得した値を`.env`へ入力してください。
-その後、`wrangler secret put` を使って **3 つの Secret を順番に入力**します。順序は以下の通りです。
+その後、`wrangler secret put` を使って3つのProduction Secretを順番に入力します。
+値の意味・取得場所・Production/Preview間の境界は[設定カタログ](./CONFIGURATION.md)を参照してください。
 
 | 順 | Secret | 入力する値 | 取得場所 |
 |---:|---|---|---|
@@ -239,13 +240,8 @@ TokenizerController を追加する migration `v2` が定義されています�
 - migration を追加・変更した場合は、D1 migration だけでなく Gateway Worker の deploy で
   Durable Object migration も適用されることを確認してください。
 
-| Secret | 用途 | 取得場所 |
-|---|---|---|
-| `OCTG_KEY_PEPPER` | クライアントキー `key_hash` の keyed hash 用 pepper | 任意の長いランダム文字列を生成して使用 |
-| `OCTG_UPSTREAM_API_TOKEN` | AI Gateway REST 呼び出し用 Cloudflare API token | 2.2 で作成 |
-| `OPENAI_USAGE_API_KEY` | OpenAI Organization Usage API 読み取り用 admin key | 2.6 で作成 |
-
-> Secrets の値をコード・ログ・コミットに含めないこと。[Secret ローテーション手順](../README.md#secret-ローテーション) も参照。
+> Secretsの値をコード・ログ・コミットに含めないこと。Secretの取得場所とローテーションは
+> [設定カタログ](./CONFIGURATION.md)を参照してください。
 
 ## 4.2 デプロイ前の検証
 
