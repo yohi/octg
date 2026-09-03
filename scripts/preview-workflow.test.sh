@@ -51,6 +51,20 @@ if (!upload.includes("OCTG_UPSTREAM_API_TOKEN: process.env.OCTG_UPSTREAM_API_TOK
   throw new Error("Preview Worker secrets file must include the upstream token");
 }
 
+const previewConfig = blockBetween(
+  "      - name: Prepare isolated preview config",
+  "      - name: Apply preview D1 migrations",
+);
+for (const name of [
+  "DENO_TOKENIZER_ENDPOINT",
+  "DENO_TOKENIZER_THRESHOLD_BYTES",
+  "DENO_TOKENIZER_TIMEOUT_MS",
+]) {
+  if (!previewConfig.includes(`delete config.vars.${name};`)) {
+    throw new Error(`Preview config must not inherit the Production ${name} variable`);
+  }
+}
+
 const restore = blockBetween(
   "      - name: Restore current version at 100% traffic",
   "      - name: Fail when smoke test failed",
