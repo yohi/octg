@@ -314,8 +314,10 @@ describe("Deno tokenizer routing", () => {
       const doCalls = installTokenizer();
       let denoCalls = 0;
       let upstreamCalls = 0;
+      const utcDay = new Date().toISOString().slice(0, 10);
+      const quotaId = `quota:STANDARD:${utcDay}`;
       const beforeQuota = await env.QUOTA_CONTROLLER.get(
-        env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${new Date().toISOString().slice(0, 10)}`),
+        env.QUOTA_CONTROLLER.idFromName(quotaId),
       ).getState();
       const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
@@ -348,7 +350,7 @@ describe("Deno tokenizer routing", () => {
       expect(upstreamCalls).toBe(0);
 
       const afterQuota = await env.QUOTA_CONTROLLER.get(
-        env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${new Date().toISOString().slice(0, 10)}`),
+        env.QUOTA_CONTROLLER.idFromName(quotaId),
       ).getState();
       expect(afterQuota.requestCount).toBe(beforeQuota.requestCount);
       expect(afterQuota.reservedTokens).toBe(beforeQuota.reservedTokens);
