@@ -7,6 +7,7 @@
 #   OCTG_SMOKE_API_KEY : クライアントキー (octg_sk_*)。必須。ログへ出力しないこと。
 #   OCTG_VERSION_OVERRIDE : Version Override 対象の Worker Version ID。指定時だけ header を付ける。
 #   OCTG_VERSION_OVERRIDE_WORKER_NAME : Version Override 対象の Worker 名。省略時は octg-gateway。
+#   OCTG_EXPECTED_HTTP_STATUS : 期待するHTTP status。省略時は200。500の場合はinternal_errorを検証する。
 # Exit codes: 0=成功 / 1=リトライ後失敗 / 2=使い方誤り
 set -euo pipefail
 
@@ -24,6 +25,11 @@ if [[ -z "${OCTG_SMOKE_API_KEY:-}" ]]; then
 fi
 
 version_override_worker_name="${OCTG_VERSION_OVERRIDE_WORKER_NAME:-octg-gateway}"
+expected_http_status="${OCTG_EXPECTED_HTTP_STATUS:-200}"
+if [[ "$expected_http_status" != "200" && "$expected_http_status" != "500" ]]; then
+  echo "error: OCTG_EXPECTED_HTTP_STATUS must be 200 or 500" >&2
+  exit 2
+fi
 
 payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with OK."}]}' "${model}")
 response_file=$(mktemp)
@@ -80,14 +86,25 @@ for attempt in 1 2 3; do
 
   passed=false
   failure_message=$(redacted_error_message)
-  if [[ "$status" == "200" ]] && jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
-    if [[ -z "${OCTG_VERSION_OVERRIDE:-}" ]]; then
-      passed=true
-    elif [[ "$(header_value "X-OCTG-Worker-Version" "$headers_file")" == "$OCTG_VERSION_OVERRIDE" ]]; then
+  if [[ "$status" == "$expected_http_status" ]]; then
+    if [[ "$expected_http_status" == "200" ]]; then
+      if jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
+        passed=true
+      else
+        failure_message="unexpected_response_body"
+      fi
+    elif jq -e '.error.code == "internal_error"' "$response_file" > /dev/null 2>&1; then
       passed=true
     else
+      failure_message="unexpected_response_body"
+    fi
+
+    if [[ "$passed" == true && -n "${OCTG_VERSION_OVERRIDE:-}" && "$(header_value "X-OCTG-Worker-Version" "$headers_file")" != "$OCTG_VERSION_OVERRIDE" ]]; then
+      passed=false
       failure_message="worker_version_mismatch"
     fi
+  elif [[ "$expected_http_status" == "500" && "$status" == "200" ]]; then
+    failure_message="unexpected_http_status"
   fi
 
   if [[ "$passed" == true ]]; then

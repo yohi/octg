@@ -148,6 +148,45 @@ jobs:
           deno check --config "$staging/deno.json" \
             "$staging/apps/deno-tokenizer/src/main.ts"
 
+      - name: Configure Deno tokenizer runtime Secret
+        working-directory: ${{ github.workspace }}
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          DENO_DEPLOY_ORG: ${{ vars.DENO_DEPLOY_ORG }}
+          DENO_DEPLOY_APP: ${{ vars.DENO_DEPLOY_APP }}
+          PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN" ]]; then
+            echo "::error::Deno Deploy identity and tokenizer authentication Secret must be configured"
+            exit 2
+          fi
+          env_file="$RUNNER_TEMP/deno-tokenizer-runtime.env"
+          trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$env_file"' EXIT
+          node - "$env_file" <<'NODE'
+          const fs = require("node:fs");
+          const token = process.env.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN;
+          if (!token) throw new Error("Production tokenizer authentication Secret is not configured");
+          fs.writeFileSync(
+            process.argv[2],
+            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            env load "$env_file" \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --replace \
+            --non-interactive >"$RUNNER_TEMP/deno-env-load.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Deno Deploy runtime Secret update failed; raw CLI output was suppressed"
+          fi
+          exit "$status"
+
       - name: Deploy
         id: deploy
         working-directory: ${{ github.workspace }}/.deno-deploy-source

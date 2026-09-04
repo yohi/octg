@@ -64,12 +64,13 @@ function hasWranglerDeployKeepVars(runCommand) {
 
   return commands.some((cmd) => {
     const tokens = cmd.split(/\s+/);
-    const isWranglerDeploy = tokens.some(
-      (token, index) =>
-        (token === "wrangler" || token.endsWith("/wrangler")) &&
-        tokens[index + 1] === "deploy",
+    const wranglerIndex = tokens.findIndex(
+      (token) => token === "wrangler" || token.endsWith("/wrangler"),
     );
-    return isWranglerDeploy && tokens.includes("--keep-vars");
+    if (wranglerIndex < 0) return false;
+    const isWorkerDeployment = tokens[wranglerIndex + 1] === "deploy" ||
+      (tokens[wranglerIndex + 1] === "versions" && tokens[wranglerIndex + 2] === "upload");
+    return isWorkerDeployment && tokens.includes("--keep-vars");
   });
 }
 
@@ -84,4 +85,79 @@ test("deploy-production workflow preserves remote environment variables using --
     hasWranglerDeployKeepVars(runCommand),
     "'Deploy Worker' step must invoke 'wrangler deploy' with '--keep-vars' to prevent erasing remote variables like Deno settings",
   );
+});
+
+test("deploy-production workflow validates and injects non-secret Deno settings", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+
+  for (const variableName of [
+    "DENO_TOKENIZER_ENDPOINT",
+    "DENO_TOKENIZER_THRESHOLD_BYTES",
+    "DENO_TOKENIZER_TIMEOUT_MS",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`\\$\\{\\{ vars\\.${variableName} \\}\\}`),
+      `Production workflow must source ${variableName} from GitHub Variables`,
+    );
+  }
+
+  const validationStep = extractStepRun(
+    workflow,
+    "Validate Production Deno tokenizer configuration",
+  );
+  assert.equal(validationStep, "node scripts/production-deno-config.mjs");
+
+  const validationIndex = workflow.indexOf(
+    "- name: Validate Production Deno tokenizer configuration",
+  );
+  const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
+  assert.ok(validationIndex >= 0, "Production Deno validation step must exist");
+  assert.ok(
+    migrationIndex > validationIndex,
+    "Production Deno validation must run before D1 migrations",
+  );
+
+  const deployCommand = extractStepRun(workflow, "Deploy Worker");
+  assert.ok(deployCommand, "Deploy Worker step must contain a run command");
+  assert.match(deployCommand, /--keep-vars/);
+  for (const variableName of [
+    "DENO_TOKENIZER_ENDPOINT",
+    "DENO_TOKENIZER_THRESHOLD_BYTES",
+    "DENO_TOKENIZER_TIMEOUT_MS",
+  ]) {
+    assert.match(
+      deployCommand,
+      new RegExp(`--var "${variableName}:\\$\\{${variableName}\\}"`),
+      `Deploy Worker must pass ${variableName} explicitly to Wrangler`,
+    );
+  }
+
+});
+
+test("deploy-production workflow synchronizes the Worker auth Secret safely", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const deployCommand = extractStepRun(workflow, "Deploy Worker");
+
+  assert.match(workflow, /environment: deno-production/);
+  assert.match(
+    workflow,
+    /PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: \$\{\{ secrets\.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN \}\}/,
+  );
+  assert.ok(deployCommand, "Deploy Worker step must contain a run command");
+  assert.match(deployCommand, /wrangler versions upload/);
+  assert.match(deployCommand, /--secrets-file "\$secrets_file"/);
+  assert.match(deployCommand, /wrangler versions deploy/);
+  assert.match(deployCommand, /WRANGLER_OUTPUT_FILE_PATH/);
+  assert.match(deployCommand, /version_id=\$\(jq/);
+  assert.match(deployCommand, /"\$\{version_id\}@100%"/);
+  assert.match(deployCommand, /DENO_TOKENIZER_AUTH_TOKEN/);
+  assert.match(deployCommand, /mode: 0o600/);
+  assert.doesNotMatch(deployCommand, /\$\{\{\s*secrets\./);
+
+  const secretIndex = workflow.indexOf("PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN");
+  const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
+  assert.ok(secretIndex >= 0 && secretIndex < migrationIndex);
 });

@@ -25,6 +25,13 @@ OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME="CI Smoke"
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_test
 OCTG_PREVIEW_KEY_PEPPER=test-pepper
+DENO_PREVIEW_DEPLOY_ORG=preview-org
+DENO_PREVIEW_DEPLOY_APP=octg-tokenizer-preview
+DENO_PREVIEW_DEPLOY_TOKEN=preview-deno-deploy-token
+DENO_PREVIEW_TOKENIZER_ENDPOINT=https://octg-tokenizer-preview.deno.dev/tokenize
+DENO_PREVIEW_TOKENIZER_AUTH_TOKEN=preview-deno-auth-token
+DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES=1
+DENO_PREVIEW_TOKENIZER_TIMEOUT_MS=5000
 GITHUB_REPOSITORY=yohi/octg
 EOF
 
@@ -208,9 +215,37 @@ gh_log="$(< "$TEMP_DIR/gh.log")"
   print -u2 "GitHub setup did not synchronize the Preview upstream token secret"
   exit 1
 }
+[[ "$gh_log" == *"variable set DENO_PREVIEW_DEPLOY_ORG --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview Deno organization variable"
+  exit 1
+}
+[[ "$gh_log" == *"variable set DENO_PREVIEW_TOKENIZER_ENDPOINT --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview Deno endpoint variable"
+  exit 1
+}
+[[ "$gh_log" == *"secret set DENO_PREVIEW_DEPLOY_TOKEN --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview Deno deploy token"
+  exit 1
+}
+[[ "$gh_log" == *"secret set DENO_PREVIEW_TOKENIZER_AUTH_TOKEN --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview Deno auth secret"
+  exit 1
+}
+[[ "$gh_log" != *"DENO_TOKENIZER_ENDPOINT"* && "$gh_log" != *"PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"* ]] || {
+  print -u2 "GitHub setup referenced Production Deno settings"
+  exit 1
+}
 [[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"preview-upstream-token"* && "$gh_log" != *"octg_sk_test"* ]] || {
   print -u2 "GitHub setup leaked a secret value"
   exit 1
 }
+
+sed '/^DENO_PREVIEW_DEPLOY_ORG=/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/missing-preview-deno.env"
+if PATH="$TEMP_DIR:$PATH" \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/missing-preview-deno.env" \
+  zsh "$SCRIPT_PATH" --github > /dev/null 2>&1; then
+  print -u2 "Preview GitHub setup accepted missing Deno deployment configuration"
+  exit 1
+fi
 
 print "setup-preview dry-run contract: ok"

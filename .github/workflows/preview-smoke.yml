@@ -271,6 +271,414 @@ jobs:
         if: steps.smoke.outcome != 'success'
         run: exit 1
 
+  deno-version-smoke:
+    needs: version-smoke
+    if: ${{ github.event.pull_request.head.repo.fork != true && needs.version-smoke.result == 'success' }}
+    permissions:
+      contents: read
+    environment: preview
+    concurrency:
+      group: octg-preview-deno
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.6
+          cache: true
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate Preview Deno configuration
+        env:
+          PREVIEW_DATABASE_ID: ${{ vars.OCTG_PREVIEW_DATABASE_ID }}
+          PREVIEW_DATABASE_NAME: ${{ vars.OCTG_PREVIEW_DATABASE_NAME || 'octg-gateway-preview-db' }}
+          PREVIEW_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
+          PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
+          PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
+          PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
+          PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          PREVIEW_DENO_DEPLOY_ORG: ${{ vars.DENO_PREVIEW_DEPLOY_ORG }}
+          PREVIEW_DENO_DEPLOY_APP: ${{ vars.DENO_PREVIEW_DEPLOY_APP }}
+          PREVIEW_DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_PREVIEW_TOKENIZER_ENDPOINT }}
+          PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES }}
+          PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
+          DENO_PREVIEW_DEPLOY_TOKEN: ${{ secrets.DENO_PREVIEW_DEPLOY_TOKEN }}
+          DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PREVIEW_DATABASE_ID" || -z "$PREVIEW_BASE_URL" || -z "$PREVIEW_UPSTREAM_BASE_URL" || -z "$PREVIEW_QUOTA_LIMIT_STANDARD" || -z "$PREVIEW_QUOTA_LIMIT_MINI" ]]; then
+            echo "::error::Preview Worker variables are not configured"
+            exit 2
+          fi
+          if [[ -z "$PREVIEW_DENO_DEPLOY_ORG" || -z "$PREVIEW_DENO_DEPLOY_APP" || -z "$PREVIEW_DENO_TOKENIZER_ENDPOINT" || -z "$PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES" || -z "$PREVIEW_DENO_TOKENIZER_TIMEOUT_MS" ]]; then
+            echo "::error::Preview Deno Variables are not configured"
+            exit 2
+          fi
+          if [[ -z "$DENO_PREVIEW_DEPLOY_TOKEN" || -z "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN" ]]; then
+            echo "::error::Preview Deno Secrets are not configured"
+            exit 2
+          fi
+          if [[ ! "$PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES" =~ ^[1-9][0-9]*$ ]] || [[ ! "$PREVIEW_DENO_TOKENIZER_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Preview Deno threshold and timeout must be positive decimal integers"
+            exit 2
+          fi
+
+      - name: Prepare isolated Deno preview config
+        id: preview-config
+        env:
+          PREVIEW_CONFIG_PATH: ${{ runner.temp }}/wrangler-preview-deno.jsonc
+          PREVIEW_DATABASE_ID: ${{ vars.OCTG_PREVIEW_DATABASE_ID }}
+          PREVIEW_DATABASE_NAME: ${{ vars.OCTG_PREVIEW_DATABASE_NAME || 'octg-gateway-preview-db' }}
+          PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
+          PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
+          PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
+          PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          PREVIEW_DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_PREVIEW_TOKENIZER_ENDPOINT }}
+          PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES }}
+          PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
+        run: |
+          set -euo pipefail
+          node scripts/preview-worker-config.mjs \
+            apps/gateway-worker/wrangler.jsonc \
+            "$PREVIEW_CONFIG_PATH" \
+            deno
+          echo "config=$PREVIEW_CONFIG_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Capture current Preview 100% deployment
+        id: current
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+        run: |
+          set -euo pipefail
+          current_file="$RUNNER_TEMP/current-deno-preview-deployment.json"
+          ./node_modules/.bin/wrangler deployments status \
+            --config "$PREVIEW_CONFIG" \
+            --json > "$current_file"
+          current_version_id=$(jq -r '
+            [.versions[] | select(.percentage == 100) | .version_id]
+            | if length == 1 then .[0] else empty end
+          ' "$current_file")
+          if [ -z "$current_version_id" ]; then
+            echo "::error::Current Preview deployment is not a single 100% version; refusing to change traffic"
+            exit 1
+          fi
+          echo "version_id=$current_version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Stage Preview Deno application
+        env:
+          PREVIEW_DENO_DEPLOY_ORG: ${{ vars.DENO_PREVIEW_DEPLOY_ORG }}
+          PREVIEW_DENO_DEPLOY_APP: ${{ vars.DENO_PREVIEW_DEPLOY_APP }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PREVIEW_DENO_DEPLOY_ORG" || -z "$PREVIEW_DENO_DEPLOY_APP" ]]; then
+            echo "::error::Preview Deno Deploy identity is not configured"
+            exit 2
+          fi
+          staging="$GITHUB_WORKSPACE/.deno-preview-source"
+          mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+          cp deno.json "$staging/deno.json"
+          deno cache --config apps/deno-tokenizer/deno.json \
+            npm:tiktoken@1.0.22/lite/tiktoken_bg.wasm
+          wasm_source="$(
+            deno eval \
+              --config apps/deno-tokenizer/deno.json \
+              'console.log(import.meta.resolve("tiktoken/lite/tiktoken_bg.wasm"));'
+          )"
+          if [[ "$wasm_source" != file://* ]]; then
+            echo "::error::tiktoken WASM did not resolve to a local file URL"
+            exit 2
+          fi
+          cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"
+          cp -R packages/shared/src/. "$staging/packages/shared/src"
+          node - "$wasm_source" "$staging/apps/deno-tokenizer/src/tiktoken_bg.wasm" <<'NODE'
+          const fs = require("node:fs");
+          const { fileURLToPath } = require("node:url");
+          const [source, destination] = process.argv.slice(2);
+          fs.copyFileSync(fileURLToPath(source), destination);
+          NODE
+          node - "$staging/deno.json" <<'NODE'
+          const fs = require("node:fs");
+          const path = process.argv[2];
+          const config = JSON.parse(fs.readFileSync(path, "utf8"));
+          if (!config.deploy || typeof config.deploy !== "object") {
+            throw new Error("deno.json must contain a deploy configuration");
+          }
+          if (!config.imports || typeof config.imports !== "object") {
+            throw new Error("deno.json must contain an imports mapping");
+          }
+          config.deploy.org = process.env.PREVIEW_DENO_DEPLOY_ORG;
+          config.deploy.app = process.env.PREVIEW_DENO_DEPLOY_APP;
+          config.imports["tiktoken/lite/tiktoken_bg.wasm"] =
+            "./apps/deno-tokenizer/src/tiktoken_bg.wasm";
+          fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+          deno check --config "$staging/deno.json" \
+            "$staging/apps/deno-tokenizer/src/main.ts"
+
+      - name: Configure Preview Deno runtime Secret
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_PREVIEW_DEPLOY_TOKEN }}
+          DENO_DEPLOY_ORG: ${{ vars.DENO_PREVIEW_DEPLOY_ORG }}
+          DENO_DEPLOY_APP: ${{ vars.DENO_PREVIEW_DEPLOY_APP }}
+          DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN" ]]; then
+            echo "::error::Preview Deno Deploy identity and tokenizer Secret must be configured"
+            exit 2
+          fi
+          env_file="$RUNNER_TEMP/preview-deno-runtime.env"
+          trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$env_file"' EXIT
+          node - "$env_file" <<'NODE'
+          const fs = require("node:fs");
+          const token = process.env.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN;
+          if (!token) throw new Error("Preview Deno tokenizer Secret is not configured");
+          fs.writeFileSync(
+            process.argv[2],
+            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            env load "$env_file" \
+            --org "$DENO_DEPLOY_ORG" \
+            --app "$DENO_DEPLOY_APP" \
+            --replace \
+            --non-interactive >"$RUNNER_TEMP/preview-deno-env-load.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Preview Deno runtime Secret update failed; raw CLI output was suppressed"
+          fi
+          exit "$status"
+
+      - name: Deploy Preview Deno application
+        working-directory: ${{ github.workspace }}/.deno-preview-source
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_PREVIEW_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          set +e
+          deno run -A jsr:@deno/deploy@0.0.9904 \
+            --prod \
+            --json \
+            --non-interactive >"$RUNNER_TEMP/preview-deno-deploy.log" 2>&1
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            echo "::error::Preview Deno Deploy failed; raw CLI output was suppressed"
+          fi
+          exit "$status"
+
+      - name: Check Preview Deno health
+        env:
+          PREVIEW_DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_PREVIEW_TOKENIZER_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          health_url="${PREVIEW_DENO_TOKENIZER_ENDPOINT%/tokenize}/health"
+          curl --fail --silent --show-error --retry 3 --retry-delay 2 --max-time 60 \
+            "$health_url" -o /dev/null
+
+      - name: Upload invalid-auth Worker version
+        id: invalid-upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          OCTG_KEY_PEPPER: ${{ secrets.OCTG_KEY_PEPPER }}
+          OCTG_UPSTREAM_API_TOKEN: ${{ secrets.OCTG_UPSTREAM_API_TOKEN }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/preview-deno-invalid-wrangler-output.ndjson
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$OCTG_KEY_PEPPER" || -z "$OCTG_UPSTREAM_API_TOKEN" ]]; then
+            echo "::error::Preview Worker secrets are not configured"
+            exit 2
+          fi
+          secrets_file="$RUNNER_TEMP/preview-deno-invalid-secrets.json"
+          trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$secrets_file"' EXIT
+          node - "$secrets_file" <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(
+            process.argv[2],
+            `${JSON.stringify({
+              OCTG_KEY_PEPPER: process.env.OCTG_KEY_PEPPER,
+              OCTG_UPSTREAM_API_TOKEN: process.env.OCTG_UPSTREAM_API_TOKEN,
+              DENO_TOKENIZER_AUTH_TOKEN: "preview-invalid-token-sentinel",
+            })}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+          node -e 'require("node:fs").rmSync(process.argv[1], { force: true })' "$WRANGLER_OUTPUT_FILE_PATH"
+          ./node_modules/.bin/wrangler versions upload \
+            --config "$PREVIEW_CONFIG" \
+            --keep-vars \
+            --secrets-file "$secrets_file" \
+            --tag "pr-${PULL_REQUEST_NUMBER}-deno-invalid" \
+            --message "pr-${PULL_REQUEST_NUMBER} ${PULL_REQUEST_HEAD_SHA} Deno invalid auth"
+          version_id=$(jq -s -r '
+            [.[] | select(.type == "version-upload") | .version_id // empty]
+            | last // empty
+          ' "$WRANGLER_OUTPUT_FILE_PATH")
+          if [ -z "$version_id" ]; then
+            echo "::error::Invalid-auth Worker Version ID not found in Wrangler output"
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Route invalid-auth version at 0% traffic
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+          NEW_VERSION_ID: ${{ steps.invalid-upload.outputs.version_id }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ./node_modules/.bin/wrangler versions deploy \
+            "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
+            --config "$PREVIEW_CONFIG" \
+            --message "PR ${PULL_REQUEST_NUMBER} Deno invalid auth smoke" \
+            --yes
+
+      - name: Run Deno smoke with invalid auth
+        id: invalid-smoke
+        continue-on-error: true
+        env:
+          OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_PREVIEW_SMOKE_API_KEY }}
+          OCTG_EXPECTED_HTTP_STATUS: 500
+          OCTG_VERSION_OVERRIDE: ${{ steps.invalid-upload.outputs.version_id }}
+          OCTG_VERSION_OVERRIDE_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          SMOKE_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
+          SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::Repository variable OCTG_PREVIEW_BASE_URL is not set"
+            exit 2
+          fi
+          bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
+
+      - name: Upload valid-auth Worker version
+        id: valid-upload
+        if: steps.invalid-smoke.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
+          OCTG_KEY_PEPPER: ${{ secrets.OCTG_KEY_PEPPER }}
+          OCTG_UPSTREAM_API_TOKEN: ${{ secrets.OCTG_UPSTREAM_API_TOKEN }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/preview-deno-valid-wrangler-output.ndjson
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN" || -z "$OCTG_KEY_PEPPER" || -z "$OCTG_UPSTREAM_API_TOKEN" ]]; then
+            echo "::error::Preview Worker or Deno tokenizer Secrets are not configured"
+            exit 2
+          fi
+          secrets_file="$RUNNER_TEMP/preview-deno-valid-secrets.json"
+          trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$secrets_file"' EXIT
+          node - "$secrets_file" <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(
+            process.argv[2],
+            `${JSON.stringify({
+              OCTG_KEY_PEPPER: process.env.OCTG_KEY_PEPPER,
+              OCTG_UPSTREAM_API_TOKEN: process.env.OCTG_UPSTREAM_API_TOKEN,
+              DENO_TOKENIZER_AUTH_TOKEN: process.env.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN,
+            })}\n`,
+            { mode: 0o600 },
+          );
+          NODE
+          node -e 'require("node:fs").rmSync(process.argv[1], { force: true })' "$WRANGLER_OUTPUT_FILE_PATH"
+          ./node_modules/.bin/wrangler versions upload \
+            --config "$PREVIEW_CONFIG" \
+            --keep-vars \
+            --secrets-file "$secrets_file" \
+            --tag "pr-${PULL_REQUEST_NUMBER}-deno-valid" \
+            --message "pr-${PULL_REQUEST_NUMBER} ${PULL_REQUEST_HEAD_SHA} Deno valid auth"
+          version_id=$(jq -s -r '
+            [.[] | select(.type == "version-upload") | .version_id // empty]
+            | last // empty
+          ' "$WRANGLER_OUTPUT_FILE_PATH")
+          if [ -z "$version_id" ]; then
+            echo "::error::Valid-auth Worker Version ID not found in Wrangler output"
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Route valid-auth version at 0% traffic
+        if: steps.valid-upload.outcome == 'success'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+          NEW_VERSION_ID: ${{ steps.valid-upload.outputs.version_id }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ./node_modules/.bin/wrangler versions deploy \
+            "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
+            --config "$PREVIEW_CONFIG" \
+            --message "PR ${PULL_REQUEST_NUMBER} Deno valid auth smoke" \
+            --yes
+
+      - name: Run Deno smoke with valid auth
+        id: valid-smoke
+        if: steps.valid-upload.outcome == 'success'
+        continue-on-error: true
+        env:
+          OCTG_SMOKE_API_KEY: ${{ secrets.OCTG_PREVIEW_SMOKE_API_KEY }}
+          OCTG_EXPECTED_HTTP_STATUS: 200
+          OCTG_VERSION_OVERRIDE: ${{ steps.valid-upload.outputs.version_id }}
+          OCTG_VERSION_OVERRIDE_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
+          SMOKE_BASE_URL: ${{ vars.OCTG_PREVIEW_BASE_URL }}
+          SMOKE_MODEL: ${{ vars.SMOKE_MODEL || 'gpt-5-mini' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::Repository variable OCTG_PREVIEW_BASE_URL is not set"
+            exit 2
+          fi
+          bash scripts/ci-smoke-test.sh "$SMOKE_BASE_URL" "$SMOKE_MODEL"
+
+      - name: Restore current Preview version at 100% traffic
+        if: always() && steps.current.outputs.version_id != '' && (steps.invalid-upload.outputs.version_id != '' || steps.valid-upload.outputs.version_id != '')
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+          CURRENT_VERSION_ID: ${{ steps.current.outputs.version_id }}
+        run: |
+          ./node_modules/.bin/wrangler rollback \
+            "$CURRENT_VERSION_ID" \
+            --config "$PREVIEW_CONFIG" \
+            --message "Restore current Preview version after Deno smoke" \
+            --yes
+
+      - name: Fail when Deno smoke failed
+        if: always() && (steps.invalid-smoke.outcome != 'success' || steps.valid-smoke.outcome != 'success')
+        run: exit 1
+
   version-smoke-fork:
     needs: test
     if: ${{ github.event.pull_request.head.repo.fork == true }}
