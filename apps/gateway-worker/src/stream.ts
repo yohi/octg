@@ -105,6 +105,7 @@ export function proxyStream(
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
         if (!payload || payload === "[DONE]") continue;
+        if (!payload.includes('"usage"') && !payload.includes("response.completed")) continue;
         try {
           const parsed = JSON.parse(payload) as Record<string, unknown>;
           if (parsed.usage) usage = parsed.usage as Usage;

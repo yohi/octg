@@ -96,20 +96,51 @@ export function normalizeChatCompletions(
   }
 
   const texts: string[] = [];
+  let isToolUse = "tools" in value || "tool_choice" in value || "functions" in value || "function_call" in value;
+
   for (const message of value.messages) {
     if (typeof message !== "object" || message === null) return { ok: false, error: "invalid_body" };
     const messageValue = message as Record<string, unknown>;
     const content = walkContent(messageValue.content, CHAT_CONTENT_TYPES, "non_text");
     if (!content.ok) return content;
     texts.push(content.text);
-    for (const field of [messageValue.name, messageValue.tool_calls, messageValue.tool_call_id, messageValue.function_call]) {
-      const result = appendSerializedField(texts, field);
+
+    if (!isToolUse && ("tool_calls" in messageValue || "tool_call_id" in messageValue || "function_call" in messageValue)) {
+      isToolUse = true;
+    }
+
+    if (messageValue.name !== undefined && messageValue.name !== null) {
+      const result = appendSerializedField(texts, messageValue.name);
+      if (result) return result;
+    }
+    if (messageValue.tool_calls !== undefined && messageValue.tool_calls !== null) {
+      const result = appendSerializedField(texts, messageValue.tool_calls);
+      if (result) return result;
+    }
+    if (messageValue.tool_call_id !== undefined && messageValue.tool_call_id !== null) {
+      const result = appendSerializedField(texts, messageValue.tool_call_id);
+      if (result) return result;
+    }
+    if (messageValue.function_call !== undefined && messageValue.function_call !== null) {
+      const result = appendSerializedField(texts, messageValue.function_call);
       if (result) return result;
     }
   }
 
-  for (const field of [value.tools, value.tool_choice, value.functions, value.function_call]) {
-    const result = appendSerializedField(texts, field);
+  if (value.tools !== undefined && value.tools !== null) {
+    const result = appendSerializedField(texts, value.tools);
+    if (result) return result;
+  }
+  if (value.tool_choice !== undefined && value.tool_choice !== null) {
+    const result = appendSerializedField(texts, value.tool_choice);
+    if (result) return result;
+  }
+  if (value.functions !== undefined && value.functions !== null) {
+    const result = appendSerializedField(texts, value.functions);
+    if (result) return result;
+  }
+  if (value.function_call !== undefined && value.function_call !== null) {
+    const result = appendSerializedField(texts, value.function_call);
     if (result) return result;
   }
 
@@ -129,7 +160,7 @@ export function normalizeChatCompletions(
       messageCount: value.messages.length,
       maxOutputTokens: maxCompletion ?? maxLegacy ?? DEFAULT_MAX_OUTPUT_TOKENS,
       stream: value.stream === true,
-      isToolUse: hasToolUse(value),
+      isToolUse,
       opaqueInputBytes: 0,
     },
   };
@@ -240,8 +271,16 @@ export function normalizeResponses(
     return { ok: false, error: "invalid_body" };
   }
 
-  for (const field of [value.instructions, value.tools, value.tool_choice]) {
-    const result = appendSerializedField(texts, field);
+  if (value.instructions !== undefined && value.instructions !== null) {
+    const result = appendSerializedField(texts, value.instructions);
+    if (result) return result;
+  }
+  if (value.tools !== undefined && value.tools !== null) {
+    const result = appendSerializedField(texts, value.tools);
+    if (result) return result;
+  }
+  if (value.tool_choice !== undefined && value.tool_choice !== null) {
+    const result = appendSerializedField(texts, value.tool_choice);
     if (result) return result;
   }
   inputText = texts.join("\n");
@@ -265,7 +304,7 @@ export function normalizeResponses(
       maxOutputTokens:
         value.max_output_tokens === undefined ? DEFAULT_MAX_OUTPUT_TOKENS : positiveInteger(value.max_output_tokens) ?? 0,
       stream: value.stream === true,
-      isToolUse: hasToolUse(value) || isToolUse,
+      isToolUse: isToolUse || hasToolUse(value),
       opaqueInputBytes,
     },
   };
