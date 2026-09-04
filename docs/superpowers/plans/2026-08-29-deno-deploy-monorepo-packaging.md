@@ -139,7 +139,7 @@ Create `deno.json` with exactly this deployment configuration:
   "deploy": {
     "include": [
       "./deno.json",
-      "./apps/deno-tokenizer/**",
+      "./apps/deno-tokenizer/src/**",
       "./packages/shared/src/**"
     ],
     "runtime": {
@@ -224,11 +224,20 @@ Expected: PASS with `Deno Deploy workflow contract: ok`.
 
 - [x] **Step 1: Update the deployment instructions**
 
-Change the GitHub Actions and manual deployment instructions to state that the repository root is the local deploy root, that root `deno.json` includes `apps/deno-tokenizer/src/**` and `packages/shared/src/**`, and that the runtime entrypoint is `apps/deno-tokenizer/src/main.ts`. The manual command must prepare a staging source from the repository root and inject the non-secret deployment identity into the staging copy:
+Change the GitHub Actions and manual deployment instructions to state that the
+repository root is the local deploy root, that root `deno.json` includes
+`apps/deno-tokenizer/src/**` and `packages/shared/src/**`, and that the runtime
+entrypoint is `apps/deno-tokenizer/src/main.ts`. The manual command must create
+a staging source from the repository root, copy both included source trees into
+their repository-relative paths, and inject the non-secret deployment identity
+into the staging copy:
 
 ```bash
-# Run these commands from the repository root after preparing the included source paths in staging.
+# Run these commands from the repository root.
 staging="${PWD}/.deno-deploy-source"
+mkdir -p "$staging/apps/deno-tokenizer/src" "$staging/packages/shared/src"
+cp -R apps/deno-tokenizer/src/. "$staging/apps/deno-tokenizer/src"
+cp -R packages/shared/src/. "$staging/packages/shared/src"
 export DENO_DEPLOY_TOKEN
 export DENO_DEPLOY_ORG="your-org"
 export DENO_DEPLOY_APP="your-app"
@@ -249,8 +258,10 @@ unset DENO_DEPLOY_TOKEN
 unset DENO_DEPLOY_ORG DENO_DEPLOY_APP
 ```
 
-The local preparation adds only non-secret identity fields to the staging copy.
-The checked-out root remains unmodified.
+The staging copy contains the root `deno.json`, `apps/deno-tokenizer/src/**`, and
+`packages/shared/src/**`, so its runtime entrypoint remains
+`apps/deno-tokenizer/src/main.ts`. The local preparation adds only non-secret
+identity fields to the staging copy. The checked-out root remains unmodified.
 
 Keep `OCTG_TOKENIZER_AUTH_TOKEN` documented as a Deno Deploy runtime Secret, not a GitHub Environment Secret.
 

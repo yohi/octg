@@ -71,17 +71,28 @@ OCTG_TOKENIZER_AUTH_TOKEN               Deno Deploy runtime Secret
 Explain immediately below the group that the two auth names contain the same
 value, while `DENO_DEPLOY_TOKEN` is a separate CI management Secret.
 
-- [ ] **Step 2: Add the linear first-deploy procedure**
+- [ ] **Step 2: Add the staged first-deploy procedure**
 
-Place a Quick start before the detailed catalog. Use this exact operational
-order: prepare Cloudflare credentials, register Worker runtime Secrets,
-configure Deno Deploy CI values, configure the Deno runtime Secret, configure
-Worker Deno vars and matching Secret, deploy the Worker, seed a client with
-the existing Production pepper, then run the canary.
+Place a Quick start before the detailed catalog and split it into two stages.
+Use this exact operational order:
 
-State that a `wrangler secret put` operation alone can create a version without
-the vars from `wrangler.jsonc`; after changing runtime Secrets, run
-`wrangler deploy --config apps/gateway-worker/wrangler.jsonc` so the active
+1. **Stage 1: Deno-disabled baseline:** Prepare Cloudflare credentials,
+   register the baseline Worker runtime Secrets and Variables, leave all four
+   Deno integration settings unset, deploy the baseline Worker, seed a client
+   with the existing Production pepper, and run the initial canary. Confirm
+   that the `cloudflare_do` tokenizer, Worker resource limits, quota
+   reserve/settle, and upstream reachability succeed. Do not enable the Deno
+   route for this canary.
+2. **Stage 2: Deno route:** Only after the initial canary passes, configure the
+   Deno Deploy CI values, deploy the Deno application with its runtime Secret,
+   configure the Worker Deno Variables and matching Worker Secret, redeploy the
+   Worker, verify the shared `MAX_INPUT_BYTES` value, and run the Deno-route
+   canary. Confirm the `deno` provider, exact token count, quota lifecycle, and
+   upstream reachability.
+
+State in Stage 2 that a `wrangler secret put` operation alone can create a
+version without the vars from `wrangler.jsonc`; after changing runtime Secrets,
+run `wrangler deploy --config apps/gateway-worker/wrangler.jsonc` so the active
 version contains both vars and Secret bindings.
 
 - [ ] **Step 3: Consolidate rotation and troubleshooting links**
@@ -209,7 +220,7 @@ and confirm no real Secret, raw client key, personal account identifier, or
 **Interfaces:**
 
 - Consumes: Validated documentation changes from Tasks 1-4.
-- Produces: A commit pushed to `feature/deno-tokenizer-canary`.
+- Produces: A commit pushed to `fix/audit-deno-config-and-docs`.
 
 - [ ] **Step 1: Inspect the final diff**
 
@@ -230,9 +241,9 @@ GIT_MASTER=1 git commit -m "docs: SecretsとVariablesの設定手順を整理"
 Use:
 
 ```bash
-GIT_MASTER=1 git push
+GIT_MASTER=1 git push origin fix/audit-deno-config-and-docs
 GIT_MASTER=1 git status --short --branch
 ```
 
-Expected: the feature branch tracks its origin branch and no intended
+Expected: `fix/audit-deno-config-and-docs` tracks its origin branch and no intended
 documentation changes remain unstaged.

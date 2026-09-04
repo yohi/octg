@@ -447,7 +447,7 @@ admission、upstream callが発生していないことを確認します。
 
 ### Preview
 
-Previewの変数は全て`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`です。Productionの同名リソースを指定しないでください。`.env`からPreview setupへ渡すpepperは`OCTG_PREVIEW_KEY_PEPPER`です。GitHub Environmentへ同期する際だけSecret名`OCTG_KEY_PEPPER`へ変換されます。
+Previewのリソース変数は`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`に限定します。補助変数として`GITHUB_REPOSITORY`は`--github`実行時のみ必須で、`SMOKE_MODEL`はPreview smokeで未指定時に`gpt-5-mini`を使用します。Productionの同名リソースを指定しないでください。`.env`からPreview setupへ渡すpepperは`OCTG_PREVIEW_KEY_PEPPER`です。GitHub Environmentへ同期する際だけSecret名`OCTG_KEY_PEPPER`へ変換されます。
 
 GitHub Actionsのworkflowが参照するSecret名は、ローカル`.env`のPreview名と一部異なります。次の表の`Set in`と`Apply`に、ローカル入力名からGitHub側の名前への対応を記載しています。`zsh scripts/setup-preview.zsh --github`を使う場合も、入力元は`.env`のPreview値です。
 
