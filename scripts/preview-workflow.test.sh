@@ -83,8 +83,8 @@ const previewSecretCleanup = blockBetween(
 if (!previewSecretCleanup.includes("wrangler versions secret list")) {
   throw new Error("Preview smoke must inspect the latest version secrets before upload");
 }
-if (!previewSecretCleanup.includes("--latest-version")) {
-  throw new Error("Preview smoke must inspect secrets on the latest Worker version");
+if (previewSecretCleanup.includes("--latest-version")) {
+  throw new Error("Preview smoke must not use Wrangler latest-version secret listing");
 }
 if (!previewSecretCleanup.includes("DENO_TOKENIZER_AUTH_TOKEN")) {
   throw new Error("Preview smoke must remove a stale Deno Worker Secret before upload");

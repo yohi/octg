@@ -183,7 +183,6 @@ jobs:
           set -euo pipefail
           secrets="$(
             ./node_modules/.bin/wrangler versions secret list \
-              --latest-version \
               --config "$PREVIEW_CONFIG"
           )"
           if [[ "$secrets" == *DENO_TOKENIZER_AUTH_TOKEN* ]]; then
