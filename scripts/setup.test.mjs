@@ -40,6 +40,19 @@ function localEnvironment(logPath) {
   return { OCTG_WRANGLER_LOG: logPath, OCTG_LOCAL_CLIENT_KEY: "" };
 }
 
+test("checked-in Wrangler config leaves Deno tokenizer disabled", () => {
+  const source = readFileSync(join(sourceRoot, "apps/gateway-worker/wrangler.jsonc"), "utf8");
+
+  for (const name of [
+    "DENO_TOKENIZER_ENDPOINT",
+    "DENO_TOKENIZER_AUTH_TOKEN",
+    "DENO_TOKENIZER_THRESHOLD_BYTES",
+    "DENO_TOKENIZER_TIMEOUT_MS",
+  ]) {
+    assert.doesNotMatch(source, new RegExp(`"${name}"\\s*:`));
+  }
+});
+
 test("refuses to overwrite an existing .dev.vars without --force", (t) => {
   const root = createProject({ devVars: "keep-me\n" });
   t.after(() => rmSync(root, { recursive: true, force: true }));

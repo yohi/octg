@@ -89,6 +89,14 @@ fi
 
 cat > "$TEMP_DIR/wrangler" <<'EOF'
 #!/usr/bin/env zsh
+previous=""
+for argument in "$@"; do
+  if [[ "$previous" == "--config" && -n "${OCTG_TEST_CAPTURE_CONFIG:-}" ]]; then
+    cp -- "$argument" "$OCTG_TEST_CAPTURE_CONFIG"
+    break
+  fi
+  previous="$argument"
+done
 if [[ "$1" == d1 && "$2" == list && "$3" == --json ]]; then
   if [[ "${OCTG_TEST_D1_LIST_MODE:-existing}" == empty ]]; then
     print '[]'
@@ -122,6 +130,7 @@ reuse_output="$(
   OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/reuse.env" \
   OCTG_PREVIEW_WRANGLER="$TEMP_DIR/wrangler" \
   OCTG_TEST_WRANGLER_LOG="$TEMP_DIR/wrangler.log" \
+  OCTG_TEST_CAPTURE_CONFIG="$TEMP_DIR/preview-config.json" \
   zsh "$SCRIPT_PATH"
 )"
 [[ "$reuse_output" == *"既存のPreview D1を再利用します: octg-gateway-preview-db"* ]] || {
@@ -132,6 +141,17 @@ reuse_output="$(
   print -u2 "reuse flow leaked a secret value"
   exit 1
 }
+preview_config="$(< "$TEMP_DIR/preview-config.json")"
+for name in \
+  DENO_TOKENIZER_ENDPOINT \
+  DENO_TOKENIZER_AUTH_TOKEN \
+  DENO_TOKENIZER_THRESHOLD_BYTES \
+  DENO_TOKENIZER_TIMEOUT_MS; do
+  [[ "$preview_config" != *"\"$name\""* ]] || {
+    print -u2 "Preview config inherited the Production $name variable"
+    exit 1
+  }
+done
 wrangler_log="$(< "$TEMP_DIR/wrangler.log")"
 [[ "$wrangler_log" == *"d1 migrations apply DB --remote"* ]] || {
   print -u2 "reuse flow did not apply migrations"

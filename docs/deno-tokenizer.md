@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Deno Tokenizer — Deployment, Operations, and Canary Acceptance
 
 This document covers the deployment and operational procedures for the optional Deno-based tokenizer service (`apps/deno-tokenizer`), which provides exact `o200k_base` BPE tokenization as an external RPC endpoint for the OCTG Gateway Worker.
@@ -67,6 +69,7 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
      remains unchanged.
 
 2. **Push to Git** (if using Deno Deploy's integrated Git deployment instead):
+
    ```bash
    git add deno.json apps/deno-tokenizer/ packages/shared/src/
    git commit -m "feat(deno-tokenizer): add standalone BPE service"
@@ -85,6 +88,7 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
    - Deploy.
 
 4. **Manual Deploy (without GitHub Actions)**:
+
    ```bash
    # Run these commands from the repository root.
    staging="$PWD/.deno-deploy-source"
@@ -208,11 +212,11 @@ between Production and Preview.
 The Deno tokenizer itself does **not** emit structured stdout logs. Its JSON request body contains only `inputText`; the HTTP transport still requires the `Authorization: Bearer <token>` header. It does not receive a request ID or upstream metadata and returns only the BPE count. All observability is owned by the Gateway Worker (`resource-observation.ts`).
 
 **Gateway Worker observability** (`resource-observation.ts`):
+
 - When Deno tokenizer is used: `tokenizationProvider: "deno"`
 - When Cloudflare DO is used: `tokenizationProvider: "cloudflare_do"`
 - When Deno configuration is invalid: `tokenizationProvider: "deno"`, `tokenizationFailureCategory: "configuration"`
 - When Deno fails at runtime: `tokenizationProvider: "deno"`, `tokenizationFailureCategory: "timeout" | "network" | "upstream_status" | "malformed_response" | "arithmetic"`
-
 
 ### 2.2 Health Check
 
@@ -224,7 +228,7 @@ curl https://<your-project>.deno.dev/health
 ### 2.3 Troubleshooting
 
 | Gateway returns `500` with `error:internal_error` (public) / `error:tokenizer_unavailable` (internal event) | Deno endpoint unreachable or auth failure | Check `DENO_TOKENIZER_ENDPOINT` and `DENO_TOKENIZER_AUTH_TOKEN` match. Check Deno Deploy logs. |
-|---|---|---|
+| --- | --- | --- |
 | High latency on large inputs | Deno Deploy cold start | Ensure the Deno project is on a paid tier or keep it warm with periodic health checks. |
 | Auth errors (`401`) in Deno logs | `Authorization` header mismatch | Regenerate token and update both Deno Deploy env and Gateway Worker secret/var. |
 
@@ -269,6 +273,7 @@ Before enabling the Deno tokenizer in production, verify the following:
 ### 3.5 Rollback Criteria
 
 If any canary check fails:
+
 - Remove or unset all four `DENO_TOKENIZER_*` settings, including the
   `DENO_TOKENIZER_AUTH_TOKEN` Secret.
 - All traffic immediately falls back to `TokenizerController` (Cloudflare DO).
@@ -280,7 +285,7 @@ If any canary check fails:
 cd apps/deno-tokenizer
 
 # Start local server
-deno task dev   # or: deno run --allow-net src/main.ts
+deno run --allow-env --allow-net src/main.ts
 
 # Test tokenization
 curl -X POST http://localhost:8080/tokenize \

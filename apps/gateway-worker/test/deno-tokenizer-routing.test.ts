@@ -72,15 +72,52 @@ function clearDenoConfig() {
   Reflect.deleteProperty(env, "DENO_TOKENIZER_TIMEOUT_MS");
 }
 
+type DenoFailure =
+  | { readonly kind: "timeout" }
+  | { readonly kind: "network"; readonly error?: Error }
+  | { readonly kind: "upstream_status"; readonly status: number }
+  | { readonly kind: "malformed_response"; readonly body: string; readonly contentType?: string }
+  | { readonly kind: "arithmetic" };
+
 function stubFetch(options: {
   readonly onDenoRequest?: () => void;
   readonly onUpstreamRequest?: () => void;
   readonly upstreamTotalTokens?: number;
+  readonly denoFailure?: DenoFailure;
 }) {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url === denoTokenizerUrl) {
       options.onDenoRequest?.();
+      if (options.denoFailure !== undefined) {
+        const failure = options.denoFailure;
+        switch (failure.kind) {
+          case "timeout":
+            return new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new DOMException("The operation was aborted.", "AbortError")), 10_000);
+            });
+          case "network":
+            throw failure.error ?? new TypeError("fetch failed");
+          case "upstream_status":
+            return new Response("unavailable", {
+              status: failure.status,
+              headers: { "content-type": "text/plain" },
+            });
+          case "malformed_response":
+            return new Response(failure.body, {
+              status: 200,
+              headers: { "content-type": failure.contentType ?? "application/json" },
+            });
+          case "arithmetic":
+            // MAX_SAFE_INTEGER is accepted by parseBaseTokenCount but overflows estimatedInputTokensOf.
+            return new Response(JSON.stringify({ baseTokenCount: Number.MAX_SAFE_INTEGER }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          default:
+            throw new Error("unexpected deno failure kind");
+        }
+      }
       return new Response(JSON.stringify({ baseTokenCount: 2 }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -260,5 +297,83 @@ describe("Deno tokenizer routing", () => {
     expect(finishEvent).not.toHaveProperty("inputBytes");
     expect(finishEvent).not.toHaveProperty("inputTextBytes");
     expect(finishEvent).not.toHaveProperty("opaqueInputBytes");
+
+    // Keep `state` in scope for consistency with the failure-matrix tests below.
+    expect(state).toBeDefined();
   });
+
+  it.each([
+    ["timeout", { kind: "timeout" } as const, "timeout"],
+    ["network", { kind: "network" } as const, "network"],
+    ["upstream_status", { kind: "upstream_status", status: 503 } as const, "upstream_status"],
+    ["malformed_response", { kind: "malformed_response", body: "not json" } as const, "malformed_response"],
+    ["arithmetic", { kind: "arithmetic" } as const, "arithmetic"],
+  ] as const)(
+    "fails closed for Deno %s with one fetch, zero DO calls, unchanged quota, and no reserve/upstream",
+    async (_label, failure, expectedCategory) => {
+      const doCalls = installTokenizer();
+      let denoCalls = 0;
+      let upstreamCalls = 0;
+      const utcDay = new Date().toISOString().slice(0, 10);
+      const quotaId = `quota:STANDARD:${utcDay}`;
+      const beforeQuota = await env.QUOTA_CONTROLLER.get(
+        env.QUOTA_CONTROLLER.idFromName(quotaId),
+      ).getState();
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+      stubFetch({
+        onDenoRequest: () => { denoCalls += 1; },
+        onUpstreamRequest: () => { upstreamCalls += 1; },
+        denoFailure: failure,
+      });
+      setDenoConfig({
+        endpoint: denoTokenizerUrl,
+        authToken: denoAuthToken,
+        thresholdBytes: "1",
+        timeoutMs: "1000",
+      });
+
+      const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
+        body: JSON.stringify({
+          model: "gpt-5",
+          messages: [{ role: "user", content: "hello" }],
+          max_completion_tokens: 1,
+        }),
+      });
+
+      expect(response.status).toBe(500);
+      expect((await response.json())).toMatchObject({ error: { code: "internal_error" } });
+      expect(denoCalls).toBe(1);
+      expect(doCalls()).toBe(0);
+      expect(upstreamCalls).toBe(0);
+
+      const afterQuota = await env.QUOTA_CONTROLLER.get(
+        env.QUOTA_CONTROLLER.idFromName(quotaId),
+      ).getState();
+      expect(afterQuota.requestCount).toBe(beforeQuota.requestCount);
+      expect(afterQuota.reservedTokens).toBe(beforeQuota.reservedTokens);
+      expect(afterQuota.confirmedTokens).toBe(beforeQuota.confirmedTokens);
+      expect(afterQuota.uncertainTokens).toBe(beforeQuota.uncertainTokens);
+
+      const stageEvents = info.mock.calls
+        .map(([arg]) => arg)
+        .filter((arg) => typeof arg === "object" && arg !== null && arg.event === "octg.resource_stage");
+      expect(stageEvents.some((event) => event.stage === "quota_reserve" || event.stage === "upstream")).toBe(false);
+
+      const finishEvents = stageEvents.filter((arg) => arg.phase === "finish" && arg.stage === "tokenize");
+      expect(finishEvents).toHaveLength(1);
+      expect(finishEvents[0]).toMatchObject({
+        stage: "tokenize",
+        phase: "finish",
+        outcome: "exception",
+        route: "error:tokenizer_unavailable",
+        tokenizationProvider: "deno",
+        tokenizationFailureCategory: expectedCategory,
+        quotaReserved: false,
+        upstreamReached: false,
+      });
+    },
+  );
 });

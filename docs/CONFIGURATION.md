@@ -12,7 +12,15 @@ chmod 600 .env
 
 `.env` は gitignore 対象です。実Secret、`octg_sk_*`、OpenAI API key、Cloudflare API tokenをコミット、ログ出力、コマンドライン引数へ置かないでください。
 
-## 最短手順
+## 最初に読むルール
+
+- `Secret` は値をログ、リポジトリ、コマンドライン引数へ置かず、Secret managerまたは対話入力から登録します。
+- `Variable` は機密でない設定値ですが、Production/Previewのリソース境界を越えて共有しません。
+- `DENO_DEPLOY_TOKEN` はDeno Deploy管理用です。Deno tokenizer HTTP認証には使用しません。
+- `DENO_TOKENIZER_AUTH_TOKEN` と `OCTG_TOKENIZER_AUTH_TOKEN` は同じ値ですが、Worker SecretとDeno Deploy runtime Secretとして別々に登録します。
+- ProductionとPreviewではAccount、Worker、D1、Durable Object、Gateway、pepper、client key、Deno applicationを分離します。
+
+## Quick start（最短手順）
 
 ### Local
 
@@ -37,7 +45,7 @@ npm run setup:deploy -- --env-file=.env
 
 `--dry-run`では、`wrangler.jsonc`更新、Secret登録、D1 migration、Worker deployを行いません。ProductionのSecretが`.env`にない場合は、スクリプトがwranglerの入力を開きます。
 
-### Preview
+### Preview configuration
 
 Previewは専用のCloudflare account、Worker、D1、client、pepperを使用します。Productionの値を再利用しないでください。
 
@@ -241,33 +249,46 @@ OCTG_CF_API_TOKEN=<gateway-a-run-token>
 
 env fileはshellとして実行せず、単純な`KEY=value`または`export KEY=value`として解析します。未知の変数は各スクリプトから無視されます。Preview setupはPreview用のallow-listだけを読み込み、Productionの`OCTG_KEY_PEPPER`をPreview用pepperへフォールバックしません。
 
-## Local設定
+## Configuration catalog（設定カタログ）
 
-| 変数 | Secret | 設定先 | 取得・決定方法 |
-| --- | ---: | --- | --- |
-| `OCTG_LOCAL_KEY_PEPPER` | Yes | `.dev.vars` | Local専用に任意の値を使用。既定値は`dev-pepper` |
-| `OCTG_LOCAL_UPSTREAM_BASE_URL` | No | `.dev.vars` | Gateway BのOpenAI endpoint。Localでは未設定ならplaceholder |
-| `OCTG_LOCAL_UPSTREAM_API_TOKEN` | Yes | `.dev.vars` | Local用Gateway B token。既定値は`dev-token` |
-| `OCTG_LOCAL_OPENAI_USAGE_API_KEY` | Yes | `.dev.vars` | Local reconciliation用。既定値は`dev-usage-key` |
-| `OCTG_LOCAL_CLIENT_ID` | No | Local D1 | 既定値は`client_demo` |
-| `OCTG_LOCAL_CLIENT_NAME` | No | Local D1 | 既定値は`Demo` |
-| `OCTG_LOCAL_CLIENT_KEY` | Yes | Local D1 seed | 空欄なら`octg_sk_local_`形式で生成 |
-| `OCTG_LOCAL_CLIENT_TOOLS_MODE` | No | Local D1 | `ALLOW`または`REJECT`。既定値は`REJECT` |
+### Local development
+
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `OCTG_LOCAL_KEY_PEPPER` | Secret | Local Worker | `.env` → `.dev.vars` | Local専用値。既定値は`dev-pepper` | `npm run setup:local` |
+| `OCTG_LOCAL_UPSTREAM_BASE_URL` | Variable | Local Worker | `.env` → `.dev.vars` | Gateway BのOpenAI endpoint。未設定時はplaceholder | `npm run setup:local` |
+| `OCTG_LOCAL_UPSTREAM_API_TOKEN` | Secret | Local Worker | `.env` → `.dev.vars` | Local用Gateway B token。既定値は`dev-token` | `npm run setup:local` |
+| `OCTG_LOCAL_OPENAI_USAGE_API_KEY` | Secret | Local reconciliation | `.env` → `.dev.vars` | Local用Usage API key。既定値は`dev-usage-key` | `npm run setup:local` |
+| `OCTG_LOCAL_CLIENT_ID` | Variable | Local D1 seed | `.env`または既定値 | 既定値は`client_demo` | `npm run setup:local` |
+| `OCTG_LOCAL_CLIENT_NAME` | Variable | Local D1 seed | `.env`または既定値 | 既定値は`Demo` | `npm run setup:local` |
+| `OCTG_LOCAL_CLIENT_KEY` | Secret | Local D1 seed | `.env`または対話入力 | 空欄なら`octg_sk_local_`形式で生成 | `npm run setup:local` |
+| `OCTG_LOCAL_CLIENT_TOOLS_MODE` | Variable | Local D1 policy | `.env`または既定値 | `ALLOW`または`REJECT`。既定値は`REJECT` | `npm run setup:local` |
 
 既存利用者向けに、process environmentで従来の`OCTG_KEY_PEPPER`、`OCTG_UPSTREAM_BASE_URL`などを指定する方法も維持しています。共通`.env`ではProduction値のLocal流用を防ぐため、`OCTG_LOCAL_*`を使用してください。
 
-## Production設定
+### Production Cloudflare deploy authentication
 
-### Worker vars
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `CLOUDFLARE_ACCOUNT_ID` | Variable | setup script / Wrangler | process environmentまたは`.env` | 対象Production Account ID。`wrangler whoami`でも確認 | `setup:deploy`またはWrangler command |
+| `CLOUDFLARE_API_TOKEN` | Secret | setup script / Wrangler | process environmentまたは`.env` | 対象Accountだけに必要権限を限定 | `setup:deploy`またはWrangler command |
 
-| 変数 | Secret | 設定先 | 取得場所 |
-| --- | ---: | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | No | Wrangler環境 | Cloudflare DashboardのAccount ID、または`wrangler whoami` |
-| `OCTG_DATABASE_ID` | No | `wrangler.jsonc`のD1 binding | Cloudflare D1のDatabase ID。既存のD1を使用 |
-| `OCTG_UPSTREAM_BASE_URL` | No | `wrangler.jsonc`のvars | Gateway BのOpenAI endpoint。Gateway AのCustom Provider URLではない |
-| `ACCESS_TEAM_DOMAIN` | No | `wrangler.jsonc`のvars | Access applicationのOverviewに表示されるteam domain |
-| `ACCESS_AUD` | No | `wrangler.jsonc`のvars | Access applicationのApplication Audience (AUD) Tag |
-| `MAX_INPUT_BYTES` | No | `wrangler.jsonc`のvars。Deno Deploy runtime environmentにも同じraw値を設定 | Gateway WorkerとDeno tokenizerで共有するinput ceiling。未設定・不正値時は1 MiB、`MAX_INPUT_TEXT_BYTES`を上限にclamp |
+### Production Worker runtime
+
+#### Worker vars
+
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `OCTG_DATABASE_ID` | Variable | Gateway Worker D1 binding | `wrangler.jsonc` | 既存Production D1のDatabase ID | `setup:deploy`または設定後deploy |
+| `OCTG_UPSTREAM_BASE_URL` | Variable | Gateway Worker upstream | `wrangler.jsonc` vars | Gateway BのOpenAI endpoint。Gateway Aとは別 | 設定後Worker deploy |
+| `ACCESS_TEAM_DOMAIN` | Variable | Gateway Worker Admin auth | `wrangler.jsonc` vars | Access applicationのTeam domain | 設定後Worker deploy |
+| `ACCESS_AUD` | Variable | Gateway Worker Admin auth | `wrangler.jsonc` vars | Access applicationのAUD Tag | 設定後Worker deploy |
+| `MAX_INPUT_BYTES` | Variable | Gateway Worker and Deno tokenizer | Worker vars + Deno runtime environment | 両runtimeへ同じraw値。既定1 MiB、`MAX_INPUT_TEXT_BYTES`でclamp | 両runtime deploy後にresolved value照合 |
+| `QUOTA_LIMIT_STANDARD` | Variable | Gateway Worker quota policy | `wrangler.jsonc` vars | Production STANDARD pool上限 | Worker deploy |
+| `QUOTA_LIMIT_MINI` | Variable | Gateway Worker quota policy | `wrangler.jsonc` vars | Production MINI pool上限 | Worker deploy |
+| `MAX_IN_FLIGHT_REQUESTS` | Variable | Gateway Worker admission | `wrangler.jsonc` vars | upstream同時実行上限。既定値は2 | Worker deploy |
+| `IN_FLIGHT_LEASE_TTL_MS` | Variable | Gateway Worker admission | `wrangler.jsonc` vars | in-flight lease TTL | Worker deploy |
+| `IN_FLIGHT_LEASE_RENEWAL_MS` | Variable | Gateway Worker admission | `wrangler.jsonc` vars | streaming lease renewal interval | Worker deploy |
 
 `OCTG_UPSTREAM_BASE_URL`は次のGateway B形式です。
 
@@ -277,78 +298,30 @@ https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_b_id>/openai
 
 Gateway AのCustom Provider URLは利用者側OpenCode設定用であり、Workerのupstream URLへ設定しないでください。
 
-### Worker Secrets
+#### Worker Secrets
 
-| 変数 | 設定先 | 取得・生成方法 |
-| --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Wrangler認証 | 対象AccountのWorkers/D1等を操作できるtoken。process environmentまたは`.env`へ安全に注入 |
-| `OCTG_KEY_PEPPER` | Production Worker Secret | 長いランダム値を生成。既存clientをseedしたpepperと一致させる |
-| `OCTG_UPSTREAM_API_TOKEN` | Production Worker Secret | Gateway BのAI Gateway Run token |
-| `OPENAI_USAGE_API_KEY` | Production Worker Secret | OpenAI Organization Usage APIの読み取り用key |
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `OCTG_KEY_PEPPER` | Secret | Gateway Worker client authentication | Production Worker Secret | 長いランダム値。既存clientをseedした値と一致させる | inactive versionへ登録後にdeploy |
+| `OCTG_UPSTREAM_API_TOKEN` | Secret | Gateway Worker → Gateway B | Production Worker Secret | Gateway BのAI Gateway Run token | inactive versionへ登録後にdeploy |
+| `OPENAI_USAGE_API_KEY` | Secret | Reconciliation Worker | Production Worker Secret | OpenAI Organization Usage API read key | inactive versionへ登録後にdeploy |
 
 既存WorkerのSecret更新は`wrangler versions secret put`でinactive versionへ登録し、
 `wrangler versions deploy`で設定済みのversionを反映します。Secretはリポジトリのファイルへ保存されません。
 初回Worker作成時の標準`wrangler secret put`は[テンプレート手順](./DEPLOY_FROM_TEMPLATE.md)に限定します。
 `OCTG_KEY_PEPPER`を変更すると既存client keyのhashと一致しなくなるため、通常のSecret rotationと分けて計画してください。
 
-## Preview設定
-
-Previewの変数は全て`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`です。Productionの同名リソースを指定しないでください。`.env`からPreview setupへ渡すpepperは`OCTG_PREVIEW_KEY_PEPPER`です。GitHub Environmentへ同期する際だけSecret名`OCTG_KEY_PEPPER`へ変換されます。
-
-### GitHub Environment `preview`へ登録する値
-
-GitHub Actionsのworkflowが参照するSecret名は、ローカル`.env`のPreview名と一部異なります。
-`zsh scripts/setup-preview.zsh --github`を使う場合も、入力元は`.env`のPreview値です。
-
-| `.env`の入力名 | GitHub Environmentの登録名 | GitHubへ渡す実値 |
-| --- | --- | --- |
-| `CLOUDFLARE_PREVIEW_API_TOKEN` | Secret `CLOUDFLARE_PREVIEW_API_TOKEN` | Preview AccountのWorkers/D1などを操作できるCloudflare API token |
-| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのCloudflare API token。Custom tokenでAccount権限`AI Gateway: Run`を付与したもの |
-| `OCTG_PREVIEW_CLIENT_KEY` | Secret `OCTG_PREVIEW_SMOKE_API_KEY` | Preview D1へseedしたCI clientの実値（`octg_sk_*`） |
-| `OCTG_PREVIEW_KEY_PEPPER` | Secret `OCTG_KEY_PEPPER` | Preview D1のclient key hashに使ったpepperと同じ値 |
-
-`OCTG_UPSTREAM_API_TOKEN`は、Cloudflare Dashboardの **My Profile → API Tokens → Create Token → Custom token** で作成します。
-Account権限の **AI Gateway: Run** を選び、`OCTG_PREVIEW_UPSTREAM_BASE_URL`が指すPreview Gateway Bを所有するAccountを対象にします。
-GitHub Secretへは、作成後に一度だけ表示されるtoken全文を、`Bearer`や引用符なしで入力してください。
-
-Preview workflowでの`OCTG_UPSTREAM_API_TOKEN`は、Preview Gateway B（WorkerからOpenAIへ出る経路）のtokenです。
-Gateway A（OpenCodeからOCTGへ入るCustom Provider）の`OCTG_CF_API_TOKEN`、Wrangler管理用の
-`CLOUDFLARE_PREVIEW_API_TOKEN`、OpenAI Project API key、`octg_sk_*`は入力しません。
-Gateway BのURLは`https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-b-id>/openai`形式で、Gateway AのCustom Provider URLとは異なります。
-
-| 変数 | Secret | 設定先 | 取得・決定方法 |
-| --- | ---: | --- | --- |
-| `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | No | Preview Wrangler認証 | Preview専用AccountのID |
-| `CLOUDFLARE_PREVIEW_API_TOKEN` | Yes | Preview setup/GitHub Secret | Preview resourceだけに限定したtoken |
-| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Yes | Preview setup/GitHub Secret `OCTG_UPSTREAM_API_TOKEN` | Preview Gateway BのRun token。Production tokenと共有しない。Cloudflare Custom tokenの`AI Gateway: Run`権限を使用 |
-| `OCTG_PREVIEW_DATABASE_ID` | No | 一時Preview Wrangler config | Preview D1 Database ID。空欄なら既存名を検索し、なければ作成後にIDを入力 |
-| `OCTG_PREVIEW_DATABASE_NAME` | No | Preview D1 | 既定値は`octg-gateway-preview-db` |
-| `OCTG_PREVIEW_WORKER_NAME` | No | Preview Worker | 既定値は`octg-gateway-preview` |
-| `OCTG_PREVIEW_UPSTREAM_BASE_URL` | No | Preview Worker vars | Preview用Gateway B endpoint |
-| `OCTG_PREVIEW_BASE_URL` | No | Preview workflow | Preview Workerの公開URL |
-| `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` | No | Preview Worker vars | Preview STANDARD pool上限。`0`で無効 |
-| `OCTG_PREVIEW_QUOTA_LIMIT_MINI` | No | Preview Worker vars | Preview MINI pool上限。正の整数 |
-| `OCTG_PREVIEW_CLIENT_ID` | No | Preview D1 | CI用client ID |
-| `OCTG_PREVIEW_CLIENT_NAME` | No | Preview D1 | CI用client名 |
-| `OCTG_PREVIEW_CLIENT_KEY` | Yes | Preview D1/GitHub Secret | `octg_sk_*`形式のPreview専用key |
-| `OCTG_PREVIEW_KEY_PEPPER` | Yes | Preview D1/GitHub Secret | Preview専用pepper。Productionと別の値 |
-| `GITHUB_REPOSITORY` | No | GitHub CLI | `owner/repository`形式。`--github`時のみ必須 |
-| `SMOKE_MODEL` | No | GitHub Environment Variable | 既定値は`gpt-5-mini` |
-
-## Deno tokenizer設定
+### Production Deno integration
 
 Deno tokenizerはopt-inです。全ての設定を一緒に用意し、ProductionとPreviewでendpoint・tokenを分けます。
 
-| 変数 | 設定先 | 取得・決定方法 |
-| --- | --- | --- |
-| `DENO_DEPLOY_ORG` | Deno Deploy manifest/GitHub Variable | Deno Deployのorganization |
-| `DENO_DEPLOY_APP` | Deno Deploy manifest/GitHub Variable | Deno Deployのapplication |
-| `DENO_DEPLOY_TOKEN` | Deno Deploy Secret | Deno Deploy access token。ファイルへ保存しない |
-| `DENO_TOKENIZER_ENDPOINT` | Worker vars | Deno Deployの`/tokenize` HTTPS endpoint |
-| `DENO_TOKENIZER_AUTH_TOKEN` | Worker Secret | Gateway WorkerからDeno tokenizerへ送る認証token |
-| `OCTG_TOKENIZER_AUTH_TOKEN` | Deno Deploy runtime Secret | Deno tokenizerが受け取る認証token。Worker Secretと同じ値 |
-| `DENO_TOKENIZER_THRESHOLD_BYTES` | Worker vars | 測定済みの有効化threshold |
-| `DENO_TOKENIZER_TIMEOUT_MS` | Worker vars | 測定済みのtimeout |
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `DENO_TOKENIZER_ENDPOINT` | Variable | Gateway Worker | Worker vars | Deno Deployの`/tokenize` HTTPS endpoint | Worker deploy |
+| `DENO_TOKENIZER_AUTH_TOKEN` | Secret | Gateway Worker → Deno | Worker Secret | Deno runtime Secretと同じ値 | 同じversionへ登録後にWorker deploy |
+| `OCTG_TOKENIZER_AUTH_TOKEN` | Secret | Deno tokenizer runtime | Deno Deploy runtime environment | Worker Secretと同じ認証token | Deno app deploy |
+| `DENO_TOKENIZER_THRESHOLD_BYTES` | Variable | Gateway Worker router | Worker vars | 測定済みの有効化threshold | Worker deploy |
+| `DENO_TOKENIZER_TIMEOUT_MS` | Variable | Gateway Worker client | Worker vars | 測定済みのtimeout | Worker deploy |
 
 `.env`の`DENO_TOKENIZER_AUTH_TOKEN`の値を、Worker Secret
 `DENO_TOKENIZER_AUTH_TOKEN`とDeno Deploy runtime Secret
@@ -361,16 +334,19 @@ raw値またはresolved valueが一致しない場合は、Deno経路canaryを�
 
 `DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
 
-### GitHub Actionsへの設定
+### Deno Deploy CI
 
 GitHub Actionsの設定画面はリポジトリの **Settings → Secrets and variables → Actions** です。
 Production Worker workflowはリポジトリスコープ、Deno Deploy workflowはEnvironment
 `deno-production`スコープへ設定します。
 
-| Workflow | 設定先 | Variables | Secrets |
-| --- | --- | --- | --- |
-| `.github/workflows/deploy-production.yml` | Repository | `CLOUDFLARE_ACCOUNT_ID` | `CLOUDFLARE_API_TOKEN` |
-| `.github/workflows/deploy-deno-tokenizer.yml` | Environment `deno-production` | `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP` | `DENO_DEPLOY_TOKEN` |
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `CLOUDFLARE_ACCOUNT_ID` | Variable | Production Worker workflow | GitHub Repository Variable | Production Account ID | `deploy-production.yml` |
+| `CLOUDFLARE_API_TOKEN` | Secret | Production Worker workflow | GitHub Repository Secret | Account-scoped Cloudflare API token | `deploy-production.yml` |
+| `DENO_DEPLOY_ORG` | Variable | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy organization | `deploy-deno-tokenizer.yml` |
+| `DENO_DEPLOY_APP` | Variable | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy application | `deploy-deno-tokenizer.yml` |
+| `DENO_DEPLOY_TOKEN` | Secret | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy access token | `deploy-deno-tokenizer.yml` |
 
 GitHub CLIでは値を表示せず、登録済みの名前だけを確認できます。
 
@@ -386,21 +362,21 @@ Secretの実値はGitHubから読み戻せません。未登録またはロー�
 **New environment secret** から登録してください。Deno tokenizerのruntime secret
 `OCTG_TOKENIZER_AUTH_TOKEN`はGitHubではなくDeno Deployへ登録します。
 
-## Worker canary設定
+### Production canary
 
 Worker canaryはProduction quotaを消費するため、次の順序を変更しません。初回canaryは
 Deno integrationを無効にしたWorker version、2回目のcanaryは再deploy後のDeno経路を対象にします。
 
 ### Canary共通設定
 
-| 変数 | Secret | 設定先 | 取得・決定方法 |
-| --- | ---: | --- | --- |
-| `OCTG_CANARY_URL` | No | canary実行環境 | Production Workerの`/v1/chat/completions` URL |
-| `OCTG_CANARY_ALLOWED_HOSTS` | No | canary実行環境 | URLと同じexact hostname。wildcard不可 |
-| `OCTG_CANARY_CLIENT_KEY` | Yes | canary実行環境 | 専用Production client key。Production quotaを消費 |
-| `CANARY_PAYLOAD_PATH` | No | canary実行環境 | 独自fixtureを使う場合だけ指定 |
-| `CANARY_CONCURRENCY` | No | canary実行環境 | 既定値`1,2`。想定ピークを追加可能 |
-| `CANARY_REQUEST_TIMEOUT_MS` | No | canary実行環境 | 既定値`120000` |
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `OCTG_CANARY_URL` | Variable | Worker canary CLI | process environment / `.env` | Production Workerの`/v1/chat/completions` URL | `npm run canary:worker` |
+| `OCTG_CANARY_ALLOWED_HOSTS` | Variable | Worker canary CLI | process environment / `.env` | URLと同じexact hostname。wildcard不可 | `npm run canary:worker` |
+| `OCTG_CANARY_CLIENT_KEY` | Secret | Worker canary CLI | process environment / Secret Manager | 専用Production client key。Production quotaを消費 | `npm run canary:worker` |
+| `CANARY_PAYLOAD_PATH` | Variable | Worker canary CLI | process environment / `.env` | 独自fixtureを使う場合だけ指定 | `npm run canary:worker` |
+| `CANARY_CONCURRENCY` | Variable | Worker canary CLI | process environment / `.env` | 既定値`1,2`。想定ピークを追加可能 | `npm run canary:worker` |
+| `CANARY_REQUEST_TIMEOUT_MS` | Variable | Worker canary CLI | process environment / `.env` | 既定値`120000` | `npm run canary:worker` |
 
 canaryの結果にはresponse bodyやmessageを出さず、request ID・Worker version・安全なstructured errorだけを出力します。CPU/memory制限はrequest IDとrevisionをCloudflare Observabilityで相関して確認します。
 
@@ -469,6 +445,35 @@ upstream到達を確認し、初回canaryとquota accountingが一致するこ�
 network、upstream status、malformed responseでgeneric 500となった場合は、quota reserve、in-flight
 admission、upstream callが発生していないことを確認します。
 
+### Preview
+
+Previewのリソース変数は`OCTG_PREVIEW_*`または`CLOUDFLARE_PREVIEW_*`に限定します。補助変数として`GITHUB_REPOSITORY`は`--github`実行時のみ必須で、`SMOKE_MODEL`はPreview smokeで未指定時に`gpt-5-mini`を使用します。Productionの同名リソースを指定しないでください。`.env`からPreview setupへ渡すpepperは`OCTG_PREVIEW_KEY_PEPPER`です。GitHub Environmentへ同期する際だけSecret名`OCTG_KEY_PEPPER`へ変換されます。
+
+GitHub Actionsのworkflowが参照するSecret名は、ローカル`.env`のPreview名と一部異なります。次の表の`Set in`と`Apply`に、ローカル入力名からGitHub側の名前への対応を記載しています。`zsh scripts/setup-preview.zsh --github`を使う場合も、入力元は`.env`のPreview値です。
+
+`OCTG_UPSTREAM_API_TOKEN`は、Cloudflare Dashboardの **My Profile → API Tokens → Create Token → Custom token** で作成します。Account権限の **AI Gateway: Run** を選び、`OCTG_PREVIEW_UPSTREAM_BASE_URL`が指すPreview Gateway Bを所有するAccountを対象にします。GitHub Secretへは、作成後に一度だけ表示されるtoken全文を、`Bearer`や引用符なしで入力してください。
+
+Preview workflowでの`OCTG_UPSTREAM_API_TOKEN`は、Preview Gateway B（WorkerからOpenAIへ出る経路）のtokenです。Gateway A（OpenCodeからOCTGへ入るCustom Provider）の`OCTG_CF_API_TOKEN`、Wrangler管理用の`CLOUDFLARE_PREVIEW_API_TOKEN`、OpenAI Project API key、`octg_sk_*`は入力しません。Gateway BのURLは`https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-b-id>/openai`形式で、Gateway AのCustom Provider URLとは異なります。
+
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `CLOUDFLARE_PREVIEW_ACCOUNT_ID` | Variable | Preview Wrangler | `.env` / process environment | Preview専用Account ID | Preview setup / workflow |
+| `CLOUDFLARE_PREVIEW_API_TOKEN` | Secret | Preview setup / workflow | `.env` → GitHub Environment `preview` | Preview resourceだけに限定したtoken | `setup-preview.zsh --github` |
+| `OCTG_PREVIEW_UPSTREAM_API_TOKEN` | Secret | Preview Worker | `.env` → GitHub Secret `OCTG_UPSTREAM_API_TOKEN` | Productionと共有しないPreview Gateway B Run token | `setup-preview.zsh --github` |
+| `OCTG_PREVIEW_DATABASE_ID` | Variable | Preview D1 migration | `.env` / 一時config | Preview D1 ID。空欄なら既存名を検索し、なければ作成後に入力 | `setup-preview.zsh` |
+| `OCTG_PREVIEW_DATABASE_NAME` | Variable | Preview D1 | `.env`または既定値 | 既定値は`octg-gateway-preview-db` | `setup-preview.zsh` |
+| `OCTG_PREVIEW_WORKER_NAME` | Variable | Preview Worker / smoke | `.env`または既定値 | 既定値は`octg-gateway-preview` | Preview workflow |
+| `OCTG_PREVIEW_UPSTREAM_BASE_URL` | Variable | Preview Worker | `.env` → preview config | Preview Gateway B endpoint | Preview Worker deploy |
+| `OCTG_PREVIEW_BASE_URL` | Variable | Preview workflow | `.env` → GitHub Variable | Preview Workerの公開URL | Preview smoke |
+| `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` | Variable | Preview quota policy | `.env` → preview config | Preview STANDARD上限。`0`で無効 | Preview Worker deploy |
+| `OCTG_PREVIEW_QUOTA_LIMIT_MINI` | Variable | Preview quota policy | `.env` → preview config | Preview MINI上限。正の整数 | Preview Worker deploy |
+| `OCTG_PREVIEW_CLIENT_ID` | Variable | Preview D1 seed | `.env` | CI用client ID | `setup-preview.zsh` |
+| `OCTG_PREVIEW_CLIENT_NAME` | Variable | Preview D1 seed | `.env` | CI用client名 | `setup-preview.zsh` |
+| `OCTG_PREVIEW_CLIENT_KEY` | Secret | Preview D1 / smoke | `.env` → GitHub Secret `OCTG_PREVIEW_SMOKE_API_KEY` | `octg_sk_*`形式のPreview専用key | seed + `setup-preview.zsh --github` |
+| `OCTG_PREVIEW_KEY_PEPPER` | Secret | Preview D1 / Worker | `.env` → GitHub Secret `OCTG_KEY_PEPPER` | Productionと別のPreview専用pepper | seed + Preview deploy |
+| `GITHUB_REPOSITORY` | Variable | Preview setup CLI | process environment / `.env` | `owner/repository`形式。`--github`時のみ必須 | `setup-preview.zsh --github` |
+| `SMOKE_MODEL` | Variable | Preview smoke workflow | GitHub Environment Variable | 既定値は`gpt-5-mini` | Preview smoke |
+
 ## Quota受け入れ条件と判定基準
 
 ### Preview quota
@@ -491,17 +496,47 @@ upstream送信をfail-closedにします。
 
 いずれかを確認できない場合、quota設定を受け入れず、未確定requestをfail-closedのまま保持します。
 
-## OpenCode設定
+### OpenCode client
 
 OpenCodeでGateway AのCustom Providerを使う場合のクライアント側変数です。
 
-| 変数 | 設定先 | 取得場所 |
-| --- | --- | --- |
-| `OCTG_CF_ACCOUNT_ID` | OpenCode環境 | Gateway AのCloudflare Account ID |
-| `OCTG_CF_GATEWAY_ID` | OpenCode環境 | Gateway AのAI Gateway ID |
-| `OCTG_CF_API_TOKEN` | OpenCode環境/Secret Manager | Gateway A Custom ProviderのRun token |
+| Name | Kind | Consumer | Set in | Obtain or decide | Apply |
+| --- | --- | --- | --- | --- | --- |
+| `OCTG_CF_ACCOUNT_ID` | Variable | OpenCode client | OpenCode environment | Gateway AのCloudflare Account ID | OpenCode provider config |
+| `OCTG_CF_GATEWAY_ID` | Variable | OpenCode client | OpenCode environment | Gateway AのAI Gateway ID | OpenCode provider config |
+| `OCTG_CF_API_TOKEN` | Secret | OpenCode client | OpenCode environment / Secret Manager | Gateway A Custom ProviderのRun token | OpenCode provider config |
 
 Gateway AとGateway Bは別のAI Gateway instanceにしてください。OpenCodeの設定ファイルへ`octg_sk_*`やRun tokenの実値を書かないでください。詳細は[cloudflare-ai-gateway-custom-provider.md](./cloudflare-ai-gateway-custom-provider.md)を参照してください。
+
+## Production/Preview boundary
+
+ProductionとPreviewでは、Account、Worker、D1、Durable Object、Gateway、registry、監査・reconciliation state、pepper、client keyを分離します。upstream billing principalを共有する場合も、Previewのquota ceilingとbounded coordinationを別に設定し、coordinationが不明な場合はupstream送信をfail-closedにします。
+
+Preview setupが生成する一時configにはProductionのDeno tokenizer endpoint、threshold、timeout、auth Secretを含めません。PreviewでDeno tokenizerを使う場合は、Productionとは別のDeno Deploy application、endpoint、runtime Secret、GitHub Environmentを用意してください。
+
+## Rotation and recovery
+
+1. 新しいruntime tokenまたはupstream tokenを発行し、既存値を無効化する前に対象Secretへ登録します。
+2. `DENO_TOKENIZER_AUTH_TOKEN`と`OCTG_TOKENIZER_AUTH_TOKEN`は同じ新しい値を、それぞれWorker SecretとDeno Deploy runtime Secretへ登録します。
+3. 既存Workerではinactive versionへSecretとVariablesを揃え、`wrangler versions deploy`で一度だけ反映してからhealth checkとcanaryを実行します。
+4. canaryが合格した後に旧tokenを失効させます。失敗時は4つのDeno integration設定を全てunsetにしてCloudflare Durable Object経路へ戻します。
+5. `OCTG_KEY_PEPPER`の変更はtoken rotationと分離し、既存client keyの再発行またはhash移行を完了してから旧pepperを無効化します。
+
+## Troubleshooting
+
+| Symptom | Check | Recovery |
+| --- | --- | --- |
+| 認証済み`/v1`が`500 internal_error` | Deno 4設定が部分適用されていないか確認 | Denoを使わない場合は4設定を全てunset。使う場合はendpoint、auth、threshold、timeoutを同じversionへ登録 |
+| Denoの`401`またはWorkerのtimeout | `DENO_TOKENIZER_AUTH_TOKEN`と`OCTG_TOKENIZER_AUTH_TOKEN`が一致しているか確認 | Deno runtime SecretとWorker Secretを同じ値へ更新し、health check後にWorkerをdeploy |
+| Preview設定にProduction endpointが現れる | Preview configと`setup-preview.zsh`の生成結果を確認 | `DENO_TOKENIZER_*`をPreview configから除去し、Production SecretをPreviewへ登録しない |
+| Secret変更がactive versionへ反映されない | `wrangler versions view <version-id>`でbindingを確認 | inactive versionへ全設定を揃えてから`wrangler versions deploy`を再実行 |
+
+## Related procedures
+
+- Deno runtime、health check、障害契約、canary: [Deno tokenizer手順](./deno-tokenizer.md)
+- Template固有のCloudflare resource作成と初回deploy: [テンプレート手順](./DEPLOY_FROM_TEMPLATE.md)
+- Gateway A Custom Provider: [Cloudflare AI Gateway Custom Provider](./cloudflare-ai-gateway-custom-provider.md)
+- Worker canaryとquota受け入れ条件: 本文の「Production canary」と「Quota受け入れ条件と判定基準」
 
 ## セットアップの安全動作
 

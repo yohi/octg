@@ -187,7 +187,9 @@ encoder error を永続化または application log に出力しない。
    / settlement 経路へ進む。
 
 Deno が選ばれる場合、Worker は request ごとに一度だけ `fetch` する。timeout は request
-ローカルの `AbortSignal` で制御し、redirect と retry を許可しない。timer は `fetch` 開始前から
+ローカルの `AbortSignal` で制御し、redirect と retry を許可しない。Cloudflare Workers は
+Fetch 標準の `redirect: "error"` を受け付けないため、実装では `redirect: "manual"` を使い、
+redirect を追従させない。timer は `fetch` 開始前から
 HTTP response body の読取り、JSON decode、schema validation が完了するまで維持する。したがって
 HTTP 200 の header 受信後に body stream が停止しても、`DENO_TOKENIZER_TIMEOUT_MS` 経過後に
 abort して `timeout` として扱う。HTTP 200、JSON content type、および有効な

@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # テンプレートから新規インスタンスを構築する手順
 
 本リポジトリは GitHub の [Template repository](https://docs.github.com/ja/repositories/creating-and-managing-repositories/creating-a-template-repository) として公開しています。
@@ -12,7 +14,7 @@ OCTG の本番構成は Gateway Worker、`QuotaController` Durable Object、
 
 ## 1. テンプレートからリポジトリを生成
 
-1. 上部の **Use this template** バッジ（または https://github.com/yohi/octg/generate ）を開く。
+1. 上部の **Use this template** バッジ（または [Generate from template](https://github.com/yohi/octg/generate)）を開く。
 2. 新しいリポジトリ名・所有者・可視性（Private 推奨）を入力し、**Create repository from template** をクリック。
 3. 生成後、自分のリポジトリとして `git clone` または GitHub Codespaces で開く。
 
@@ -28,7 +30,7 @@ coordination障害時の fail-closed 条件を設定してください。D1共�
 ### 2.1 必要な Cloudflare サービスと権限
 
 | リソース | 用途 | 必要な権限（API トークン） |
-|---|---|---|
+| --- | --- | --- |
 | D1 | 監査ログ・レジストリ・クライアント管理 | Zone なし、Account: **Cloudflare D1:Edit** |
 | AI Gateway | OpenAI API のプロキシ・キャッシュ・Spend Limit | Account: **AI Gateway:Run** |
 | Workers | OCTG 本体のホスティング | Account: **Cloudflare Workers:Edit** |
@@ -171,21 +173,17 @@ npm run setup:deploy -- --env-file=.env
 スクリプトは `.env`、process environment、既存の `wrangler.jsonc` から設定値を解決し、不足している値だけを対話入力します。
 
 | 質問 | 入力値 | 取得場所 | 必須 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | D1 `database_id` | `42ffaeac-...` | 2.3 の D1 ダッシュボード | ✓ |
 | `OCTG_UPSTREAM_BASE_URL` | AI Gateway URL | 2.4 の Gateway 詳細 | ✓ |
 | `ACCESS_TEAM_DOMAIN` | `your-team.cloudflareaccess.com` | 2.5 の Access アプリ Overview | ✓ |
 | `ACCESS_AUD` | Audience tag | 2.5 の Access アプリ Overview | ✓ |
 
 `setup:deploy` は `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` を含む本番設定が揃っている場合に実行できます。Admin API（`/admin/*`）を保護するため、2.5 の手順でAccessアプリを作成し、取得した値を`.env`へ入力してください。
-その後、`wrangler secret put` を使って3つのProduction Secretを順番に入力します。
-値の意味・取得場所・Production/Preview間の境界は[設定カタログ](./CONFIGURATION.md)を参照してください。
-
-| 順 | Secret | 入力する値 | 取得場所 |
-|---:|---|---|---|
-| 1 | `OCTG_KEY_PEPPER` | 任意の長いランダム文字列 | 自分で生成 |
-| 2 | `OCTG_UPSTREAM_API_TOKEN` | Cloudflare API token | 2.2 で作成 |
-| 3 | `OPENAI_USAGE_API_KEY` | OpenAI admin key | 2.6 で作成 |
+その後、`wrangler secret put` でProduction Secretを順番に入力します。Secret名、値の取得場所、
+Production/Preview間の境界は[設定カタログ](./CONFIGURATION.md)を参照してください。
+テンプレートの初回作成では、次の順に `OCTG_KEY_PEPPER`、`OCTG_UPSTREAM_API_TOKEN`、
+`OPENAI_USAGE_API_KEY` を登録します。具体的な値は、2.2と2.6の手順および設定カタログから取得します。
 
 > 初回実行時、`wrangler secret put` は Worker `octg-gateway` が存在しないことを検知し、新規作成するか尋ねるダイアログを表示します。`yes` を選択すると Worker が作成され、Secret が登録されます。
 >

@@ -788,9 +788,11 @@ cancel the active response reader before resolving as `timeout`. Await reader
 cancellation so a stalled body read cannot outlive the request. Clear the timer
 only after the race settles.
 
-Set `redirect: "error"`. Never loop or call `fetch` recursively. Read at most
-1 KiB from the response stream, cancel on overflow, and accept only an object
-with exactly one safe, non-negative integer `baseTokenCount` field.
+Set `redirect: "manual"` because Cloudflare Workers rejects the Fetch-standard
+`redirect: "error"` mode; the mode must not follow redirects. Never loop or call
+`fetch` recursively. Read at most 1 KiB from the response stream, cancel on
+overflow, and accept only an object with exactly one safe, non-negative integer
+`baseTokenCount` field.
 
 - [ ] **Step 4: Verify the HTTP client**
 
