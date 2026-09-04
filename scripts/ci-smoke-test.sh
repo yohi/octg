@@ -77,6 +77,19 @@ safe_error_code() {
   esac
 }
 
+safe_error_route() {
+  local route
+  route=$(header_value "X-OCTG-Route" "$headers_file")
+  case "$route" in
+    error:arithmetic_error|error:internal_error|error:pre_upstream|error:tokenizer_unavailable|error:upstream_uncertain|free_shared|paid_shared|reject:complimentary_quota|reject:duplicate_idempotency_key|reject:model_not_allowed|reject:request_too_large|reject:worker_concurrency)
+      printf '%s' "$route"
+      ;;
+    *)
+      printf '%s' "unknown_route"
+      ;;
+  esac
+}
+
 curl_args=(
   -sS
   --max-time 60
@@ -106,6 +119,7 @@ for attempt in 1 2 3; do
 
   passed=false
   failure_message=$(safe_error_code)
+  failure_route=$(safe_error_route)
   if [[ "$status" == "$expected_http_status" ]]; then
     if [[ "$expected_http_status" == "200" ]]; then
       if jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
@@ -132,7 +146,7 @@ for attempt in 1 2 3; do
     exit 0
   fi
 
-  echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message}" >&2
+  echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message} route=${failure_route}" >&2
   if [[ "$attempt" -lt 3 ]]; then
     sleep 10
   fi
