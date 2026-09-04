@@ -273,6 +273,38 @@ Worker version `80e50d58-f219-4ac3-84e6-b40bdebfe237` で全修正を本番デ�
 ### 解決判定
 
 - §220 の条件 1〜3 は Cloudflare GraphQL メトリクスで確認済み（`exceededResources` ゼロ、CPU limit 内）
-- 条件 4〜9（token budget 算術、reserve/release 契約）は既存テスト（389/389 pass）で担保
+- 条件 4〜9 は、次の個別テストと結果で確認した。`389/389` は `crypto.test.ts` 追加前の集計値である。
 - インシデント **resolved**（2026-09-04 18:00 JST）
 
+### 条件 4〜9 のテスト証跡
+
+2026-09-04 に同一 checkout の `@octg/gateway-worker` で、Vitest `v4.1.11` を使い、次のコマンドを個別に実行した。各コマンドは exit code 0 で終了した。
+
+```bash
+npm test -w apps/gateway-worker -- --reporter=dot test/token-budget.test.ts
+npm test -w apps/gateway-worker -- --reporter=dot test/proxy-failures.test.ts
+npm test -w apps/gateway-worker -- --reporter=dot test/quota-lifecycle.test.ts
+npm test -w apps/gateway-worker -- --reporter=dot test/quota-settle.test.ts
+npm test -w apps/gateway-worker -- --reporter=dot test/quota-controller.test.ts
+npm test -w apps/gateway-worker -- --reporter=dot test/quota-reservation.test.ts
+```
+
+| テストファイル | 結果 |
+| --- | --- |
+| `token-budget.test.ts` | 12/12 passed |
+| `proxy-failures.test.ts` | 43/43 passed |
+| `quota-lifecycle.test.ts` | 20/20 passed |
+| `quota-settle.test.ts` | 11/11 passed |
+| `quota-controller.test.ts` | 35/35 passed |
+| `quota-reservation.test.ts` | 5/5 passed |
+
+条件ごとの対応は次のとおりである。
+
+- **条件 4:** `token-budget.test.ts` の `resolves a fitting REJECT decision`、`resolves a fitting CLAMP decision with the reduced output`、`proxy-failures.test.ts` の `counts Responses opaque reasoning bytes once in the reservation`。結果はそれぞれ上記の 12/12、43/43 passed。
+- **条件 5:** `proxy-failures.test.ts` の `rejects oversized Chat input before quota reservation or upstream fetch`、`rejects oversized Responses input before quota reservation or upstream fetch`、`returns 413 for tokenizer work-limit failures without reservation or upstream contact`、`maps a real tokenizer work-limit RPC result to 413 before reservation`。結果は 43/43 passed。
+- **条件 6:** `proxy-failures.test.ts` の `releases a reservation when upstream configuration is missing`、`fails closed on two unknown reserve outcomes without release or upstream contact`、`quota-lifecycle.test.ts` の `frees a reservation before upstream contact`。結果は 43/43、20/20 passed。
+- **条件 7:** `quota-settle.test.ts` の `moves a reservation to confirmed usage`、`does not double-count a duplicate settlement`、`accounts overage fail-closed and rejects later reservations`、`proxy-failures.test.ts` の `keeps Durable Object settlement authoritative when D1 completion fails`。結果は 11/11、43/43 passed。
+- **条件 8:** `proxy-failures.test.ts` の `marks upstream 5xx as uncertain and passes through the body`、`marks an upstream 4xx uncertain when usage is not provably zero`、`marks network failure as uncertain`、`quota-settle.test.ts` の `settles uncertain usage without double-subtracting its reservation`、`quota-lifecycle.test.ts` の `moves consumed uncertain usage to confirmed`。結果は 43/43、11/11、20/20 passed。
+- **条件 9:** `proxy-failures.test.ts` の `fails closed on two unknown reserve outcomes without release or upstream contact`、`returns 500 without repeating an unknown-reserve mark when its RPC rejects`、`quota-controller.test.ts` の `discovers reserved and uncertain entries with bounded origins`、`moves an unresolved reservation to reserve_unknown exactly once`、`keeps the reserve-unknown entry until an explicit disposition`、`quota-reservation.test.ts` の `returns unknown after both reservation attempts fail`。結果は 43/43、35/35、5/5 passed。
+
+今回追加した `crypto.test.ts` は 3/3 passed。これを含む現在の `@octg/gateway-worker` 全体は 42 test files、392/392 passed である。
