@@ -38,7 +38,7 @@ curl() {
   fi
 
   if [[ "${SMOKE_TEST_MODE:-success}" == "error" ]]; then
-    printf 'X-OCTG-Request-Id: req_01ARZ3NDEKTSV4RRFFQ69G5FAV\r\nX-OCTG-Route: error:internal_error\r\n' > "$headers_file"
+    printf 'X-OCTG-Request-Id: req_01ARZ3NDEKTSV4RRFFQ69G5FAV\r\nX-OCTG-Route: error:internal_error\r\nX-OCTG-Worker-Version: 123e4567-e89b-12d3-a456-426614174000\r\n' > "$headers_file"
     printf '{"error":{"code":"internal_error","message":"Authorization: Bearer response-secret"}}\n' > "$response_file"
     printf '500'
     return 0
@@ -82,6 +82,7 @@ fi
 [[ "$status" -eq 1 ]] || { printf 'unexpected smoke exit status: %s\n' "$status" >&2; exit 1; }
 [[ "$output" == *"message=internal_error"* ]] || { printf 'safe error code was not surfaced\n' >&2; exit 1; }
 [[ "$output" == *"route=error:internal_error"* ]] || { printf 'safe error route was not surfaced\n' >&2; exit 1; }
+[[ "$output" == *"worker_version=123e4567-e89b-12d3-a456-426614174000"* ]] || { printf 'safe worker version was not surfaced\n' >&2; exit 1; }
 [[ "$output" != *"response-secret"* ]] || { printf 'response-derived error leaked to logs\n' >&2; exit 1; }
 
 SMOKE_TEST_MODE=expected-error \

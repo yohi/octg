@@ -90,6 +90,16 @@ safe_error_route() {
   esac
 }
 
+safe_worker_version() {
+  local version
+  version=$(header_value "X-OCTG-Worker-Version" "$headers_file")
+  if [[ "$version" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    printf '%s' "$version"
+  else
+    printf '%s' "unknown_version"
+  fi
+}
+
 curl_args=(
   -sS
   --max-time 60
@@ -120,6 +130,7 @@ for attempt in 1 2 3; do
   passed=false
   failure_message=$(safe_error_code)
   failure_route=$(safe_error_route)
+  failure_worker_version=$(safe_worker_version)
   if [[ "$status" == "$expected_http_status" ]]; then
     if [[ "$expected_http_status" == "200" ]]; then
       if jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then
@@ -146,7 +157,7 @@ for attempt in 1 2 3; do
     exit 0
   fi
 
-  echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message} route=${failure_route}" >&2
+  echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message} route=${failure_route} worker_version=${failure_worker_version}" >&2
   if [[ "$attempt" -lt 3 ]]; then
     sleep 10
   fi
