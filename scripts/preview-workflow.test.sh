@@ -76,6 +76,23 @@ if (restore.includes("wrangler versions deploy")) {
   throw new Error("secret-aware cleanup must not use versions deploy");
 }
 
+const previewSecretCleanup = blockBetween(
+  "      - name: Remove stale Preview Worker Deno Secret",
+  "      - name: Upload worker version",
+);
+if (!previewSecretCleanup.includes("wrangler versions secret list")) {
+  throw new Error("Preview smoke must inspect the latest version secrets before upload");
+}
+if (!previewSecretCleanup.includes("--latest-version")) {
+  throw new Error("Preview smoke must inspect secrets on the latest Worker version");
+}
+if (!previewSecretCleanup.includes("DENO_TOKENIZER_AUTH_TOKEN")) {
+  throw new Error("Preview smoke must remove a stale Deno Worker Secret before upload");
+}
+if (!previewSecretCleanup.includes("wrangler versions secret delete")) {
+  throw new Error("Preview smoke must use the versioned secret delete command for recovery");
+}
+
 const deploy = blockBetween(
   "      - name: Add uploaded version at 0% traffic",
   "      - name: Run smoke test with Version Override",
@@ -241,6 +258,23 @@ if (!denoRestore.includes("wrangler rollback")) {
 }
 if (denoRestore.includes("wrangler versions deploy")) {
   throw new Error("Deno smoke cleanup must not use versions deploy");
+}
+
+const denoSecretCleanup = blockBetween(
+  "      - name: Remove temporary Preview Worker Deno Secret",
+  "      - name: Fail when Deno smoke failed",
+);
+if (!denoSecretCleanup.includes("always()")) {
+  throw new Error("Deno Worker Secret cleanup must run after success or failure");
+}
+if (!denoSecretCleanup.includes("wrangler versions secret delete")) {
+  throw new Error("Deno Worker Secret cleanup must use the versioned secret command");
+}
+if (!denoSecretCleanup.includes("DENO_TOKENIZER_AUTH_TOKEN")) {
+  throw new Error("Deno Worker Secret cleanup must delete DENO_TOKENIZER_AUTH_TOKEN");
+}
+if (denoSecretCleanup.includes("wrangler secret bulk")) {
+  throw new Error("Deno Worker Secret cleanup must not deploy the latest Worker version");
 }
 if (!denoSmoke.includes("Fail when Deno smoke failed")) {
   throw new Error("Deno smoke must fail after cleanup when either route assertion fails");

@@ -136,6 +136,8 @@ jobs:
           delete config.vars.DENO_TOKENIZER_ENDPOINT;
           delete config.vars.DENO_TOKENIZER_THRESHOLD_BYTES;
           delete config.vars.DENO_TOKENIZER_TIMEOUT_MS;
+          // Preview does not run reconciliation cron
+          delete config.triggers;
           await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
           NODE
           echo "config=$PREVIEW_CONFIG_PATH" >> "$GITHUB_OUTPUT"
@@ -171,6 +173,25 @@ jobs:
             exit 1
           fi
           echo "version_id=$current_version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Remove stale Preview Worker Deno Secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+        run: |
+          set -euo pipefail
+          secrets="$(
+            ./node_modules/.bin/wrangler versions secret list \
+              --latest-version \
+              --config "$PREVIEW_CONFIG"
+          )"
+          if [[ "$secrets" == *DENO_TOKENIZER_AUTH_TOKEN* ]]; then
+            ./node_modules/.bin/wrangler versions secret delete \
+              DENO_TOKENIZER_AUTH_TOKEN \
+              --config "$PREVIEW_CONFIG" \
+              --message "Remove stale Preview Deno Secret"
+          fi
 
       - name: Upload worker version
         id: upload
@@ -674,6 +695,19 @@ jobs:
             --config "$PREVIEW_CONFIG" \
             --message "Restore current Preview version after Deno smoke" \
             --yes
+
+      - name: Remove temporary Preview Worker Deno Secret
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}
+          PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
+        run: |
+          set -euo pipefail
+          ./node_modules/.bin/wrangler versions secret delete \
+            DENO_TOKENIZER_AUTH_TOKEN \
+            --config "$PREVIEW_CONFIG" \
+            --message "Remove temporary Preview Deno Secret"
 
       - name: Fail when Deno smoke failed
         if: always() && (steps.invalid-smoke.outcome != 'success' || steps.valid-smoke.outcome != 'success')

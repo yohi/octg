@@ -70,6 +70,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   for (const name of DENO_CONFIG_NAMES) {
     delete config.vars[name];
   }
+  delete config.triggers;
   config.d1_databases = [{
     ...productionDatabase,
     binding: "DB",

@@ -13,6 +13,7 @@ const baseConfig = {
     DENO_TOKENIZER_THRESHOLD_BYTES: "1",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
   },
+  triggers: { crons: ["5 0 * * *"] },
   d1_databases: [{
     binding: "DB",
     database_name: "octg",
@@ -41,9 +42,11 @@ test("builds a DO-only Preview config without Deno values", () => {
   assert.equal(config.vars.DENO_TOKENIZER_ENDPOINT, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_THRESHOLD_BYTES, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_TIMEOUT_MS, undefined);
+  assert.equal(config.triggers, undefined);
   assert.equal(config.d1_databases[0].database_id, validOptions.databaseId);
   assert.notEqual(config, baseConfig);
   assert.equal(baseConfig.vars.DENO_TOKENIZER_ENDPOINT, "https://production-tokenizer.example/tokenize");
+  assert.deepEqual(baseConfig.triggers, { crons: ["5 0 * * *"] });
 });
 
 test("builds a Deno Preview config only from Preview values", () => {
