@@ -86,6 +86,19 @@ describe("resolveDenoTokenizerConfig", () => {
   });
 
   it.each([
+    ["DENO_TOKENIZER_AUTH_TOKEN", { DENO_TOKENIZER_AUTH_TOKEN: "test-secret" }],
+    ["DENO_TOKENIZER_ENDPOINT", { DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/v1/tokenize" }],
+    ["DENO_TOKENIZER_THRESHOLD_BYTES", { DENO_TOKENIZER_THRESHOLD_BYTES: "512" }],
+    ["DENO_TOKENIZER_TIMEOUT_MS", { DENO_TOKENIZER_TIMEOUT_MS: "3000" }],
+  ] as const)("returns invalid when only %s is present without other Deno settings", (_name, environment) => {
+    // Given: an environment where only one Deno setting exists (e.g. a residual secret after baseline deploy).
+    const config = resolveDenoTokenizerConfig({ MAX_INPUT_BYTES: "1024", ...environment });
+
+    // Then: it fails closed as invalid.
+    expect(config).toEqual({ kind: "invalid", maxInputBytes: 1024 });
+  });
+
+  it.each([
     ["an HTTP endpoint", { ...complete, DENO_TOKENIZER_ENDPOINT: "http://tokenizer.example/v1/tokenize" }],
     ["endpoint credentials", { ...complete, DENO_TOKENIZER_ENDPOINT: "https://user:password@tokenizer.example/v1/tokenize" }],
     ["an empty endpoint", { ...complete, DENO_TOKENIZER_ENDPOINT: "" }],

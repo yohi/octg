@@ -48,4 +48,23 @@ describe("GET /v1/models", () => {
       else Reflect.deleteProperty(env, "DENO_TOKENIZER_ENDPOINT");
     }
   });
+
+  it("fails with 500 when only DENO_TOKENIZER_AUTH_TOKEN is present in env (residual secret)", async () => {
+    const original = Object.getOwnPropertyDescriptor(env, "DENO_TOKENIZER_AUTH_TOKEN");
+    Object.defineProperty(env, "DENO_TOKENIZER_AUTH_TOKEN", {
+      value: "residual-secret",
+      configurable: true,
+    });
+
+    try {
+      const response = await SELF.fetch("https://octg.test/v1/models", {
+        headers: { authorization: `Bearer ${TEST_CLIENT_KEY}` },
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+    } finally {
+      if (original) Object.defineProperty(env, "DENO_TOKENIZER_AUTH_TOKEN", original);
+      else Reflect.deleteProperty(env, "DENO_TOKENIZER_AUTH_TOKEN");
+    }
+  });
 });
