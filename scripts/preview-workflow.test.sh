@@ -80,17 +80,14 @@ const previewSecretCleanup = blockBetween(
   "      - name: Remove stale Preview Worker Deno Secret",
   "      - name: Upload worker version",
 );
-if (!previewSecretCleanup.includes("wrangler versions secret list")) {
-  throw new Error("Preview smoke must inspect the latest version secrets before upload");
-}
-if (previewSecretCleanup.includes("--latest-version")) {
-  throw new Error("Preview smoke must not use Wrangler latest-version secret listing");
+if (previewSecretCleanup.includes("wrangler versions secret list")) {
+  throw new Error("Preview smoke must not inspect only the currently deployed secrets");
 }
 if (!previewSecretCleanup.includes("DENO_TOKENIZER_AUTH_TOKEN")) {
   throw new Error("Preview smoke must remove a stale Deno Worker Secret before upload");
 }
 if (!previewSecretCleanup.includes("wrangler versions secret delete")) {
-  throw new Error("Preview smoke must use the versioned secret delete command for recovery");
+  throw new Error("Preview smoke must delete the stale secret from the latest Worker version");
 }
 
 const deploy = blockBetween(

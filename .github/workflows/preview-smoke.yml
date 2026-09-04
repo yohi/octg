@@ -181,16 +181,10 @@ jobs:
           PREVIEW_CONFIG: ${{ steps.preview-config.outputs.config }}
         run: |
           set -euo pipefail
-          secrets="$(
-            ./node_modules/.bin/wrangler versions secret list \
-              --config "$PREVIEW_CONFIG"
-          )"
-          if [[ "$secrets" == *DENO_TOKENIZER_AUTH_TOKEN* ]]; then
-            ./node_modules/.bin/wrangler versions secret delete \
-              DENO_TOKENIZER_AUTH_TOKEN \
-              --config "$PREVIEW_CONFIG" \
-              --message "Remove stale Preview Deno Secret"
-          fi
+          ./node_modules/.bin/wrangler versions secret delete \
+            DENO_TOKENIZER_AUTH_TOKEN \
+            --config "$PREVIEW_CONFIG" \
+            --message "Remove stale Preview Deno Secret"
 
       - name: Upload worker version
         id: upload
