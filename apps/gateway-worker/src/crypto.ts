@@ -23,9 +23,8 @@ const HEX_CHARS = "0123456789abcdef";
 
 function toHex(bytes: Uint8Array): string {
   let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    out += HEX_CHARS[b >> 4] + HEX_CHARS[b & 0xf];
+  for (const b of bytes) {
+    out += HEX_CHARS.charAt(b >> 4) + HEX_CHARS.charAt(b & 0xf);
   }
   return out;
 }

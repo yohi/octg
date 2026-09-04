@@ -151,6 +151,10 @@ type ResourceStageFields = {
   readonly tokenizationNetworkErrorName?: TokenizationNetworkErrorName;
 };
 
+type MutableResourceStageFields = {
+  -readonly [Key in keyof ResourceStageFields]: ResourceStageFields[Key];
+};
+
 function revisionIdOf(env: Env): string {
   const revisionId = env.CF_VERSION_METADATA?.id;
   return typeof revisionId === "string" && revisionId.length > 0 ? revisionId : "local";
@@ -177,7 +181,7 @@ function finishResourceStage(
   fields: ResourceStageFields = {},
   measuredDurationMs?: number,
 ): void {
-  const definedFields: ResourceStageFields = {};
+  const definedFields: MutableResourceStageFields = {};
   if (fields.route !== undefined) definedFields.route = fields.route;
   if (fields.rawBodyBytes !== undefined) definedFields.rawBodyBytes = fields.rawBodyBytes;
   if (fields.rawBodyBytesSource !== undefined) definedFields.rawBodyBytesSource = fields.rawBodyBytesSource;
