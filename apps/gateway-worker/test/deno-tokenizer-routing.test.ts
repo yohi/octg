@@ -302,6 +302,52 @@ describe("Deno tokenizer routing", () => {
     expect(state).toBeDefined();
   });
 
+  it("fails authenticated requests when only DENO_TOKENIZER_AUTH_TOKEN is present (residual secret)", async () => {
+    installTokenizer();
+    let denoCalls = 0;
+    let upstreamCalls = 0;
+    stubFetch({
+      onDenoRequest: () => { denoCalls += 1; },
+      onUpstreamRequest: () => { upstreamCalls += 1; },
+    });
+    setDenoConfig({
+      authToken: denoAuthToken,
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TEST_CLIENT_KEY}` },
+      body: JSON.stringify({
+        model: "gpt-5",
+        messages: [{ role: "user", content: "hello" }],
+        max_completion_tokens: 1,
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body).toMatchObject({ error: { code: "internal_error" } });
+    expect(denoCalls).toBe(0);
+    expect(upstreamCalls).toBe(0);
+
+    const stageEvents = info.mock.calls
+      .map(([arg]) => arg)
+      .filter((arg) => typeof arg === "object" && arg !== null && arg.event === "octg.resource_stage");
+    const finishEvents = stageEvents.filter((arg) => arg.phase === "finish" && arg.stage === "tokenize");
+    expect(finishEvents).toHaveLength(1);
+    expect(finishEvents[0]).toMatchObject({
+      stage: "tokenize",
+      phase: "finish",
+      outcome: "exception",
+      route: "error:tokenizer_unavailable",
+      tokenizationProvider: "deno",
+      tokenizationFailureCategory: "configuration",
+      quotaReserved: false,
+      upstreamReached: false,
+    });
+  });
+
   it.each([
     ["timeout", { kind: "timeout" } as const, "timeout"],
     ["network", { kind: "network" } as const, "network"],
