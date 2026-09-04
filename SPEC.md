@@ -543,9 +543,44 @@ octg/
 
 要件第 43 章の通り、課金 0 円の完全保証はしない。conservative reservation + fail-closed + OpenAI reconciliation の三重防御を採用する。
 
-## 16. Worker リソース制限の観測と条件付き対策（設計済み・未実装）
+## 16. Worker リソース制限の観測と対策
 
-Cloudflare Worker のリソース制限（CPU / memory / 並行負荷）による Error 1102 発生時に、原因確定前に恒久対策を導入しないための観測ゲートと、確認された原因に対応する最小限の対策を設計している。現状では観測結果が得られていないため、以下の対策は実装していない。
+Cloudflare Worker のリソース制限（CPU / memory / 並行負荷）による Error 1102 発生時に、原因確定前に恒久対策を導入しないための観測ゲートと、確認された原因に対応する最小限の対策を設計している。
+
+### 16.0 実施済み CPU 対策（2026-09-04）
+
+フリープランの 10ms CPU 制限による `exceededResources` が確認されたため、Cloudflare GraphQL API でインシデントを観測し、以下を特定・修正して本番デプロイ済み。
+
+**確認された主要因**
+
+| 原因 | 場所 | 影響 |
+| --- | --- | --- |
+| `crypto.subtle.importKey` を毎リクエスト実行 | `src/crypto.ts` | 認証ごとに重い非同期 crypto 操作が発生 |
+| `normalizeChatCompletions` が `hasToolUse()` で全メッセージを 2 回走査 | `packages/shared/src/normalize.ts` | O(n messages) の二重スキャン |
+| `normalizeChatCompletions` / `normalizeResponses` がフィールド列挙に一時配列を都度生成 | `packages/shared/src/normalize.ts` | GC 圧・一時 allocation |
+| `finishResourceStage` で 14 個の `{}` spread を毎回生成 | `src/proxy.ts` | ステージ記録ごとの一時オブジェクト群 |
+| SSE ストリームの全チャンクで `JSON.parse` | `src/stream.ts` | usage 無関係チャンクでの CPU 消費 |
+| `new TextDecoder()` / `new TextEncoder()` を毎回生成 | `src/request-body.ts`、`src/crypto.ts` | per-request allocation |
+
+**適用した修正**
+
+1. `src/crypto.ts`: `importKey` 結果を pepper をキーに isolate スコープでキャッシュ（最重要）。`TextEncoder` をモジュールスコープ singleton に変更。hex encoding を tight loop に変更
+2. `packages/shared/src/normalize.ts`: `isToolUse` 検出をメッセージループ内にインライン化し `hasToolUse()` の二重スキャンを廃止。フィールド null-check を直接 `if` 文に変更して一時配列を排除
+3. `src/proxy.ts`: `finishResourceStage` の spread object 生成を直接 property 代入に変更
+4. `src/stream.ts`: `"usage"` / `"response.completed"` を含まない SSE チャンクの `JSON.parse` をスキップ
+5. `src/request-body.ts`: `TextDecoder` をモジュールスコープ singleton に変更
+
+**結果**（version `80e50d58-f219-4ac3-84e6-b40bdebfe237`）
+
+| メトリクス | 修正前 | 修正後 |
+| --- | --- | --- |
+| `exceededResources` | 多発（10ms cap 到達） | ゼロ |
+| CPU P50 | 10ms（cap） | 2.7ms |
+| CPU P90 | 10ms（cap） | 7.0ms |
+
+`DENO_TOKENIZER_THRESHOLD_BYTES=1` により全トークン化を Deno Deploy へルーティングしており、BPE cutoff（§16.2）は適用していない。
+
+
 
 ### 16.1 観測ゲート
 

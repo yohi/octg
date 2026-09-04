@@ -236,3 +236,43 @@ node scripts/canary-worker-resource-limits.mjs
 いずれかの条件、invocation outcome、revision、または実効 limit が欠ける場合は、解決済み
 とせず、欠けた証跡と failed condition をこの記録へ追記して incident を open のまま維持
 します。
+
+---
+
+## 解決記録（2026-09-04）
+
+### 観測結果
+
+Cloudflare GraphQL API（`workersInvocationsAdaptive`）で次の証跡を確認した。
+
+- `status: "exceededResources"`、`cpuTimeUs` が P50/P90/P99 ともに 10,000μs（10ms cap）
+- `subrequests: 0〜1`（初期段階では認証 D1 クエリ 1 回目を await した直後に上限到達）
+- `DENO_TOKENIZER_THRESHOLD_BYTES=1` 設定後も継続発生
+
+### 確定した根本原因
+
+BPE（tokenization）ではなく、**認証処理と request normalization の同期 CPU 消費**が主因。
+
+| 原因 | 根拠 |
+| --- | --- |
+| `crypto.subtle.importKey` を毎リクエスト実行 | subrequests=1 で死亡 = 認証 D1 await 前後で CPU 消費。pepper は isolate 内で不変なのに毎回 importKey を実行していた |
+| `normalizeChatCompletions` で全メッセージを 2 回走査 | `hasToolUse()` が O(n messages) の二重スキャン |
+| 一時オブジェクトの大量生成 | field 配列・spread `{}`・TextDecoder/Encoder の per-request 生成 |
+| SSE 全チャンクで `JSON.parse` | usage 無関係な大多数のチャンクで CPU を消費 |
+
+### 適用した修正と結果
+
+Worker version `80e50d58-f219-4ac3-84e6-b40bdebfe237` で全修正を本番デプロイ。
+
+| メトリクス | 修正前 | 修正後 |
+| --- | --- | --- |
+| `exceededResources` | 多発 | **ゼロ** |
+| CPU P50 | 10ms（cap） | **2.7ms** |
+| CPU P90 | 10ms（cap） | **7.0ms** |
+
+### 解決判定
+
+- §220 の条件 1〜3 は Cloudflare GraphQL メトリクスで確認済み（`exceededResources` ゼロ、CPU limit 内）
+- 条件 4〜9（token budget 算術、reserve/release 契約）は既存テスト（389/389 pass）で担保
+- インシデント **resolved**（2026-09-04 18:00 JST）
+

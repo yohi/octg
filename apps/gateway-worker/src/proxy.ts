@@ -177,22 +177,21 @@ function finishResourceStage(
   fields: ResourceStageFields = {},
   measuredDurationMs?: number,
 ): void {
-  const definedFields: ResourceStageFields = {
-    ...(fields.route === undefined ? {} : { route: fields.route }),
-    ...(fields.rawBodyBytes === undefined ? {} : { rawBodyBytes: fields.rawBodyBytes }),
-    ...(fields.rawBodyBytesSource === undefined ? {} : { rawBodyBytesSource: fields.rawBodyBytesSource }),
-    ...(fields.rawBodyTruncated === undefined ? {} : { rawBodyTruncated: fields.rawBodyTruncated }),
-    ...(fields.inputBytes === undefined ? {} : { inputBytes: fields.inputBytes }),
-    ...(fields.inputTextBytes === undefined ? {} : { inputTextBytes: fields.inputTextBytes }),
-    ...(fields.opaqueInputBytes === undefined ? {} : { opaqueInputBytes: fields.opaqueInputBytes }),
-    ...(fields.estimationPath === undefined ? {} : { estimationPath: fields.estimationPath }),
-    ...(fields.concurrency === undefined ? {} : { concurrency: fields.concurrency }),
-    ...(fields.quotaReserved === undefined ? {} : { quotaReserved: fields.quotaReserved }),
-    ...(fields.upstreamReached === undefined ? {} : { upstreamReached: fields.upstreamReached }),
-    ...(fields.tokenizationProvider === undefined ? {} : { tokenizationProvider: fields.tokenizationProvider }),
-    ...(fields.tokenizationFailureCategory === undefined ? {} : { tokenizationFailureCategory: fields.tokenizationFailureCategory }),
-    ...(fields.tokenizationNetworkErrorName === undefined ? {} : { tokenizationNetworkErrorName: fields.tokenizationNetworkErrorName }),
-  };
+  const definedFields: ResourceStageFields = {};
+  if (fields.route !== undefined) definedFields.route = fields.route;
+  if (fields.rawBodyBytes !== undefined) definedFields.rawBodyBytes = fields.rawBodyBytes;
+  if (fields.rawBodyBytesSource !== undefined) definedFields.rawBodyBytesSource = fields.rawBodyBytesSource;
+  if (fields.rawBodyTruncated !== undefined) definedFields.rawBodyTruncated = fields.rawBodyTruncated;
+  if (fields.inputBytes !== undefined) definedFields.inputBytes = fields.inputBytes;
+  if (fields.inputTextBytes !== undefined) definedFields.inputTextBytes = fields.inputTextBytes;
+  if (fields.opaqueInputBytes !== undefined) definedFields.opaqueInputBytes = fields.opaqueInputBytes;
+  if (fields.estimationPath !== undefined) definedFields.estimationPath = fields.estimationPath;
+  if (fields.concurrency !== undefined) definedFields.concurrency = fields.concurrency;
+  if (fields.quotaReserved !== undefined) definedFields.quotaReserved = fields.quotaReserved;
+  if (fields.upstreamReached !== undefined) definedFields.upstreamReached = fields.upstreamReached;
+  if (fields.tokenizationProvider !== undefined) definedFields.tokenizationProvider = fields.tokenizationProvider;
+  if (fields.tokenizationFailureCategory !== undefined) definedFields.tokenizationFailureCategory = fields.tokenizationFailureCategory;
+  if (fields.tokenizationNetworkErrorName !== undefined) definedFields.tokenizationNetworkErrorName = fields.tokenizationNetworkErrorName;
   emitResourceStage({
     event: "octg.resource_stage",
     requestId,

@@ -20,6 +20,8 @@ function elapsedSince(start: number): number {
   return Math.max(0, performance.now() - start);
 }
 
+const UTF8_DECODER = new TextDecoder();
+
 function declaredContentLengthOf(request: Pick<Request, "headers" | "body">): number | null {
   const value = request.headers.get("content-length");
   if (value === null) return null;
@@ -101,7 +103,7 @@ export async function readJsonBody(
   const bodyReadMs = elapsedSince(bodyReadStartedAt);
   const parseStartedAt = performance.now();
   try {
-    const body = JSON.parse(new TextDecoder().decode(bytes));
+    const body = JSON.parse(UTF8_DECODER.decode(bytes));
     return {
       ok: true,
       body,
