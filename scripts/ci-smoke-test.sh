@@ -57,6 +57,26 @@ redacted_error_message() {
   printf '%s' "redacted_response"
 }
 
+safe_error_code() {
+  local code=""
+  code=$(jq -r '
+    if (.error | type) == "object" and (.error.code | type) == "string" then
+      .error.code
+    else
+      empty
+    end
+  ' "$response_file" 2>/dev/null || true)
+
+  case "$code" in
+    client_disabled|insufficient_quota|internal_error|invalid_api_key|invalid_request|model_not_allowed|model_requires_paid|origin_not_allowed|request_too_large|worker_concurrency_exceeded)
+      printf '%s' "$code"
+      ;;
+    *)
+      redacted_error_message
+      ;;
+  esac
+}
+
 curl_args=(
   -sS
   --max-time 60
@@ -85,7 +105,7 @@ for attempt in 1 2 3; do
   fi
 
   passed=false
-  failure_message=$(redacted_error_message)
+  failure_message=$(safe_error_code)
   if [[ "$status" == "$expected_http_status" ]]; then
     if [[ "$expected_http_status" == "200" ]]; then
       if jq -e '.choices[0].message.content != null' "$response_file" > /dev/null 2>&1; then

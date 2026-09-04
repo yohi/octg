@@ -39,7 +39,7 @@ curl() {
 
   if [[ "${SMOKE_TEST_MODE:-success}" == "error" ]]; then
     printf 'X-OCTG-Request-Id: req_01ARZ3NDEKTSV4RRFFQ69G5FAV\r\n' > "$headers_file"
-    printf '{"error":{"message":"Authorization: Bearer response-secret"}}\n' > "$response_file"
+    printf '{"error":{"code":"internal_error","message":"Authorization: Bearer response-secret"}}\n' > "$response_file"
     printf '500'
     return 0
   fi
@@ -80,7 +80,7 @@ else
 fi
 
 [[ "$status" -eq 1 ]] || { printf 'unexpected smoke exit status: %s\n' "$status" >&2; exit 1; }
-[[ "$output" == *"message=redacted_response"* ]] || { printf 'smoke error was not fixed-redacted\n' >&2; exit 1; }
+[[ "$output" == *"message=internal_error"* ]] || { printf 'safe error code was not surfaced\n' >&2; exit 1; }
 [[ "$output" != *"response-secret"* ]] || { printf 'response-derived error leaked to logs\n' >&2; exit 1; }
 
 SMOKE_TEST_MODE=expected-error \
