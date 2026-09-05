@@ -4,6 +4,7 @@ import {
   MAX_NORMALIZED_INPUT_BYTES,
   normalizeChatCompletions,
   normalizeResponses,
+  utf8ByteLength,
 } from "../src/index";
 
 describe("MAX_NORMALIZED_INPUT_BYTES", () => {
@@ -550,5 +551,22 @@ describe("normalizeResponses", () => {
         input: [{ type: "reasoning", summary: [{ type: "input_image", image_url: "https://example.invalid/a.png" }], encrypted_content: "opaque" }],
       }),
     ).toEqual({ ok: false, error: "non_text" });
+  });
+});
+
+describe("utf8ByteLength", () => {
+  it("matches TextEncoder byte length across various character classes", () => {
+    const cases = [
+      "",
+      "Hello world!",
+      "日本語テスト文字列（マルチバイト文字）",
+      "Emoji 🚀🌟🔥 and combining chars e\u0301",
+      "A".repeat(100_000),
+      "漢字".repeat(10_000),
+    ];
+    const encoder = new TextEncoder();
+    for (const text of cases) {
+      expect(utf8ByteLength(text)).toBe(encoder.encode(text).byteLength);
+    }
   });
 });
