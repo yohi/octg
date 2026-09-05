@@ -59,6 +59,14 @@ export interface InFlightLease {
   readonly generation: string;
   readonly expiresAtMs: number;
 }
+
+export interface Usage {
+  readonly total_tokens?: number;
+  readonly prompt_tokens?: number;
+  readonly completion_tokens?: number;
+  readonly input_tokens?: number;
+  readonly output_tokens?: number;
+}
 export type AcquireInFlightResult =
   | { readonly ok: true; readonly lease: InFlightLease }
   | { readonly ok: false; readonly reason: "worker_concurrency_exceeded" };

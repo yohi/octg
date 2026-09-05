@@ -569,6 +569,9 @@ Cloudflare Worker のリソース制限（CPU / memory / 並行負荷）によ�
 3. `src/proxy.ts`: `finishResourceStage` の spread object 生成を直接 property 代入に変更
 4. `src/stream.ts`: `"usage"` / `"response.completed"` を含まない SSE チャンクの `JSON.parse` をスキップ
 5. `src/request-body.ts`: `TextDecoder` をモジュールスコープ singleton に変更
+6. `src/stream.ts`: 巨大イベント（`response.completed` 等の全会話履歴を含む 1MB+ ペイロード）のフル `JSON.parse` を廃止し、`extractUsageFromEvent` による `"usage": {...}` ブロックのピンポイント抽出に変更。Responses API の `input_tokens` / `output_tokens` 監査記録に対応
+7. `src/proxy.ts`: 非ストリーミング応答における `upstream.json()` + `JSON.stringify()` を廃止し、`rawText` を直接返却
+8. `packages/shared/src/normalize.ts`: `utf8ByteLength` を追加し、`TextEncoder.encode(str).byteLength` による一時 TypedArray のヒープ確保を `Buffer.byteLength(str)` に置換
 
 **結果**（version `80e50d58-f219-4ac3-84e6-b40bdebfe237`）
 
