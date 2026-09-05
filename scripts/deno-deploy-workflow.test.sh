@@ -217,7 +217,11 @@ jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
   require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
     next unless step.is_a?(Hash)
-    next if job_name == "deploy" && ["Deploy", "Classify failed revision"].include?(step["name"])
+    next if job_name == "deploy" && [
+      "Configure Deno tokenizer runtime Secret",
+      "Deploy",
+      "Classify failed revision",
+    ].include?(step["name"])
 
     step_env = step["env"]
     next unless step_env.is_a?(Hash)
@@ -234,6 +238,40 @@ end
 deploy_step = deploy_steps.find { |step| step.is_a?(Hash) && step["name"] == "Deploy" }
 fail_contract('jobs.deploy must have a named "Deploy" step') unless deploy_step
 deploy_step_index = deploy_steps.index(deploy_step)
+
+runtime_secret_step = deploy_steps.find do |step|
+  step.is_a?(Hash) && step["name"] == "Configure Deno tokenizer runtime Secret"
+end
+fail_contract('jobs.deploy must configure the Deno runtime authentication Secret') unless runtime_secret_step
+runtime_secret_index = deploy_steps.index(runtime_secret_step)
+unless runtime_secret_index < deploy_step_index
+  fail_contract('the Deno runtime Secret must be configured before "Deploy"')
+end
+runtime_secret_env = require_mapping(
+  runtime_secret_step["env"],
+  'the "Configure Deno tokenizer runtime Secret" step env',
+)
+unless runtime_secret_env["DENO_DEPLOY_TOKEN"] == "${{ secrets.DENO_DEPLOY_TOKEN }}"
+  fail_contract('the runtime Secret step must scope DENO_DEPLOY_TOKEN to the step')
+end
+unless runtime_secret_env["PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"] == "${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}"
+  fail_contract('the runtime Secret step must receive the shared Production tokenizer Secret')
+end
+runtime_secret_run = runtime_secret_step["run"].to_s
+[
+  "OCTG_TOKENIZER_AUTH_TOKEN",
+  "deno run -A jsr:@deno/deploy@0.0.9904",
+  "env load",
+  "--replace",
+  "mode: 0o600",
+].each do |fragment|
+  unless runtime_secret_run.include?(fragment)
+    fail_contract('the runtime Secret step is missing: ' + fragment)
+  end
+end
+if runtime_secret_run.include?("${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}")
+  fail_contract('the runtime Secret step must not interpolate Secret expressions in run')
+end
 unless deploy_step["id"] == "deploy"
   fail_contract('the "Deploy" step must have id "deploy" for failed revision diagnostics')
 end

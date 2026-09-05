@@ -138,6 +138,10 @@ describe("Tokenizer RPC proxy integration", () => {
 
     expect(response.status).toBe(500);
     expect(response.headers.get("X-OCTG-Route")).toBe("error:internal_error");
+    const workerVersionId = env.CF_VERSION_METADATA?.id;
+    expect(response.headers.get("X-OCTG-Worker-Version")).toBe(
+      typeof workerVersionId === "string" && workerVersionId.length > 0 ? workerVersionId : "local",
+    );
     expect(response.headers.get("X-OCTG-Quota-Remaining")).toBe(String(before.remaining));
     expect(response.headers.get("Retry-After")).toBeNull();
     expect(body).toMatchObject({

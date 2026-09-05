@@ -17,7 +17,7 @@ chmod 600 .env
 - `Secret` は値をログ、リポジトリ、コマンドライン引数へ置かず、Secret managerまたは対話入力から登録します。
 - `Variable` は機密でない設定値ですが、Production/Previewのリソース境界を越えて共有しません。
 - `DENO_DEPLOY_TOKEN` はDeno Deploy管理用です。Deno tokenizer HTTP認証には使用しません。
-- `DENO_TOKENIZER_AUTH_TOKEN` と `OCTG_TOKENIZER_AUTH_TOKEN` は同じ値ですが、Worker SecretとDeno Deploy runtime Secretとして別々に登録します。
+- Productionの共有Deno認証値はGitHub Environment `deno-production`のSecret `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`として一度だけ登録します。workflowがWorker binding `DENO_TOKENIZER_AUTH_TOKEN`とDeno runtime `OCTG_TOKENIZER_AUTH_TOKEN`へ安全に配布します。
 - ProductionとPreviewではAccount、Worker、D1、Durable Object、Gateway、pepper、client key、Deno applicationを分離します。
 
 ## Quick start（最短手順）
@@ -106,33 +106,34 @@ Worker本体・quota・resource limitを確認してからDeno経路を有効化
    npx wrangler versions deploy --config "$baseline_config"
    ```
 
-   段階的deployを使えない既存Workerでは、baseline設定を用意した後に標準コマンドで既存Deno Secretを
-   削除し、直ちにbaselineをdeployします。`wrangler secret delete`は即時deployを伴うため、通常の
-   更新でSecretsを個別に`wrangler secret put`しないでください。
-
-   ```bash
-   npx wrangler secret delete DENO_TOKENIZER_AUTH_TOKEN \
-     --config "$baseline_config"
-   npx wrangler deploy --config "$baseline_config"
-   ```
+   段階的deployを使えない既存Workerでも、Productionの通常更新はworkflowに限定します。
+   `wrangler secret put`、`wrangler secret delete`、通常の`wrangler deploy`でDeno設定を個別に更新しないでください。
+   緊急復旧で手動操作が避けられない場合だけ、[Deno tokenizer手順](./deno-tokenizer.md)のemergency
+   recoveryにあるversioned deploy手順を使用し、Workerへ登録する認証値は
+   `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`と一致させます。Deno runtime Secretは同じsourceから
+   Deno Deploy workflowで反映します。
 
 4. Deno Deployを使う場合だけ、GitHub Environment `deno-production`へ
-   `DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、Secret `DENO_DEPLOY_TOKEN`を登録します。
-   これはDeno Deployの管理用であり、runtime認証には使いません。
+   `DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、Secret `DENO_DEPLOY_TOKEN`、および
+   Secret `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`を登録します。前者はDeno Deployの管理用、
+   後者はWorkerとDeno runtimeで共有する認証値です。
 5. Productionの既存`OCTG_KEY_PEPPER`を使って専用clientを一度だけseedし、raw keyを
    Secret Managerへ保存します。raw keyをログ、shell history、repositoryへ残しません。
 6. `OCTG_CANARY_URL`と`OCTG_CANARY_CLIENT_KEY`をSecret Managerから注入して初回canaryを実行します。
    このcanaryはCloudflare Durable Object tokenizer経路を対象とし、Worker resource limit、quota
    reserve/settle、upstream到達を確認します。判定基準は「Worker canary設定」と「Quota受け入れ条件」に従います。
-7. 初回canary合格後、Deno Deploy applicationをdeployしてhealthを確認し、Deno runtime Secret
-   `OCTG_TOKENIZER_AUTH_TOKEN`を登録します。`DENO_DEPLOY_TOKEN`とは別のSecretです。
+7. 初回canary合格後、Deno Deploy applicationをdeployしてhealthを確認します。
+   `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`をGitHub Environment `deno-production`へ登録すると、
+   ProductionのDeno Deploy workflowがruntime Secret `OCTG_TOKENIZER_AUTH_TOKEN`へ反映します。
 8. 対象Workerへ`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、
-   `DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、`DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして
-   設定します。`MAX_INPUT_BYTES`はWorkerとDeno Deployへ同じraw値を設定し、4つのDeno integration設定を
+   `DENO_TOKENIZER_TIMEOUT_MS`をRepository Variablesとして登録します。Production Worker workflowは
+   `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`からWorker Secret `DENO_TOKENIZER_AUTH_TOKEN`を同じversionへ
+   注入します。`MAX_INPUT_BYTES`はWorkerとDeno Deployへ同じraw値を設定し、4つのDeno integration設定を
    部分適用しません。
-   既存Workerでは`wrangler versions upload`でinactive versionを作成し、
-   `wrangler versions secret put DENO_TOKENIZER_AUTH_TOKEN`でSecretを同じversionへ追加してから、
-   `wrangler versions deploy`で一度だけactiveにします。通常の`wrangler secret put`を途中で使いません。
+   workflowを実行できない緊急復旧に限り、既存Workerの手動更新では
+   `wrangler versions upload --secrets-file`でinactive versionを作成し、4設定を同じversionへ
+   揃えてから`wrangler versions deploy`で一度だけactiveにします。通常の`wrangler secret put`を
+   途中で使いません。
 9. WorkerとDenoのresolved `MAX_INPUT_BYTES`を照合した後、同じcanary clientでDeno経路canaryを実行します。
     Deno providerの選択、tokenization stage、quota lifecycle、upstream到達を初回canaryと比較します。
 
@@ -314,31 +315,45 @@ Gateway AのCustom Provider URLは利用者側OpenCode設定用であり、Worke
 ### Production Deno integration
 
 Deno tokenizerはopt-inです。全ての設定を一緒に用意し、ProductionとPreviewでendpoint・tokenを分けます。
+Production Workerの3つの非Secret設定はGitHub Repository Variablesをsource of truthとし、
+`.github/workflows/deploy-production.yml`が毎回のProduction deploy前に検証してWorkerへ注入します。
+`apps/gateway-worker/wrangler.jsonc`へ環境固有の値を追加したり、通常運用でWorker dashboardへ手動設定したりしません。
 
 | Name | Kind | Consumer | Set in | Obtain or decide | Apply |
 | --- | --- | --- | --- | --- | --- |
-| `DENO_TOKENIZER_ENDPOINT` | Variable | Gateway Worker | Worker vars | Deno Deployの`/tokenize` HTTPS endpoint | Worker deploy |
-| `DENO_TOKENIZER_AUTH_TOKEN` | Secret | Gateway Worker → Deno | Worker Secret | Deno runtime Secretと同じ値 | 同じversionへ登録後にWorker deploy |
-| `OCTG_TOKENIZER_AUTH_TOKEN` | Secret | Deno tokenizer runtime | Deno Deploy runtime environment | Worker Secretと同じ認証token | Deno app deploy |
-| `DENO_TOKENIZER_THRESHOLD_BYTES` | Variable | Gateway Worker router | Worker vars | 測定済みの有効化threshold | Worker deploy |
-| `DENO_TOKENIZER_TIMEOUT_MS` | Variable | Gateway Worker client | Worker vars | 測定済みのtimeout | Worker deploy |
+| `DENO_TOKENIZER_ENDPOINT` | Variable | Gateway Worker | GitHub Repository Variable | Deno Deployの`/tokenize` HTTPS endpoint | `.github/workflows/deploy-production.yml` |
+| `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` | Secret | Production Worker and Deno Deploy workflows | GitHub Environment `deno-production` | WorkerとDeno runtimeで共有する認証token | 両workflowが各runtimeへ反映 |
+| `DENO_TOKENIZER_AUTH_TOKEN` | Secret | Gateway Worker → Deno | Worker Secret | `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`から生成されるversion Secret | Production Worker workflow |
+| `OCTG_TOKENIZER_AUTH_TOKEN` | Secret | Deno tokenizer runtime | Deno Deploy runtime environment | `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`から反映される認証token | Deno Deploy workflow |
+| `DENO_TOKENIZER_THRESHOLD_BYTES` | Variable | Gateway Worker router | GitHub Repository Variable | 測定済みの有効化threshold | `.github/workflows/deploy-production.yml` |
+| `DENO_TOKENIZER_TIMEOUT_MS` | Variable | Gateway Worker client | GitHub Repository Variable | 測定済みのtimeout | `.github/workflows/deploy-production.yml` |
 
-`.env`の`DENO_TOKENIZER_AUTH_TOKEN`の値を、Worker Secret
-`DENO_TOKENIZER_AUTH_TOKEN`とDeno Deploy runtime Secret
-`OCTG_TOKENIZER_AUTH_TOKEN`の両方へ設定してください。変数名はruntimeごとに異なりますが、
-認証tokenは同じ値です。Deno Deploy runtime SecretはGitHub Environmentやworkflowへ渡しません。
+Productionの共有認証値は`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`としてGitHub Environment
+`deno-production`へ登録してください。Production Worker workflowはこのSecretを一時ファイルから
+Worker version Secret `DENO_TOKENIZER_AUTH_TOKEN`へ注入し、Deno Deploy workflowは同じ値を一時dotenv
+からruntime Secret `OCTG_TOKENIZER_AUTH_TOKEN`へloadします。`DENO_DEPLOY_TOKEN`は管理用の別Secretで、
+tokenizer HTTP認証には使いません。3つの非Secret Production Worker値はGitHub Repository Variablesへ
+登録し、Productionの通常deployではworkflowから注入します。
 
 `MAX_INPUT_BYTES`はProduction Worker vars表にある共有設定です。Deno Deploy runtime environmentにも
 同じraw値を設定し、WorkerとDenoの各deploy後に`resolveMaxInputBytes`でresolved valueを確認します。
 raw値またはresolved valueが一致しない場合は、Deno経路canaryを実行せず設定を修正してください。
 
-`DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
+`DENO_TOKENIZER_*`を部分的に設定するとfail-closedになります。全て未設定の場合だけCloudflare Durable Object tokenizerが使用されます。
+Production workflowは3つの非Secret GitHub Repository VariablesをD1 migration前に検証しますが、
+Worker SecretとDeno runtime Secretの設定も含め、4つのDeno integration設定を一緒に準備してください。
+詳細は[deno-tokenizer.md](./deno-tokenizer.md)を参照してください。
 
 ### Deno Deploy CI
 
 GitHub Actionsの設定画面はリポジトリの **Settings → Secrets and variables → Actions** です。
 Production Worker workflowはリポジトリスコープ、Deno Deploy workflowはEnvironment
 `deno-production`スコープへ設定します。
+
+`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、
+`DENO_TOKENIZER_TIMEOUT_MS`はProduction Worker workflow用のGitHub Repository Variablesです。
+`DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、`DENO_DEPLOY_TOKEN`、
+`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`はGitHub Environment `deno-production`へ登録します。
 
 | Name | Kind | Consumer | Set in | Obtain or decide | Apply |
 | --- | --- | --- | --- | --- | --- |
@@ -347,6 +362,7 @@ Production Worker workflowはリポジトリスコープ、Deno Deploy workflow�
 | `DENO_DEPLOY_ORG` | Variable | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy organization | `deploy-deno-tokenizer.yml` |
 | `DENO_DEPLOY_APP` | Variable | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy application | `deploy-deno-tokenizer.yml` |
 | `DENO_DEPLOY_TOKEN` | Secret | Deno Deploy workflow | GitHub Environment `deno-production` | Deno Deploy access token | `deploy-deno-tokenizer.yml` |
+| `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` | Secret | Production Worker and Deno Deploy workflows | GitHub Environment `deno-production` | Worker/Denoで共有するtokenizer認証値 | 両workflow |
 
 GitHub CLIでは値を表示せず、登録済みの名前だけを確認できます。
 
@@ -359,8 +375,9 @@ gh secret list --env deno-production
 
 Secretの実値はGitHubから読み戻せません。未登録またはローテーション時は、各取得元で
 新しいtokenを発行し、同じ設定画面の **New repository secret** または
-**New environment secret** から登録してください。Deno tokenizerのruntime secret
-`OCTG_TOKENIZER_AUTH_TOKEN`はGitHubではなくDeno Deployへ登録します。
+**New environment secret** から登録してください。ProductionのDeno runtime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`は、`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`からDeno Deploy
+workflowが反映します。通常運用でDeno Deployへ個別登録しないでください。
 
 ### Production canary
 
@@ -415,19 +432,17 @@ raw keyをログへ残さない別の受け渡し方法を用意してくださ�
 
 ### Deno runtime SecretとWorker設定の適用
 
-初回canaryが合格した後、Deno Deploy applicationをdeployしてhealthを確認し、runtime Secret
-`OCTG_TOKENIZER_AUTH_TOKEN`をDeno applicationへ登録します。同時に対象Workerへ
-`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、`DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、
-`DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして設定します。`DENO_DEPLOY_TOKEN`はCI管理用の別Secretです。
+初回canaryが合格した後、Deno Deploy applicationをdeployしてhealthを確認します。
+認証値はGitHub Environment `deno-production`の
+`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`へ一度だけ登録し、Production Worker workflowが
+Worker version Secret `DENO_TOKENIZER_AUTH_TOKEN`へ、Deno Deploy workflowがruntime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`へ同じ値を反映します。`DENO_DEPLOY_TOKEN`はCI管理用の別Secretです。
 `MAX_INPUT_BYTES`は両runtimeへ同じraw値を設定します。4つのDeno integration設定を部分適用しません。
 
-### 再deploy
-
-WorkerのDeno設定を変更した後、次のコマンドでWorkerを再deployします。
-
-```bash
-npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
-```
+通常のDeno設定変更やSecret rotationでは、GitHub Repository VariablesとEnvironment Secretを更新し、
+Production Worker workflowとDeno Deploy workflowを実行します。Worker Secret、Deno runtime Secret、
+通常の`wrangler deploy`を片方だけ手動で更新しないでください。緊急復旧時だけ、
+[Deno tokenizer手順](./deno-tokenizer.md)のversioned deploy手順を使用します。
 
 active versionのVariablesとSecret bindingを確認し、WorkerとDenoのresolved `MAX_INPUT_BYTES`が一致することを確認してから、Deno経路canaryへ進みます。
 
@@ -473,6 +488,22 @@ Preview workflowでの`OCTG_UPSTREAM_API_TOKEN`は、Preview Gateway B（Worker�
 | `OCTG_PREVIEW_KEY_PEPPER` | Secret | Preview D1 / Worker | `.env` → GitHub Secret `OCTG_KEY_PEPPER` | Productionと別のPreview専用pepper | seed + Preview deploy |
 | `GITHUB_REPOSITORY` | Variable | Preview setup CLI | process environment / `.env` | `owner/repository`形式。`--github`時のみ必須 | `setup-preview.zsh --github` |
 | `SMOKE_MODEL` | Variable | Preview smoke workflow | GitHub Environment Variable | 既定値は`gpt-5-mini` | Preview smoke |
+| `DENO_PREVIEW_DEPLOY_ORG` | Variable | Preview Deno workflow | `.env` → GitHub Environment `preview` | Preview専用Deno Deploy organization | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_DEPLOY_APP` | Variable | Preview Deno workflow | `.env` → GitHub Environment `preview` | Preview専用Deno Deploy application | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_TOKENIZER_ENDPOINT` | Variable | Preview Worker router | `.env` → GitHub Environment `preview` | Preview専用Deno `/tokenize` HTTPS endpoint | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES` | Variable | Preview Worker router | `.env` → GitHub Environment `preview` | Preview用の測定済みthreshold | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_TOKENIZER_TIMEOUT_MS` | Variable | Preview Worker client | `.env` → GitHub Environment `preview` | Preview用の測定済みtimeout | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_DEPLOY_TOKEN` | Secret | Preview Deno workflow | `.env` → GitHub Environment `preview` | Preview専用Deno Deploy access token | `setup-preview.zsh --github` |
+| `DENO_PREVIEW_TOKENIZER_AUTH_TOKEN` | Secret | Preview Worker and Deno workflow | `.env` → GitHub Environment `preview` | Preview Worker/Denoで共有する認証値 | `setup-preview.zsh --github` |
+
+Previewの既存`version-smoke`はDeno設定を除去した**DO-only** smokeで、専用Preview D1と
+Cloudflare Durable Object tokenizerを検証します。追加の`deno-version-smoke`は同一リポジトリの
+PRだけで実行し、Preview専用Deno appへdeployした後、invalid-auth versionを`0%`で検証します。
+固定sentinelによるVersion Override requestはHTTP `500`と`error.code=internal_error`を要求し、
+HTTP `200`ならDO fallbackを検出できないため失敗とします。正しいPreview Secretを持つ2つ目の
+versionはHTTP `200`と期待するWorker version headerを要求します。最後に`always()` cleanupで
+開始時のversionへ`wrangler rollback`し、smoke失敗時もPreview trafficを残しません。Fork PRは
+credential-free validationだけを実行します。
 
 ## Quota受け入れ条件と判定基準
 
@@ -517,7 +548,7 @@ Preview setupが生成する一時configにはProductionのDeno tokenizer endpoi
 ## Rotation and recovery
 
 1. 新しいruntime tokenまたはupstream tokenを発行し、既存値を無効化する前に対象Secretへ登録します。
-2. `DENO_TOKENIZER_AUTH_TOKEN`と`OCTG_TOKENIZER_AUTH_TOKEN`は同じ新しい値を、それぞれWorker SecretとDeno Deploy runtime Secretへ登録します。
+2. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`またはPreviewの`DENO_PREVIEW_TOKENIZER_AUTH_TOKEN`を対象Environmentへ登録し、workflowがWorker SecretとDeno Deploy runtime Secretへ反映します。
 3. 既存Workerではinactive versionへSecretとVariablesを揃え、`wrangler versions deploy`で一度だけ反映してからhealth checkとcanaryを実行します。
 4. canaryが合格した後に旧tokenを失効させます。失敗時は4つのDeno integration設定を全てunsetにしてCloudflare Durable Object経路へ戻します。
 5. `OCTG_KEY_PEPPER`の変更はtoken rotationと分離し、既存client keyの再発行またはhash移行を完了してから旧pepperを無効化します。
@@ -527,7 +558,7 @@ Preview setupが生成する一時configにはProductionのDeno tokenizer endpoi
 | Symptom | Check | Recovery |
 | --- | --- | --- |
 | 認証済み`/v1`が`500 internal_error` | Deno 4設定が部分適用されていないか確認 | Denoを使わない場合は4設定を全てunset。使う場合はendpoint、auth、threshold、timeoutを同じversionへ登録 |
-| Denoの`401`またはWorkerのtimeout | `DENO_TOKENIZER_AUTH_TOKEN`と`OCTG_TOKENIZER_AUTH_TOKEN`が一致しているか確認 | Deno runtime SecretとWorker Secretを同じ値へ更新し、health check後にWorkerをdeploy |
+| Denoの`401`またはWorkerのtimeout | 対象Environment SecretからWorker/Deno runtimeへ同じ値が反映されているか確認 | `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`または`DENO_PREVIEW_TOKENIZER_AUTH_TOKEN`を更新し、health check後にworkflowを再実行 |
 | Preview設定にProduction endpointが現れる | Preview configと`setup-preview.zsh`の生成結果を確認 | `DENO_TOKENIZER_*`をPreview configから除去し、Production SecretをPreviewへ登録しない |
 | Secret変更がactive versionへ反映されない | `wrangler versions view <version-id>`でbindingを確認 | inactive versionへ全設定を揃えてから`wrangler versions deploy`を再実行 |
 

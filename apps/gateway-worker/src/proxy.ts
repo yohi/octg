@@ -19,7 +19,7 @@ import {
   errQuotaExceeded,
   errRequestTooLarge,
   errWorkerConcurrencyExceeded,
-  errorResponse,
+  errorResponse as buildErrorResponse,
   MAX_INPUT_TEXT_BYTES,
   nextUtcMidnight,
   normalizeChatCompletions,
@@ -98,6 +98,18 @@ function upstreamResponse(
       ...buildOctgHeaders({ requestId, quota: snapshot, route: "free_shared" }),
       ...workerVersionHeaders(versionMetadata),
     },
+  });
+}
+
+function withWorkerVersion(response: Response, metadata: WorkerVersionMetadataLike | undefined): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(workerVersionHeaders(metadata))) {
+    headers.set(name, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }
 
@@ -249,6 +261,8 @@ export async function handleProxy(
   let inFlightLease: InFlightLease | undefined;
   let reserveStageStartedAt: number | undefined;
   let upstreamStageStartedAt: number | undefined;
+  const errorResponse = (err: Parameters<typeof buildErrorResponse>[0]): Response =>
+    withWorkerVersion(buildErrorResponse(err), env.CF_VERSION_METADATA);
 
   try {
     const auth = await authenticate(request, env, requestId);

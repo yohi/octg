@@ -51,6 +51,11 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
    - Add the Deno access token as the Environment Secret `DENO_DEPLOY_TOKEN`.
      Create it at <https://console.deno.com/account/access-tokens> and do not print
      or commit it.
+   - Add the shared tokenizer authentication value as the Environment Secret
+     `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`. This is separate from
+     `DENO_DEPLOY_TOKEN`; the workflow maps it to the Worker Secret
+     `DENO_TOKENIZER_AUTH_TOKEN` and Deno runtime Secret
+     `OCTG_TOKENIZER_AUTH_TOKEN`.
    - The repository workflow `.github/workflows/deploy-deno-tokenizer.yml` runs
      `deno install`, `deno task check`, and `deno task test` for pull requests and
      deploys only after those checks pass on a push to `master`. Before merging, add
@@ -135,6 +140,13 @@ dependencies through Deno's global cache instead of an uploaded `node_modules` t
    The preparation command writes deployment identity only to the staging copy;
    the checked-out root remains portable and unmodified.
 
+   Preview uses a separate Deno Deploy application and GitHub Environment
+   `preview`. Configure `DENO_PREVIEW_DEPLOY_ORG`, `DENO_PREVIEW_DEPLOY_APP`,
+   `DENO_PREVIEW_TOKENIZER_ENDPOINT`, `DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES`,
+   `DENO_PREVIEW_TOKENIZER_TIMEOUT_MS`, Secret `DENO_PREVIEW_DEPLOY_TOKEN`, and
+   Secret `DENO_PREVIEW_TOKENIZER_AUTH_TOKEN` there. Never copy the Production
+   environment Secret or endpoint into Preview.
+
 ### 1.3 Environment Variables
 
 The complete variable and Secret catalog, including where each value is obtained and
@@ -143,8 +155,13 @@ which environment owns it, is maintained in
 new Production or Preview deployment.
 
 The Deno app requires `OCTG_TOKENIZER_AUTH_TOKEN` as a Deno Deploy runtime Secret.
-The matching Worker Secret is `DENO_TOKENIZER_AUTH_TOKEN`; both values must be the
-same, but the Deno runtime Secret must not be added to GitHub or the workflow.
+For Production, GitHub Environment `deno-production` owns the shared value as
+`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`; the workflows load it into the Deno
+runtime and the Worker binding `DENO_TOKENIZER_AUTH_TOKEN` without printing it.
+For Preview, the corresponding source Secret is
+`DENO_PREVIEW_TOKENIZER_AUTH_TOKEN` in GitHub Environment `preview`. These
+Environment Secrets are separate from the Deno Deploy control token
+`DENO_DEPLOY_TOKEN` or `DENO_PREVIEW_DEPLOY_TOKEN`.
 `MAX_INPUT_BYTES` is optional and must match the corresponding Worker limit.
 
 The shared resolver supplies the default and clamps the effective input limit.
@@ -157,30 +174,45 @@ returns `disabled`, so the Worker keeps using `TokenizerController`. Do not add
 placeholder values: a partial or invalid configuration fails closed with a
 generic `500` for authenticated requests.
 
-After the Deno Deploy service is healthy, configure each Production or Preview
-Worker independently. Add the three non-secret values to that deployment's
-`vars`:
+For Production, register these three non-secret values as GitHub Repository
+Variables in **Settings → Secrets and variables → Actions → Variables**:
 
-```jsonc
-"vars": {
-  // ... existing vars ...
-  "DENO_TOKENIZER_ENDPOINT": "https://<your-project>.deno.dev/tokenize",
-  "DENO_TOKENIZER_THRESHOLD_BYTES": "<measured-positive-integer>",
-  "DENO_TOKENIZER_TIMEOUT_MS": "<measured-positive-integer>"
-}
-```
+- `DENO_TOKENIZER_ENDPOINT`
+- `DENO_TOKENIZER_THRESHOLD_BYTES`
+- `DENO_TOKENIZER_TIMEOUT_MS`
 
-This is a deployment-provisioning step, not a checked-in default. Replace the
-example values with measured values for the target deployment, and do not commit
-the placeholders or the authentication Secret.
+The Production source of truth is the repository Variables, not
+`wrangler.jsonc` or manually maintained Worker dashboard variables.
+`.github/workflows/deploy-production.yml` validates the three values before D1
+migration and injects them into every Production Worker deploy. The workflow
+requires an HTTPS endpoint without URL credentials and positive decimal integer
+values for threshold and timeout. Validation errors identify variable names,
+not their values.
 
-For an existing Worker, use Wrangler 4.92.0 or later and upload the configured
-values to an inactive version, preserving deployment-managed Variables. Add
-the matching Worker secret to that version, and promote it only after all four
-settings are ready:
+Configure each Preview Worker independently; Preview control-plane settings and
+behavior remain separate from the Production repository Variables.
+
+After the Deno Deploy service is healthy, register the matching authentication
+source Secret in the owning GitHub Environment. Production uses
+`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` in `deno-production`; Preview uses
+`DENO_PREVIEW_TOKENIZER_AUTH_TOKEN` in `preview`. The workflows write
+`DENO_TOKENIZER_AUTH_TOKEN` to the Worker version and load
+`OCTG_TOKENIZER_AUTH_TOKEN` into the Deno runtime from temporary mode-`0600`
+files. Raw values are never written to the repository or workflow output.
+
+For an existing Worker, the normal Production path is to update the repository
+Variables and push to `master`. For emergency recovery only, use Wrangler 4.92.0
+or later to upload the same values to an inactive version, preserving
+deployment-managed Variables. Add the matching Worker secret to that version,
+and promote it only after all four settings are ready:
 
 ```bash
-npx wrangler versions upload --keep-vars --config apps/gateway-worker/wrangler.jsonc
+npx wrangler versions upload \
+  --keep-vars \
+  --config apps/gateway-worker/wrangler.jsonc \
+  --var "DENO_TOKENIZER_ENDPOINT:${DENO_TOKENIZER_ENDPOINT}" \
+  --var "DENO_TOKENIZER_THRESHOLD_BYTES:${DENO_TOKENIZER_THRESHOLD_BYTES}" \
+  --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}"
 npx wrangler versions secret put DENO_TOKENIZER_AUTH_TOKEN --config apps/gateway-worker/wrangler.jsonc
 npx wrangler versions deploy --config apps/gateway-worker/wrangler.jsonc
 ```
@@ -190,10 +222,28 @@ for intermediate Deno configuration updates. On a new Worker, use the initial
 creation procedure in [CONFIGURATION.md](./CONFIGURATION.md); `versions upload`
 requires an already-created Worker.
 
-The four values must be configured together. Do not reuse an endpoint or secret
-between Production and Preview.
+Do not place the non-secret values or authentication Secret in
+`apps/gateway-worker/wrangler.jsonc`, and do not print the values in shell
+history or deployment logs. The four values must be configured together. Do not
+reuse an endpoint or secret between Production and Preview.
 
-### 1.5 Threshold Configuration
+### 1.5 Preview CI Flow
+
+The existing Preview `version-smoke` job is **DO-only**: it removes all Deno
+variables and proves the isolated Cloudflare Durable Object path. The separate
+same-repository `deno-version-smoke` job uses only the `preview` Environment and
+the dedicated Preview Deno application.
+
+The Deno job first deploys an invalid-auth Worker version at `0%` traffic and
+uses a fixed non-secret sentinel. The Version Override request must return HTTP `500`
+with `error.code` `internal_error`; HTTP `200` would indicate that the
+Worker silently used the DO fallback. It then deploys a second version with the
+correct Preview authentication Secret and requires HTTP `200` plus the expected
+completion and Worker version header. An `always()` cleanup step restores the
+captured Worker version with `wrangler rollback`, including when either smoke
+assertion fails. Fork pull requests run only secret-free validation.
+
+### 1.6 Threshold Configuration
 
 - `DENO_TOKENIZER_THRESHOLD_BYTES` determines when to use the Deno tokenizer.
   Inputs with UTF-8 byte length greater than or equal to the threshold use Deno.
