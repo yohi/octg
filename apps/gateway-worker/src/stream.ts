@@ -100,12 +100,25 @@ export function proxyStream(
     }
   };
   const parseEvents = (text: string) => {
-    for (const event of text.split("\n\n")) {
-      for (const line of event.split("\n")) {
+    let eventStart = 0;
+    while (eventStart < text.length) {
+      let eventEnd = text.indexOf("\n\n", eventStart);
+      if (eventEnd === -1) eventEnd = text.length;
+      const event = text.slice(eventStart, eventEnd);
+      eventStart = eventEnd + 2;
+
+      if (!event.includes('"usage"') && !event.includes("response.completed")) continue;
+
+      let lineStart = 0;
+      while (lineStart < event.length) {
+        let lineEnd = event.indexOf("\n", lineStart);
+        if (lineEnd === -1) lineEnd = event.length;
+        const line = event.slice(lineStart, lineEnd);
+        lineStart = lineEnd + 1;
+
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
         if (!payload || payload === "[DONE]") continue;
-        if (!payload.includes('"usage"') && !payload.includes("response.completed")) continue;
         try {
           const parsed = JSON.parse(payload) as Record<string, unknown>;
           if (parsed.usage) usage = parsed.usage as Usage;
