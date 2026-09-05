@@ -690,7 +690,7 @@ jobs:
             --yes
 
       - name: Remove temporary Preview Worker Deno Secret
-        if: always()
+        if: always() && steps.preview-config.outputs.config != ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_PREVIEW_ACCOUNT_ID }}

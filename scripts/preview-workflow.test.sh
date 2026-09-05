@@ -264,6 +264,9 @@ const denoSecretCleanup = blockBetween(
 if (!denoSecretCleanup.includes("always()")) {
   throw new Error("Deno Worker Secret cleanup must run after success or failure");
 }
+if (!denoSecretCleanup.includes("if: always() && steps.preview-config.outputs.config != ''")) {
+  throw new Error("Deno Worker Secret cleanup must require a generated Preview config");
+}
 if (!denoSecretCleanup.includes("wrangler versions secret delete")) {
   throw new Error("Deno Worker Secret cleanup must use the versioned secret command");
 }

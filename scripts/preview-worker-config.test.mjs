@@ -1,5 +1,7 @@
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { buildPreviewWorkerConfig } from "./preview-worker-config.mjs";
 
 const baseConfig = {
@@ -31,6 +33,21 @@ const validOptions = {
   standardLimit: "0",
   miniLimit: "50000",
 };
+
+test("runs the CLI when the entrypoint path is relative", () => {
+  const scriptPath = fileURLToPath(new URL("./preview-worker-config.mjs", import.meta.url));
+  const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+  const setRelativeArgv = encodeURIComponent("process.argv[1] = 'scripts/preview-worker-config.mjs';");
+  const result = spawnSync(
+    process.execPath,
+    ["--import", `data:text/javascript,${setRelativeArgv}`, scriptPath],
+    { cwd: projectRoot, encoding: "utf8" },
+  );
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /usage: node scripts\/preview-worker-config\.mjs/);
+});
 
 test("builds a DO-only Preview config without Deno values", () => {
   const config = buildPreviewWorkerConfig(baseConfig, validOptions);

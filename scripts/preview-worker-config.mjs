@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 import { assertPreviewQuotaAllocation } from "./preview-quota-validator.mjs";
 
@@ -134,7 +135,7 @@ function requirePositiveSafeInteger(label, value) {
 }
 
 function isMainModule() {
-  return process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 }
 
 if (isMainModule()) {
