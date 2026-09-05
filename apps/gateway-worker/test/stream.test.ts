@@ -2,7 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import type { QuotaController } from "@octg/quota-controller";
 import type { InFlightLease, QuotaSnapshot } from "@octg/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { proxyStream } from "../src/stream";
+import { extractUsageFromEvent, proxyStream } from "../src/stream";
 
 const controllerFor = (day: string): DurableObjectStub<QuotaController> =>
   env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
@@ -393,4 +393,68 @@ describe("proxy stream finalization", () => {
     expect(releaseInFlight).toHaveBeenCalledTimes(1);
   });
 
+  it("settles and records audit for Responses API streaming response with input_tokens/output_tokens", async () => {
+    const controller = controllerFor("2026-10-18");
+    const requestId = "stream-responses-settlement";
+    await controller.reserve(requestId, 200, 200);
+    const lease = await acquireLease(controller, requestId);
+    const settle = vi.spyOn(controller, "settle").mockResolvedValue({ ok: true });
+    const context = createExecutionContext();
+    const event = 'data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}\n\n';
+    const response = proxyStream(
+      new Response(event, { headers: { "content-type": "text/event-stream" } }),
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    await response.text();
+    await waitOnExecutionContext(context);
+
+    expect(settle).toHaveBeenCalledWith(requestId, 150);
+    await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
+  });
+});
+
+describe("extractUsageFromEvent", () => {
+  it("extracts usage from Chat Completions chunk", () => {
+    const event = 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}';
+    expect(extractUsageFromEvent(event)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 20,
+      total_tokens: 30,
+    });
+  });
+
+  it("extracts usage from Responses API response.completed chunk", () => {
+    const event = 'data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}';
+    expect(extractUsageFromEvent(event)).toEqual({
+      input_tokens: 100,
+      output_tokens: 50,
+      total_tokens: 150,
+    });
+  });
+
+  it("extracts usage from a large payload without parsing entire response", () => {
+    const hugePadding = "x".repeat(100_000);
+    const event = `data: {"type":"response.completed","response":{"id":"resp_1","padding":"${hugePadding}","usage":{"input_tokens":200000,"output_tokens":300,"total_tokens":200300}}}`;
+    expect(extractUsageFromEvent(event)).toEqual({
+      input_tokens: 200000,
+      output_tokens: 300,
+      total_tokens: 200300,
+    });
+  });
+
+  it("returns undefined when usage is null or absent", () => {
+    expect(extractUsageFromEvent('data: {"type":"response.created","response":{"usage":null}}')).toBeUndefined();
+    expect(extractUsageFromEvent('data: {"choices":[{"delta":{"content":"no usage here"}}]}')).toBeUndefined();
+  });
+
+  it("returns undefined when the word usage appears in message content", () => {
+    const event = 'data: {"choices":[{"delta":{"content":"Discussing \\"usage\\": { not real tokens }"}}]}';
+    expect(extractUsageFromEvent(event)).toBeUndefined();
+  });
 });

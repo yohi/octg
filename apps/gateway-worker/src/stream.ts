@@ -1,4 +1,4 @@
-import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot } from "@octg/shared";
+import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot, type Usage } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
@@ -6,7 +6,57 @@ import type { ResourceStageOutcome } from "./resource-observation";
 import { workerVersionHeaders } from "./version-metadata";
 
 type Stub = DurableObjectStub<QuotaController>;
-type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+export type { Usage };
+
+export function extractUsageFromEvent(event: string): Usage | undefined {
+  let searchStart = 0;
+  while (searchStart < event.length) {
+    const usageKeyIndex = event.indexOf('"usage"', searchStart);
+    if (usageKeyIndex === -1) break;
+    searchStart = usageKeyIndex + 7;
+
+    const colonIndex = event.indexOf(":", searchStart);
+    if (colonIndex === -1 || colonIndex - searchStart > 20) continue;
+
+    let braceOpen = -1;
+    for (let i = colonIndex + 1; i < event.length && i < colonIndex + 20; i++) {
+      const ch = event.charCodeAt(i);
+      if (ch === 123) {
+        braceOpen = i;
+        break;
+      }
+      if (ch !== 32 && ch !== 9 && ch !== 10 && ch !== 13) break;
+    }
+    if (braceOpen === -1) continue;
+
+    let depth = 0;
+    let braceClose = -1;
+    for (let i = braceOpen; i < event.length; i++) {
+      const ch = event.charCodeAt(i);
+      if (ch === 123) {
+        depth++;
+      } else if (ch === 125) {
+        depth--;
+        if (depth === 0) {
+          braceClose = i;
+          break;
+        }
+      }
+    }
+    if (braceClose === -1) continue;
+
+    try {
+      const snippet = event.slice(braceOpen, braceClose + 1);
+      const parsed = JSON.parse(snippet) as Record<string, unknown>;
+      if (typeof parsed.total_tokens === "number") {
+        return parsed as Usage;
+      }
+    } catch {
+      // continue searching
+    }
+  }
+  return undefined;
+}
 
 export interface StreamLeaseOptions {
   readonly lease: InFlightLease;
@@ -81,10 +131,12 @@ export function proxyStream(
           onFinalized?.(outcome);
           return;
         }
+        const inputTokens = usage.prompt_tokens ?? usage.input_tokens;
+        const outputTokens = usage.completion_tokens ?? usage.output_tokens;
         await completeRequestAuditBestEffort(env, requestId, {
           status: "completed",
-          inputTokens: usage.prompt_tokens,
-          outputTokens: usage.completion_tokens,
+          inputTokens,
+          outputTokens,
           totalTokens: usage.total_tokens,
           billingClass: "free",
         }, inserted);
@@ -109,23 +161,31 @@ export function proxyStream(
 
       if (!event.includes('"usage"') && !event.includes("response.completed")) continue;
 
-      let lineStart = 0;
-      while (lineStart < event.length) {
-        let lineEnd = event.indexOf("\n", lineStart);
-        if (lineEnd === -1) lineEnd = event.length;
-        const line = event.slice(lineStart, lineEnd);
-        lineStart = lineEnd + 1;
+      const extracted = extractUsageFromEvent(event);
+      if (extracted) {
+        usage = extracted;
+        continue;
+      }
 
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(payload) as Record<string, unknown>;
-          if (parsed.usage) usage = parsed.usage as Usage;
-          const response = parsed.response as { usage?: Usage } | undefined;
-          if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
-        } catch {
-          continue;
+      if (event.length < 2048) {
+        let lineStart = 0;
+        while (lineStart < event.length) {
+          let lineEnd = event.indexOf("\n", lineStart);
+          if (lineEnd === -1) lineEnd = event.length;
+          const line = event.slice(lineStart, lineEnd);
+          lineStart = lineEnd + 1;
+
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            if (parsed.usage) usage = parsed.usage as Usage;
+            const response = parsed.response as { usage?: Usage } | undefined;
+            if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
+          } catch {
+            continue;
+          }
         }
       }
     }
