@@ -106,15 +106,12 @@ Worker本体・quota・resource limitを確認してからDeno経路を有効化
    npx wrangler versions deploy --config "$baseline_config"
    ```
 
-   段階的deployを使えない既存Workerでは、baseline設定を用意した後に標準コマンドで既存Deno Secretを
-   削除し、直ちにbaselineをdeployします。`wrangler secret delete`は即時deployを伴うため、通常の
-   更新でSecretsを個別に`wrangler secret put`しないでください。
-
-   ```bash
-   npx wrangler secret delete DENO_TOKENIZER_AUTH_TOKEN \
-     --config "$baseline_config"
-   npx wrangler deploy --config "$baseline_config"
-   ```
+   段階的deployを使えない既存Workerでも、Productionの通常更新はworkflowに限定します。
+   `wrangler secret put`、`wrangler secret delete`、通常の`wrangler deploy`でDeno設定を個別に更新しないでください。
+   緊急復旧で手動操作が避けられない場合だけ、[Deno tokenizer手順](./deno-tokenizer.md)のemergency
+   recoveryにあるversioned deploy手順を使用し、Workerへ登録する認証値は
+   `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`と一致させます。Deno runtime Secretは同じsourceから
+   Deno Deploy workflowで反映します。
 
 4. Deno Deployを使う場合だけ、GitHub Environment `deno-production`へ
    `DENO_DEPLOY_ORG`、`DENO_DEPLOY_APP`、Secret `DENO_DEPLOY_TOKEN`、および
@@ -133,9 +130,10 @@ Worker本体・quota・resource limitを確認してからDeno経路を有効化
    `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`からWorker Secret `DENO_TOKENIZER_AUTH_TOKEN`を同じversionへ
    注入します。`MAX_INPUT_BYTES`はWorkerとDeno Deployへ同じraw値を設定し、4つのDeno integration設定を
    部分適用しません。
-   既存Workerの手動更新では`wrangler versions upload --secrets-file`でinactive versionを作成し、
-   4設定を同じversionへ揃えてから`wrangler versions deploy`で一度だけactiveにします。通常の
-   `wrangler secret put`を途中で使いません。
+   workflowを実行できない緊急復旧に限り、既存Workerの手動更新では
+   `wrangler versions upload --secrets-file`でinactive versionを作成し、4設定を同じversionへ
+   揃えてから`wrangler versions deploy`で一度だけactiveにします。通常の`wrangler secret put`を
+   途中で使いません。
 9. WorkerとDenoのresolved `MAX_INPUT_BYTES`を照合した後、同じcanary clientでDeno経路canaryを実行します。
     Deno providerの選択、tokenization stage、quota lifecycle、upstream到達を初回canaryと比較します。
 
@@ -377,8 +375,9 @@ gh secret list --env deno-production
 
 Secretの実値はGitHubから読み戻せません。未登録またはローテーション時は、各取得元で
 新しいtokenを発行し、同じ設定画面の **New repository secret** または
-**New environment secret** から登録してください。Deno tokenizerのruntime secret
-`OCTG_TOKENIZER_AUTH_TOKEN`はGitHubではなくDeno Deployへ登録します。
+**New environment secret** から登録してください。ProductionのDeno runtime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`は、`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`からDeno Deploy
+workflowが反映します。通常運用でDeno Deployへ個別登録しないでください。
 
 ### Production canary
 
@@ -433,19 +432,17 @@ raw keyをログへ残さない別の受け渡し方法を用意してくださ�
 
 ### Deno runtime SecretとWorker設定の適用
 
-初回canaryが合格した後、Deno Deploy applicationをdeployしてhealthを確認し、runtime Secret
-`OCTG_TOKENIZER_AUTH_TOKEN`をDeno applicationへ登録します。同時に対象Workerへ
-`DENO_TOKENIZER_ENDPOINT`、`DENO_TOKENIZER_THRESHOLD_BYTES`、`DENO_TOKENIZER_TIMEOUT_MS`をVariablesとして、
-`DENO_TOKENIZER_AUTH_TOKEN`をWorker Secretとして設定します。`DENO_DEPLOY_TOKEN`はCI管理用の別Secretです。
+初回canaryが合格した後、Deno Deploy applicationをdeployしてhealthを確認します。
+認証値はGitHub Environment `deno-production`の
+`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`へ一度だけ登録し、Production Worker workflowが
+Worker version Secret `DENO_TOKENIZER_AUTH_TOKEN`へ、Deno Deploy workflowがruntime Secret
+`OCTG_TOKENIZER_AUTH_TOKEN`へ同じ値を反映します。`DENO_DEPLOY_TOKEN`はCI管理用の別Secretです。
 `MAX_INPUT_BYTES`は両runtimeへ同じraw値を設定します。4つのDeno integration設定を部分適用しません。
 
-### 再deploy
-
-WorkerのDeno設定を変更した後、次のコマンドでWorkerを再deployします。
-
-```bash
-npx wrangler deploy --config apps/gateway-worker/wrangler.jsonc
-```
+通常のDeno設定変更やSecret rotationでは、GitHub Repository VariablesとEnvironment Secretを更新し、
+Production Worker workflowとDeno Deploy workflowを実行します。Worker Secret、Deno runtime Secret、
+通常の`wrangler deploy`を片方だけ手動で更新しないでください。緊急復旧時だけ、
+[Deno tokenizer手順](./deno-tokenizer.md)のversioned deploy手順を使用します。
 
 active versionのVariablesとSecret bindingを確認し、WorkerとDenoのresolved `MAX_INPUT_BYTES`が一致することを確認してから、Deno経路canaryへ進みます。
 

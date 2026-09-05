@@ -70,7 +70,7 @@ test("builds a DO-only Preview config without Deno values", () => {
     workerName: "octg-gateway-preview",
     upstreamBaseUrl: "https://gateway.example.test/openai",
     standardLimit: "0",
-    miniLimit: "100000",
+    miniLimit: "50000",
   });
   assert.equal(config.vars.DENO_TOKENIZER_ENDPOINT, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_THRESHOLD_BYTES, undefined);
@@ -85,7 +85,7 @@ test("builds a Deno Preview config only from Preview values", () => {
     workerName: "octg-gateway-preview",
     upstreamBaseUrl: "https://gateway.example.test/openai",
     standardLimit: "0",
-    miniLimit: "100000",
+    miniLimit: "50000",
     deno: {
       endpoint: "https://preview-tokenizer.deno.dev/tokenize",
       thresholdBytes: "1",
