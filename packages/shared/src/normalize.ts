@@ -171,7 +171,7 @@ export function normalizeResponses(
   maxInputBytes = MAX_NORMALIZED_INPUT_BYTES,
 ): NormalizeResult {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid_body" };
-  const value = normalizeResponsesUpstreamBody(body as Record<string, unknown>);
+  const value = body as Record<string, unknown>;
   if (typeof value.model !== "string" || value.model.length === 0 || value.input === undefined) {
     return { ok: false, error: "invalid_body" };
   }
@@ -311,11 +311,21 @@ export function normalizeResponses(
 }
 
 export function normalizeResponsesUpstreamBody(body: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(body.input)) return { ...body };
-  return {
-    ...body,
-    input: body.input.map((item) => normalizeResponsesInputItem(item)),
-  };
+  if (!Array.isArray(body.input)) return body;
+  let newItems: unknown[] | undefined;
+  for (let i = 0; i < body.input.length; i++) {
+    const item = body.input[i];
+    const normalized = normalizeResponsesInputItem(item);
+    if (normalized !== item) {
+      if (!newItems) {
+        newItems = body.input.slice(0, i);
+      }
+      newItems.push(normalized);
+    } else if (newItems) {
+      newItems.push(item);
+    }
+  }
+  return newItems ? { ...body, input: newItems } : body;
 }
 
 function normalizeResponsesInputItem(item: unknown): unknown {
@@ -324,22 +334,34 @@ function normalizeResponsesInputItem(item: unknown): unknown {
   if (value.type === undefined || value.type === "message") {
     const role = value.role;
     if (role !== "assistant" && role !== "developer" && role !== "system" && role !== "user") return item;
-    return {
-      ...value,
-      content: normalizeResponsesTextParts(value.content, role === "assistant" ? "output_text" : "input_text"),
-    };
+    const content = normalizeResponsesTextParts(value.content, role === "assistant" ? "output_text" : "input_text");
+    return content !== value.content ? { ...value, content } : item;
   }
   if (value.type === "function_call_output") {
-    return { ...value, output: normalizeResponsesTextParts(value.output, "input_text") };
+    const output = normalizeResponsesTextParts(value.output, "input_text");
+    return output !== value.output ? { ...value, output } : item;
   }
   return item;
 }
 
 function normalizeResponsesTextParts(content: unknown, textPartType: ResponseTextPartType): unknown {
   if (!Array.isArray(content)) return content;
-  return content.map((part) => {
-    if (typeof part !== "object" || part === null || Array.isArray(part)) return part;
-    const value = part as Record<string, unknown>;
-    return value.type === "text" ? { ...value, type: textPartType } : part;
-  });
+  let newParts: unknown[] | undefined;
+  for (let i = 0; i < content.length; i++) {
+    const part = content[i];
+    if (typeof part === "object" && part !== null && !Array.isArray(part)) {
+      const value = part as Record<string, unknown>;
+      if (value.type === "text") {
+        if (!newParts) {
+          newParts = content.slice(0, i);
+        }
+        newParts.push({ ...value, type: textPartType });
+        continue;
+      }
+    }
+    if (newParts) {
+      newParts.push(part);
+    }
+  }
+  return newParts ?? content;
 }
