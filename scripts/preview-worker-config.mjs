@@ -98,11 +98,23 @@ function validatePreviewDenoConfig(deno, productionEndpoint) {
 
   const { endpoint, thresholdBytes, timeoutMs } = deno;
   requireHttpsEndpoint("Deno Preview endpoint", endpoint);
-  if (typeof productionEndpoint === "string" && endpoint.trim() === productionEndpoint.trim()) {
+  const normalizedProductionEndpoint = typeof productionEndpoint === "string"
+    ? normalizeEndpoint(productionEndpoint)
+    : undefined;
+  if (normalizedProductionEndpoint !== undefined &&
+      new URL(endpoint.trim()).href === normalizedProductionEndpoint) {
     throw new Error("Production Deno endpoint must not be used in Preview configuration");
   }
   requirePositiveSafeInteger("Deno Preview threshold", thresholdBytes);
   requirePositiveSafeInteger("Deno Preview timeout", timeoutMs);
+}
+
+function normalizeEndpoint(value) {
+  try {
+    return new URL(value.trim()).href;
+  } catch {
+    return undefined;
+  }
 }
 
 function requireNonEmpty(label, value) {

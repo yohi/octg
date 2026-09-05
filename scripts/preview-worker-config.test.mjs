@@ -112,6 +112,52 @@ test("rejects a Preview Deno endpoint that is the Production endpoint", () => {
   );
 });
 
+test("rejects Preview endpoints equivalent to the Production endpoint", () => {
+  for (const [productionEndpoint, previewEndpoint] of [
+    [
+      "https://production-tokenizer.example/tokenize",
+      "HTTPS://PRODUCTION-TOKENIZER.EXAMPLE/tokenize",
+    ],
+    [
+      "https://production-tokenizer.example:443/tokenize",
+      "https://production-tokenizer.example/tokenize",
+    ],
+  ]) {
+    const config = {
+      ...baseConfig,
+      vars: { ...baseConfig.vars, DENO_TOKENIZER_ENDPOINT: productionEndpoint },
+    };
+    assert.throws(
+      () => buildPreviewWorkerConfig(config, {
+        ...validOptions,
+        deno: {
+          endpoint: previewEndpoint,
+          thresholdBytes: "1",
+          timeoutMs: "5000",
+        },
+      }),
+      /Production Deno endpoint/,
+    );
+  }
+});
+
+test("preserves Preview endpoint validation for non-string Production endpoints", () => {
+  for (const productionEndpoint of [undefined, null, 123]) {
+    const config = {
+      ...baseConfig,
+      vars: { ...baseConfig.vars, DENO_TOKENIZER_ENDPOINT: productionEndpoint },
+    };
+    assert.doesNotThrow(() => buildPreviewWorkerConfig(config, {
+      ...validOptions,
+      deno: {
+        endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+        thresholdBytes: "1",
+        timeoutMs: "5000",
+      },
+    }));
+  }
+});
+
 test("rejects a Preview quota allocation over the provider ceiling", () => {
   assert.throws(
     () => buildPreviewWorkerConfig(baseConfig, {
