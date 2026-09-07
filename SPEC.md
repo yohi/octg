@@ -569,6 +569,13 @@ Cloudflare Worker のリソース制限（CPU / memory / 並行負荷）によ�
 3. `src/proxy.ts`: `finishResourceStage` の spread object 生成を直接 property 代入に変更
 4. `src/stream.ts`: `"usage"` / `"response.completed"` を含まない SSE チャンクの `JSON.parse` をスキップ
 5. `src/request-body.ts`: `TextDecoder` をモジュールスコープ singleton に変更
+6. `src/stream.ts`: 巨大イベント（`response.completed` 等の全会話履歴を含む 1MB+ ペイロード）のフル `JSON.parse` を廃止し、`extractUsageFromEvent` による `"usage": {...}` ブロックのピンポイント抽出に変更。Responses API の `input_tokens` / `output_tokens` 監査記録に対応
+7. `src/proxy.ts`: 非ストリーミング応答における `upstream.json()` + `JSON.stringify()` を廃止し、`rawText` を直接返却
+8. `packages/shared/src/normalize.ts`: `utf8ByteLength` を追加し、`TextEncoder.encode(str).byteLength` による一時 TypedArray のヒープ確保を `Buffer.byteLength(str)` に置換
+9. `src/request-body.ts`: `new Uint8Array` 手動確保・コピーを廃止し、`Buffer.concat(chunks, length).toString("utf-8")` による C++ ネイティブ結合化。生テキスト `rawText` を保持
+10. `src/stream.ts`: 途中の全 SSE チャンク（`usage` を含まない 99.9% のトークンチャンク）に対する文字列デコード・`+=` 文字列結合・スライスを完全排除。ASCII バイトスキャンとスライディングウィンドウによるピンポイント抽出へ刷新し、1MB 超イベントの全バッファリングとストリーミング中の CPU 浪費（78ms〜338ms）を解消
+11. `packages/shared/src/normalize.ts`: `appendSerializedField` で対象フィールドが `string` の場合に不要な `JSON.stringify` をスキップ
+12. `src/upstream.ts`: `callUpstream` で string の body が渡された場合に不要な `JSON.stringify` をスキップするよう対応
 
 **結果**（version `80e50d58-f219-4ac3-84e6-b40bdebfe237`）
 
