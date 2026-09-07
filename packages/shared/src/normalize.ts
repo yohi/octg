@@ -68,6 +68,10 @@ function walkContent(content: unknown, allowedTypes: ReadonlySet<string>, unknow
 
 function appendSerializedField(texts: string[], field: unknown): NormalizeResult | null {
   if (field === undefined || field === null) return null;
+  if (typeof field === "string") {
+    texts.push(field);
+    return null;
+  }
   try {
     const serialized = JSON.stringify(field);
     if (serialized !== undefined) texts.push(serialized);
