@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import * as ts from "typescript";
@@ -10,6 +10,16 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 
 function read(relativePath) {
   return readFileSync(join(root, relativePath), "utf8");
+}
+
+function markdownFiles(directory, relativeDirectory = "") {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    if ([".git", ".codegraph", "node_modules"].includes(entry.name)) return [];
+    const relativePath = join(relativeDirectory, entry.name);
+    const absolutePath = join(directory, entry.name);
+    if (entry.isDirectory()) return markdownFiles(absolutePath, relativePath);
+    return entry.isFile() && entry.name.endsWith(".md") ? [relativePath] : [];
+  });
 }
 
 test("configuration documentation lists the complete Deno tokenizer setting group", () => {
@@ -49,6 +59,26 @@ test("Deno documentation separates deployment authentication from runtime authen
   assert.match(denoDocumentation, /`OCTG_TOKENIZER_AUTH_TOKEN`: Deno runtime secret/);
   assert.match(environmentTemplate, /three non-secret Production Worker values.*GitHub Actions\s+Repository\s+Variables/s);
   assert.match(environmentTemplate, /PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN/);
+});
+
+test("canonical documentation retains tokenizer rollout and future-work boundaries", () => {
+  const specification = read("SPEC.md");
+  const denoDocumentation = read("docs/deno-tokenizer.md");
+  const operations = read("docs/operations.md");
+  const roadmap = read("docs/roadmap.md");
+  const readme = read("README.md");
+
+  assert.match(specification, /docs\/roadmap\.md/);
+  assert.match(readme, /docs\/roadmap\.md/);
+  assert.match(denoDocumentation, /approximately 74k-token class/);
+  assert.match(denoDocumentation, /invalid-auth/);
+  assert.match(denoDocumentation, /wrangler rollback/);
+  assert.match(operations, /tokenizer_init/);
+  assert.match(operations, /tokenizer_encode/);
+  assert.match(operations, /concurrency 1/);
+  assert.match(operations, /concurrency 2/);
+  assert.match(roadmap, /PAID_SHARED/);
+  assert.match(roadmap, /TokenizerController sharding/);
 });
 
 test("Preview configuration keeps its Deno control plane separate from Production", () => {
@@ -92,22 +122,8 @@ test("Preview quota examples stay within the provider ceilings", () => {
   }
 });
 
-test("reader-facing documentation keeps relative links resolvable", () => {
-  const documentationFiles = [
-    "README.md",
-    "README.ja.md",
-    "SPEC.md",
-    "docs/configuration.md",
-    "docs/configuration.ja.md",
-    "docs/deployment.md",
-    "docs/deployment.ja.md",
-    "docs/deno-tokenizer.md",
-    "docs/operations.md",
-    "docs/cloudflare-ai-gateway-custom-provider.md",
-    "docs/cloudflare-ai-gateway-custom-provider.ja.md",
-    "docs/troubleshooting-503-worker-resource-limits.md",
-    "docs/troubleshooting-503-worker-resource-limits.ja.md",
-  ];
+test("all Markdown documentation keeps relative links resolvable", () => {
+  const documentationFiles = markdownFiles(root);
   const unresolved = [];
 
   for (const relativePath of documentationFiles) {
@@ -118,7 +134,7 @@ test("reader-facing documentation keeps relative links resolvable", () => {
         continue;
       }
 
-      const targetPath = join(root, relativePath, "..");
+      const targetPath = dirname(join(root, relativePath));
       const resolvedPath = join(targetPath, target);
       if (!existsSync(resolvedPath)) {
         unresolved.push(`${relativePath} -> ${target}`);
