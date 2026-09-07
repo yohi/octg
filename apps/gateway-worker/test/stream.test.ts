@@ -418,24 +418,17 @@ describe("proxy stream finalization", () => {
     await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
   });
 
-  it("settles and records audit when usage event is split across chunk boundaries", async () => {
-    const controller = controllerFor("2026-10-19");
-    const requestId = "stream-split-boundary-settlement";
+  const runStreamSettlementTest = async (
+    requestId: string,
+    day: string,
+    stream: ReadableStream<Uint8Array>,
+    expectedSettledTokens: number,
+  ) => {
+    const controller = controllerFor(day);
     await controller.reserve(requestId, 200, 200);
     const lease = await acquireLease(controller, requestId);
     const settle = vi.spyOn(controller, "settle").mockResolvedValue({ ok: true });
     const context = createExecutionContext();
-
-    const chunk1 = 'data: {"type":"response.completed","response":{"id":"resp_boundary","us';
-    const chunk2 = 'age":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}\n\n';
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controllerStream) {
-        controllerStream.enqueue(new TextEncoder().encode(chunk1));
-        controllerStream.enqueue(new TextEncoder().encode(chunk2));
-        controllerStream.close();
-      },
-    });
 
     const response = proxyStream(
       new Response(stream, { headers: { "content-type": "text/event-stream" } }),
@@ -450,8 +443,45 @@ describe("proxy stream finalization", () => {
     await response.text();
     await waitOnExecutionContext(context);
 
-    expect(settle).toHaveBeenCalledWith(requestId, 150);
+    expect(settle).toHaveBeenCalledWith(requestId, expectedSettledTokens);
     await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
+  };
+
+  it("settles and records audit when usage event is split across chunk boundaries", async () => {
+    const chunk1 = 'data: {"type":"response.completed","response":{"id":"resp_boundary","us';
+    const chunk2 = 'age":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}\n\n';
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(chunk1));
+        c.enqueue(new TextEncoder().encode(chunk2));
+        c.close();
+      },
+    });
+    await runStreamSettlementTest("stream-split-boundary-settlement", "2026-10-19", stream, 150);
+  });
+
+  it("settles correctly when output chunks contain misleading usage text before the final usage chunk", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"code: \\"usage\\": {\\\"bad\\\": true}\\nresponse.completed"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"total_tokens":75}}\n\n'));
+        c.close();
+      },
+    });
+    await runStreamSettlementTest("stream-misleading-usage-text", "2026-10-20", stream, 75);
+  });
+
+  it("settles correctly when earlier stream chunks exceed the pruning threshold", async () => {
+    const largeChunk = new TextEncoder().encode('data: {"choices":[{"delta":{"content":"' + "x".repeat(1024) + '"}}]}\n\n');
+    const finalChunk = new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}\n\n');
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (let i = 0; i < 70; i++) c.enqueue(largeChunk);
+        c.enqueue(finalChunk);
+        c.close();
+      },
+    });
+    await runStreamSettlementTest("stream-pruning-settlement", "2026-10-21", stream, 150);
   });
 });
 

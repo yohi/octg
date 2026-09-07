@@ -161,18 +161,35 @@ Deno.test("returns 401 for an invalid bearer token before reading the body", asy
   assertEquals(request.bodyUsed, false);
 });
 
-Deno.test("returns 415 for a non-JSON content type", async () => {
+Deno.test("returns 415 for an unsupported content type", async () => {
   const fixture = createFixture();
   const request = new Request(tokenizeUrl, {
     method: "POST",
     headers: {
       authorization: `Bearer ${authToken}`,
-      "content-type": "text/plain",
+      "content-type": "application/xml",
+    },
+    body: "<xml></xml>",
+  });
+
+  await expectRejection({ fixture, request, status: 415 });
+});
+
+Deno.test("returns token count for text/plain content type", async () => {
+  const fixture = createFixture();
+  const request = new Request(tokenizeUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "text/plain; charset=utf-8",
     },
     body: "hello",
   });
 
-  await expectRejection({ fixture, request, status: 415 });
+  const response = await fixture.handler(request);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), { baseTokenCount: 7 });
+  assertEquals(fixture.calls(), 1);
 });
 
 Deno.test("returns 400 for malformed JSON", async () => {
