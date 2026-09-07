@@ -1,310 +1,109 @@
-<!-- markdownlint-disable MD013 MD032 -->
+# 503 / Cloudflare Error 1102 Incident Record
 
-# OCTG 503 / Cloudflare Error 1102 調査記録
+[日本語](./troubleshooting-503-worker-resource-limits.ja.md)
 
-## インシデント事実
+This document preserves the evidence and lessons from the OCTG Worker resource-limit incident observed on 2026-08-16. It is an incident record, not the canonical description of the current request architecture.
 
-2026-08-16 02:16:29〜02:16:47 JST に、Cloudflare AI Gateway の Custom
-Provider 経由で OCTG Worker へ `/v1/responses` を送ったところ、同じ大規模入力に
-対して 200 と 503 が混在しました。
+For the current architecture and behavior, use [../SPEC.md](../SPEC.md). For the current runbook, use [operations.md](./operations.md).
 
-| 時刻 (JST) | Status | Model | Duration | 記録上の tokens (in/out) |
-| --- | ---: | --- | ---: | ---: |
-| 02:16:29 | 200 | `gpt-5.6-luna` | 4.85 s | 74,223 / 116 |
-| 02:16:34 | 200 | `gpt-5.6-luna` | 3.64 s | 74,383 / 74 |
-| 02:16:38 | 200 | `gpt-5.6-luna` | 3.79 s | 74,504 / 73 |
-| 02:16:40 | 503 | `gpt-5.6-luna` | 0.30 s | 0 / 0 |
-| 02:16:42 | 503 | `gpt-5.6-luna` | 0.10 s | 0 / 0 |
-| 02:16:47 | 503 | `gpt-5.6-luna` | 0.10 s | 0 / 0 |
+## Observed Incident
 
-503 の応答は OCTG の通常の OpenAI 互換エラーではなく、Cloudflare の
-`Worker exceeded resource limits`（Error 1102）HTML でした。1102 はリソース制限に
-達したことを示しますが、CPU と memory のどちらが原因か、この記録だけでは確定
-できません。入力本文、認証素材、tokenizer 対象文字列はログへ保存しません。
+Between 02:16:29 and 02:16:47 JST on 2026-08-16, large `/v1/responses` requests sent through Cloudflare AI Gateway Custom Provider produced a mix of HTTP 200 and HTTP 503 responses.
 
-今回のリクエストでは、正常完了した約 74,000-token 級の payload を安全性が確認できる
-限り受理すること、未検証の比率式を request 全体の token 上限にしないことを維持します。
+The successful requests were roughly 74,000 input tokens. The 503 responses were Cloudflare `Worker exceeded resource limits` / Error 1102 HTML rather than OCTG's normal structured OpenAI-compatible error.
 
-## 未確定事項
+That evidence establishes a Worker resource-limit failure, but by itself does not establish whether CPU or memory was the specific limiting resource.
 
-以下は障害時の同一 revision と request ID に紐付く証跡が得られるまで未確定です。
+No request payload, authentication material, or tokenizer source text should be added to logs to investigate this class of incident.
 
-| 項目 | 状態 | 確認方法 |
-| --- | --- | --- |
-| Worker deployment / version ID | 未取得 | `CF_VERSION_METADATA.id` と Workers invocation telemetry を照合 |
-| commit SHA | 未取得 | deployment の version metadata と照合 |
-| 実効 `limits.cpu_ms` | 未取得 | 障害時 deployment の設定と account の有効 limit を確認 |
-| 実効 memory limit | 未取得 | 対象 deployment と memory profiling を確認 |
-| invocation outcome | 未取得 | `$workers.outcome` の `exceededCpu` / `exceededMemory` |
-| CPU / wall time | 未取得 | `$workers.cpuTimeMs` / `$workers.wallTimeMs` と trace spans |
-| 障害時の concurrency | 未取得 | 同一 revision の request ID 群を時系列で照合 |
-| reserve 到達 | 未取得 | OCTG の安全な `quota_reserve` stage event |
-| upstream 到達 | 未取得 | OCTG event と upstream fetch span |
+## Evidence That Must Be Correlated
 
-Workers のプラン既定値や旧 Bundled usage model の値から、障害時 deployment の実効
-CPU / memory limit を推定しません。
+For a reproducible diagnosis, collect:
 
-## 現行実装と処理順序
+- Worker deployment/version ID;
+- commit/revision associated with that deployment;
+- effective Worker resource limits;
+- Cloudflare invocation outcome;
+- CPU time and wall time;
+- request concurrency;
+- OCTG request ID;
+- resource-stage telemetry;
+- tokenization provider and measured input bytes;
+- whether quota reservation was reached;
+- whether upstream execution was reached.
 
-Baseline 適用後の観測可能な処理順序は次のとおりです。
+Do not infer the incident deployment's effective limits from current defaults or unrelated plan documentation.
+
+## Current Request Path
+
+The current implementation has evolved since the original incident baseline.
+
+Tokenization is now routed as follows:
 
 ```text
-authentication
-  -> raw body read / JSON parse
-  -> endpoint normalization / normalized input byte check
-  -> model registry / policy / quota getState
-  -> TokenizerController RPC (tokenizer:primary, exact o200k_base BPE)
-  -> input estimation / margin / upper bound / output decision
+authenticate
+  -> body read / parse
+  -> normalize
+  -> model / policy
+  -> quota state
+  -> tokenization routing
+       small or Deno disabled -> TokenizerController DO
+       large and Deno enabled -> Deno tokenizer
+  -> token budget
   -> quota reserve
   -> in-flight admission
-  -> upstream fetch
-  -> settle, markUncertain, or known pre-upstream release
+  -> upstream
+  -> settle / uncertain / release
 ```
 
-TokenizerController RPC は 1 request につき 1 回だけ実行します。outcome ごとの契約は次のとおりです。
+Therefore, current incident triage must identify the actual tokenization provider instead of assuming every request executed BPE in `TokenizerController`.
 
-- `work_limit` は HTTP `413`、`request_too_large`、route `reject:request_too_large` です。
-- RPC failure、malformed result、RPC preflight ceiling 超過、Tokenizer RPC 境界の
-  `MAX_INPUT_TEXT_BYTES` 超過は unavailable として HTTP `500 internal_error`、route
-  `error:internal_error` になります。
-- Worker の HTTP 正規化で解決済み入力上限を超過した場合は RPC より前に HTTP `413`
-  `request_too_large`、route `reject:request_too_large` になります。
-- token budget の算術異常は HTTP `500 internal_error` です。公開 HTTP route は
-  `error:internal_error`、resource stage event の route は `error:arithmetic_error` です。
+## Current Mitigations and Signals
 
-上記の全ケースで未検証の推定値を使わず、`quota_reserve`、in-flight admission、upstream fetch
-は実行しません。障害時は response の HTTP status / `error.code` / `X-OCTG-Route` と、同じ
-request ID の `octg.resource_stage` event を照合してください。exact BPE は Gateway Worker や
-shared package では実行せず、`TokenizerController` の RPC 境界に隔離します。
+Relevant current controls include:
 
-TokenizerController の estimate は次の境界を使用します。
+- bounded request-body size;
+- a hard tokenization input ceiling;
+- optional Deno offload for large input text;
+- per-pool in-flight admission;
+- streaming lease renewal;
+- request-stage duration telemetry;
+- tokenization provider/failure telemetry;
+- no upstream call before successful tokenization and quota reservation.
 
-```text
-base = o200k_base.encode(inputText).length
-estimatedInputTokens = base + opaqueInputBytes + (messageCount * 4) + 3
-```
+These controls reduce ambiguity but do not prove that a specific 503 was CPU or memory exhaustion.
 
-TokenizerController は RPC 専用であり、`ctx.storage` を呼び出しません。入力本文、API key、
-tokenizer state を Durable Object storage や stage event に保存しないことを確認します。
+## Triage Procedure
 
-`readJsonBody()` の raw body 上限は JSON parse より前に適用されます。正規化処理は
-`inputTextBytes`、`opaqueInputBytes`、`inputBytes` を分離して返します。Responses では
-`normalize.ts` が既に次の invariant を維持しています。
+1. Confirm whether the response is OCTG JSON or Cloudflare HTML.
+2. Record the exact timestamp and target hostname.
+3. Capture `X-OCTG-Request-Id` and Worker version headers when present.
+4. Find the matching Worker invocation and outcome.
+5. Correlate body size and tokenization provider.
+6. Determine the last completed OCTG resource stage.
+7. Check whether a reservation exists for the request ID.
+8. If the upstream may have been attempted, preserve fail-closed uncertainty.
+9. Compare CPU/wall-time/resource evidence across successful and failed requests on the same version.
+10. Reproduce only with synthetic payloads and explicit production-safety limits.
 
-```text
-inputBytes = inputTextBytes + opaqueInputBytes
-```
+## Quota Safety During a Resource-Limit Incident
 
-したがって、`NormalizedRequest.inputTextBytes` が欠落しているという前提は誤りです。
-`inputBytes` を text bytes として再利用して opaque bytes を二重加算しないことが必要です。
+A client-visible failure does not prove that upstream usage is zero.
 
-Workers の invocation telemetry が `$workers.outcome`、`$workers.cpuTimeMs`、
-`$workers.wallTimeMs` を提供します。OCTG の custom `octg.resource_stage` event は、
-アプリケーション上の stage、request ID、revision、safe な byte 数・duration・boolean
-metadata だけを提供し、Workers の outcome や実メモリ使用量を代替しません。
+Do not manually release an uncertain reservation solely because the client observed 503/timeout/disconnect.
 
-AI Gateway へ送る `cf-aig-collect-log-payload` は `false` とし、payload collection を
-無効化します。D1 は監査・証跡用途だけであり、quota の authoritative state は
-Durable Object に置きます。
+Use canonical QuotaController state and reconciliation evidence. Reserve-unknown cases require the explicit operator reconciliation path described in [operations.md](./operations.md).
 
-Worker から Gateway B への outbound は `cf-aig-max-attempts: 1` とし、retry-delay / backoff を
-設定しません。隠れた再試行で usage が二重計上されないようにし、upstream 通信失敗・usage
-取得不能・クライアント切断は `markUncertain` へ倒します。`Idempotency-Key` は空文字・未指定を
-absent、指定値を UTF-8 255 bytes 以下として client × pool × UTC day 単位で重複排除します。
+## Acceptance for a Tokenizer-Offload Change
 
-## 観測ゲート
+When changing tokenization to reduce Worker resource pressure, validate:
 
-同じ request ID と deployment revision について、次の証跡が揃った場合だけ原因別 branch
-を有効化します。
+- below-threshold traffic stays on `TokenizerController`;
+- at/above-threshold traffic goes to Deno when enabled;
+- Deno failure is fail-closed;
+- quota reservation still occurs only after successful tokenization;
+- representative large synthetic traffic stays within the intended Worker resource envelope;
+- no payload or secret is logged;
+- success/uncertainty accounting remains correct.
 
-| Gate | 必須証跡 | 許可する対策 |
-| --- | --- | --- |
-| Baseline | revision、request ID、safe stage event、Workers logs / traces の相関 | Tasks 1〜4 |
-| CPU | `exceededCpu` かつ tokenize が主要 CPU 区間 | BPE cutoff branch |
-| Memory | `exceededMemory` かつ peak allocation が特定済み | raw / normalized limit 分離 |
-| Concurrency | concurrency 1 は成功し、2 または想定ピークだけ BPE 同時進入で失敗 | tokenization lease |
-| Resolution | 適用 branch の canary と payload differential が全条件を通過 | 解決判定 |
-
-観測前に `BPE_MAX_INPUT_BYTES`、`MAX_RAW_BODY_BYTES`、`MAX_NORMALIZED_INPUT_BYTES`、
-`MAX_TOKENIZATION_REQUESTS`、`TOKENIZATION_LEASE_TTL_MS` を `wrangler.jsonc` に追加
-しません。確認できなかった branch は実装・設定変更の対象外です。
-
-## 原因別対策
-
-### Baseline（必須）
-
-- Workers Logs、traces、version metadata を有効にし、revision と request ID を相関する。
-- stage event は payload、headers、API key、例外文字列を含めず、限定された primitive field
-  だけを出力する。
-- body read / parse の raw byte provenance と duration を記録する。宣言された
-  `Content-Length` と streamed partial bytes は exact measurement と扱わない。
-- D1 insert / completion の失敗は quota decision や upstream 到達条件へ伝播させない。
-- reserve の結果が不明な場合は fail-closed にし、release や upstream 到達を行わず、DO の
-  reconciliation 対象として保持する。
-- upstream には payload collection 無効化 header を送る。
-- `TokenizerController` の success stage と quota reserve stage を request ID で相関する。
-- Tokenizer stage event は request ID、revision、stage、duration、safe な byte/token 数、
-  allowlist 済み outcome だけを記録し、入力本文、Authorization、API key、例外文字列を記録しない。
-
-### CPU branch（Gate 通過時だけ）
-
-`inputBytes` が cutoff 未満のときだけ exact BPE を実行し、cutoff 以上では検証済みの
-conservative bytes 経路へ切り替えます。conservative path は `inputTextBytes` を base とし、
-`opaqueInputBytes` と message overhead を一度だけ加算します。cutoff は canary revision の
-profiling から決め、未検証の byte 比率式を使用しません。
-
-### Memory branch（Gate 通過時だけ）
-
-memory profile が特定した allocation に対応する範囲で、raw body hard limit と normalized
-input hard limit を分離します。`Content-Length` のみで拒否した値や streamed overflow の
-partial 値を exact profile measurement に使いません。
-
-### Concurrency branch（Gate 通過時だけ）
-
-BPE 前に quota state と独立した期限付き tokenization lease を取得します。admission saturation
-は HTTP 429 `rate_limit_error`、code `tokenization_concurrency_exceeded`、route
-`reject:tokenization_concurrency` とします。lease の期限・limit は最大 tokenize wall time
-の実測値を超えることを確認できた場合だけ有効化します。既存の upstream in-flight lease と
-settle / markUncertain / release 契約は変更しません。
-
-## Canary 手順
-
-`scripts/canary-worker-resource-limits.mjs` は、`CANARY_PAYLOAD_PATH` の JSON payload を
-concurrency `1`、`2`、および operator が指定した想定ピークで送ります。入力は payload を
-出力せず、結果 JSON Lines に outcome、status、duration、request ID、concurrency を記録します。
-`fetch_error` の `errorName` / `errorCode` は allowlist 済みの値だけを記録し、timeout では両値を
-`null` にします。
-
-必要な環境変数は次のとおりです。
-
-```text
-OCTG_CANARY_URL
-OCTG_CANARY_ALLOWED_HOSTS
-OCTG_CANARY_CLIENT_KEY
-CANARY_PAYLOAD_PATH
-CANARY_CONCURRENCY
-CANARY_REQUEST_TIMEOUT_MS
-```
-
-URL は HTTPS かつ exact allow-list host でなければならず、redirect は拒否します。設定
-エラーは固定 marker だけを出力し、key、URL、path、headers、payload、例外文字列を出力
-しません。各 request は独自の AbortController と timeout を持ち、timeout / fetch failure
-も 1 request 1 line として次の concurrency level へ進みます。
-
-canary の各 request ID を version ID、`$workers.outcome`、`$workers.cpuTimeMs`、
-`$workers.wallTimeMs`、custom stage events、trace spans と相関し、74,000-token 級 payload
-について reserve の有無と upstream 到達を記録します。production credentials がない場合は
-driver の設定境界だけをローカルで検証し、原因別 branch を有効化しません。
-
-現時点の branch decision は次のとおりです。production の canary 証跡が未取得のため、
-CPU・memory・concurrency の設定値は追加していません。
-
-| revision | request ID | CPU limit / memory limit | raw / normalized bytes | stage / outcome / concurrency | reserve / upstream | branch |
-| --- | --- | --- | --- | --- | --- | --- |
-| 未取得 | 未取得 | 未取得 / 未取得 | 未取得 / 未取得 | 未取得 / 未取得 / 未取得 | 未取得 / 未取得 | CPU・memory・concurrency 未適用 |
-
-TokenizerController migration の確認も branch decision の前提です。`apps/gateway-worker/wrangler.jsonc`
-の `TOKENIZER_CONTROLLER` binding と migration `v2` を削除・改名・再利用せず、rollback でも
-manifest を維持します。Free Plan の CPU 上限を理由に、production 証跡なしで arbitrary cutoff、
-未検証の byte 比率式、tokenization lease、paid fallback を追加しません。
-
-operator が想定ピークを正の safe integer として決めた場合の実行例は次のとおりです。
-
-```bash
-CANARY_CONCURRENCY="1,2,$EXPECTED_PEAK_CONCURRENCY" \
-node scripts/canary-worker-resource-limits.mjs
-```
-
-## 解決判定
-
-一つの documented deployment revision とその実効 limits について、次の全条件を満たした
-場合だけインシデントを resolved とします。
-
-1. 74,000-token 級の accepted payload が concurrency 1、2、想定ピークで成功する。
-2. canary invocation に `exceededCpu` / `exceededMemory` がない。
-3. CPU time、wall time、memory profile が実効 limits 内にある。
-4. accepted fixture ごとに `estimatedInput + maxOutputTokens + margin >= usage.total_tokens`
-   が成立する。
-5. reserve 前の rejection は quota reserve と upstream call がゼロである。
-6. known pre-upstream failure は既知の成功 reservation だけを一度 release し、unknown reserve
-   outcome は release しない。
-7. upstream success は actual usage で settle する。
-8. upstream uncertain は `markUncertain` され、reconciliation 対象として残る。
-9. unknown reserve の二回の試行が失敗した場合、元の request ID を返し、upstream と release
-   を呼ばず、DO の entry を reconciliation から発見できる。
-
-いずれかの条件、invocation outcome、revision、または実効 limit が欠ける場合は、解決済み
-とせず、欠けた証跡と failed condition をこの記録へ追記して incident を open のまま維持
-します。
-
----
-
-## 解決記録（2026-09-04）
-
-### 観測結果
-
-Cloudflare GraphQL API（`workersInvocationsAdaptive`）で次の証跡を確認した。
-
-- `status: "exceededResources"`、`cpuTimeUs` が P50/P90/P99 ともに 10,000μs（10ms cap）
-- `subrequests: 0〜1`（初期段階では認証 D1 クエリ 1 回目を await した直後に上限到達）
-- `DENO_TOKENIZER_THRESHOLD_BYTES=1` 設定後も継続発生
-
-### 確定した根本原因
-
-BPE（tokenization）ではなく、**認証処理と request normalization の同期 CPU 消費**が主因。
-
-| 原因 | 根拠 |
-| --- | --- |
-| `crypto.subtle.importKey` を毎リクエスト実行 | subrequests=1 で死亡 = 認証 D1 await 前後で CPU 消費。pepper は isolate 内で不変なのに毎回 importKey を実行していた |
-| `normalizeChatCompletions` で全メッセージを 2 回走査 | `hasToolUse()` が O(n messages) の二重スキャン |
-| 一時オブジェクトの大量生成 | field 配列・spread `{}`・TextDecoder/Encoder の per-request 生成 |
-| SSE 全チャンクで `JSON.parse` | usage 無関係な大多数のチャンクで CPU を消費 |
-
-### 適用した修正と結果
-
-Worker version `80e50d58-f219-4ac3-84e6-b40bdebfe237` で全修正を本番デプロイ。
-
-| メトリクス | 修正前 | 修正後 |
-| --- | --- | --- |
-| `exceededResources` | 多発 | **ゼロ** |
-| CPU P50 | 10ms（cap） | **2.7ms** |
-| CPU P90 | 10ms（cap） | **7.0ms** |
-
-### 解決判定
-
-- §220 の条件 1〜3 は Cloudflare GraphQL メトリクスで確認済み（`exceededResources` ゼロ、CPU limit 内）
-- 条件 4〜9 は、次の個別テストと結果で確認した。`389/389` は `crypto.test.ts` 追加前の集計値である。
-- インシデント **resolved**（2026-09-04 18:00 JST）
-
-### 条件 4〜9 のテスト証跡
-
-2026-09-04 に同一 checkout の `@octg/gateway-worker` で、Vitest `v4.1.11` を使い、次のコマンドを個別に実行した。各コマンドは exit code 0 で終了した。
-
-```bash
-npm test -w apps/gateway-worker -- --reporter=dot test/token-budget.test.ts
-npm test -w apps/gateway-worker -- --reporter=dot test/proxy-failures.test.ts
-npm test -w apps/gateway-worker -- --reporter=dot test/quota-lifecycle.test.ts
-npm test -w apps/gateway-worker -- --reporter=dot test/quota-settle.test.ts
-npm test -w apps/gateway-worker -- --reporter=dot test/quota-controller.test.ts
-npm test -w apps/gateway-worker -- --reporter=dot test/quota-reservation.test.ts
-```
-
-| テストファイル | 結果 |
-| --- | --- |
-| `token-budget.test.ts` | 12/12 passed |
-| `proxy-failures.test.ts` | 43/43 passed |
-| `quota-lifecycle.test.ts` | 20/20 passed |
-| `quota-settle.test.ts` | 11/11 passed |
-| `quota-controller.test.ts` | 35/35 passed |
-| `quota-reservation.test.ts` | 5/5 passed |
-
-条件ごとの対応は次のとおりである。
-
-- **条件 4:** `token-budget.test.ts` の `resolves a fitting REJECT decision`、`resolves a fitting CLAMP decision with the reduced output`、`proxy-failures.test.ts` の `counts Responses opaque reasoning bytes once in the reservation`。結果はそれぞれ上記の 12/12、43/43 passed。
-- **条件 5:** `proxy-failures.test.ts` の `rejects oversized Chat input before quota reservation or upstream fetch`、`rejects oversized Responses input before quota reservation or upstream fetch`、`returns 413 for tokenizer work-limit failures without reservation or upstream contact`、`maps a real tokenizer work-limit RPC result to 413 before reservation`。結果は 43/43 passed。
-- **条件 6:** `proxy-failures.test.ts` の `releases a reservation when upstream configuration is missing`、`fails closed on two unknown reserve outcomes without release or upstream contact`、`quota-lifecycle.test.ts` の `frees a reservation before upstream contact`。結果は 43/43、20/20 passed。
-- **条件 7:** `quota-settle.test.ts` の `moves a reservation to confirmed usage`、`does not double-count a duplicate settlement`、`accounts overage fail-closed and rejects later reservations`、`proxy-failures.test.ts` の `keeps Durable Object settlement authoritative when D1 completion fails`。結果は 11/11、43/43 passed。
-- **条件 8:** `proxy-failures.test.ts` の `marks upstream 5xx as uncertain and passes through the body`、`marks an upstream 4xx uncertain when usage is not provably zero`、`marks network failure as uncertain`、`quota-settle.test.ts` の `settles uncertain usage without double-subtracting its reservation`、`quota-lifecycle.test.ts` の `moves consumed uncertain usage to confirmed`。結果は 43/43、11/11、20/20 passed。
-- **条件 9:** `proxy-failures.test.ts` の `fails closed on two unknown reserve outcomes without release or upstream contact`、`returns 500 without repeating an unknown-reserve mark when its RPC rejects`、`quota-controller.test.ts` の `discovers reserved and uncertain entries with bounded origins`、`moves an unresolved reservation to reserve_unknown exactly once`、`keeps the reserve-unknown entry until an explicit disposition`、`quota-reservation.test.ts` の `returns unknown after both reservation attempts fail`。結果は 43/43、35/35、5/5 passed。
-
-今回追加した `crypto.test.ts` は 3/3 passed。これを含む現在の `@octg/gateway-worker` 全体は 42 test files、392/392 passed である。
+The original 2026-08-16 observations remain historical evidence. They must not be rewritten to imply that Deno routing existed at the time of the incident.

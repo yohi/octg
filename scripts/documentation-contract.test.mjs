@@ -12,32 +12,21 @@ function read(relativePath) {
   return readFileSync(join(root, relativePath), "utf8");
 }
 
-test("configuration catalog exposes the documented six-column shape and operating sections", () => {
-  const configuration = read("docs/CONFIGURATION.md");
+test("configuration documentation lists the complete Deno tokenizer setting group", () => {
+  const configuration = read("docs/configuration.md");
 
-  assert.match(
-    configuration,
-    /\| Name \| Kind \| Consumer \| Set in \| Obtain or decide \| Apply \|/,
-  );
-  for (const heading of [
-    "## Production/Preview boundary",
-    "## Rotation and recovery",
-    "## Troubleshooting",
-    "## Related procedures",
+  for (const setting of [
+    "DENO_TOKENIZER_ENDPOINT",
+    "DENO_TOKENIZER_AUTH_TOKEN",
+    "DENO_TOKENIZER_THRESHOLD_BYTES",
+    "DENO_TOKENIZER_TIMEOUT_MS",
   ]) {
-    assert.match(configuration, new RegExp(`^${heading}$`, "m"));
+    assert.match(configuration, new RegExp("`" + setting + "`"));
   }
 });
 
-test("Deno local testing command grants the environment permission used by the service", () => {
-  const denoDocumentation = read("docs/deno-tokenizer.md");
-
-  assert.doesNotMatch(denoDocumentation, /deno task dev/);
-  assert.match(denoDocumentation, /deno run --allow-env --allow-net src\/main\.ts/);
-});
-
-test("Production Deno settings use GitHub Variables without moving authentication Secrets", () => {
-  const configuration = read("docs/CONFIGURATION.md");
+test("Deno documentation separates deployment authentication from runtime authentication", () => {
+  const configuration = read("docs/configuration.md");
   const denoDocumentation = read("docs/deno-tokenizer.md");
   const environmentTemplate = read(".env.example");
 
@@ -50,38 +39,36 @@ test("Production Deno settings use GitHub Variables without moving authenticatio
       .split("\n")
       .find((line) => line.startsWith(`| \`${variableName}\` |`));
     assert.ok(row, `configuration catalog must contain ${variableName}`);
-    assert.match(row, /\| Variable \|/);
-    assert.match(row, /\| GitHub Repository Variable \|/);
-    assert.match(row, /\| `\.github\/workflows\/deploy-production\.yml` \|/);
+    assert.match(row, /\| variable \|/);
   }
 
-  assert.match(configuration, /`DENO_TOKENIZER_AUTH_TOKEN` \| Secret \| Gateway Worker → Deno \| Worker Secret \|/);
-  assert.match(configuration, /`OCTG_TOKENIZER_AUTH_TOKEN` \| Secret \| Deno tokenizer runtime \| Deno Deploy runtime environment \|/);
-  assert.match(configuration, /`PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` \| Secret \| Production Worker and Deno Deploy workflows \| GitHub Environment `deno-production` \|/);
-  assert.match(configuration, /`DENO_DEPLOY_TOKEN` \| Secret \| Deno Deploy workflow \| GitHub Environment `deno-production` \|/);
-  assert.match(configuration, /GitHub Environment `deno-production`.*PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN/s);
-  assert.match(denoDocumentation, /GitHub Repository\s+Variables/);
-  assert.match(denoDocumentation, /\.github\/workflows\/deploy-production\.yml/);
-  assert.match(denoDocumentation, /PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN/);
-  assert.match(denoDocumentation, /DENO_PREVIEW_TOKENIZER_AUTH_TOKEN/);
-  assert.match(denoDocumentation, /invalid-auth/);
+  assert.match(configuration, /`DENO_TOKENIZER_AUTH_TOKEN` \| Worker secret \|/);
+  assert.match(configuration, /`DENO_DEPLOY_TOKEN` \| Deno Deploy management secret \|/);
+  assert.match(denoDocumentation, /`DENO_DEPLOY_TOKEN`: management credential/);
+  assert.match(denoDocumentation, /`DENO_TOKENIZER_AUTH_TOKEN`: Worker-side secret/);
+  assert.match(denoDocumentation, /`OCTG_TOKENIZER_AUTH_TOKEN`: Deno runtime secret/);
   assert.match(environmentTemplate, /three non-secret Production Worker values.*GitHub Actions\s+Repository\s+Variables/s);
   assert.match(environmentTemplate, /PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN/);
-  assert.match(environmentTemplate, /DENO_PREVIEW_DEPLOY_ORG/);
-  assert.match(environmentTemplate, /DENO_PREVIEW_TOKENIZER_AUTH_TOKEN/);
 });
 
-test("Preview documentation distinguishes the DO-only smoke from the Deno two-phase smoke", () => {
-  const configuration = read("docs/CONFIGURATION.md");
-  const denoDocumentation = read("docs/deno-tokenizer.md");
+test("Preview configuration keeps its Deno control plane separate from Production", () => {
+  const configuration = read("docs/configuration.md");
+  const environmentTemplate = read(".env.example");
 
-  for (const content of [configuration, denoDocumentation]) {
-    assert.match(content, /DO-only/);
-    assert.match(content, /invalid-auth/);
-    assert.match(content, /HTTP `500`/);
-    assert.match(content, /HTTP `200`/);
-    assert.match(content, /rollback/);
+  for (const setting of [
+    "DENO_PREVIEW_DEPLOY_ORG",
+    "DENO_PREVIEW_DEPLOY_APP",
+    "DENO_PREVIEW_DEPLOY_TOKEN",
+    "DENO_PREVIEW_TOKENIZER_ENDPOINT",
+    "DENO_PREVIEW_TOKENIZER_AUTH_TOKEN",
+    "DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES",
+    "DENO_PREVIEW_TOKENIZER_TIMEOUT_MS",
+  ]) {
+    assert.match(configuration, new RegExp(setting));
+    assert.match(environmentTemplate, new RegExp(`^${setting}=`, "m"));
   }
+
+  assert.match(configuration, /Do not reuse Production client keys, peppers, D1 state, or Deno shared-auth values in Preview\./);
 });
 
 test("Preview quota examples stay within the provider ceilings", () => {
@@ -108,9 +95,18 @@ test("Preview quota examples stay within the provider ceilings", () => {
 test("reader-facing documentation keeps relative links resolvable", () => {
   const documentationFiles = [
     "README.md",
-    "docs/CONFIGURATION.md",
-    "docs/DEPLOY_FROM_TEMPLATE.md",
+    "README.ja.md",
+    "SPEC.md",
+    "docs/configuration.md",
+    "docs/configuration.ja.md",
+    "docs/deployment.md",
+    "docs/deployment.ja.md",
     "docs/deno-tokenizer.md",
+    "docs/operations.md",
+    "docs/cloudflare-ai-gateway-custom-provider.md",
+    "docs/cloudflare-ai-gateway-custom-provider.ja.md",
+    "docs/troubleshooting-503-worker-resource-limits.md",
+    "docs/troubleshooting-503-worker-resource-limits.ja.md",
   ];
   const unresolved = [];
 
