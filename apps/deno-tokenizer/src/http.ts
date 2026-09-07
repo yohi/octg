@@ -100,12 +100,16 @@ function tokenizeInputOf(value: unknown): TokenizeInput | undefined {
   return { inputText: value.inputText };
 }
 
-function parseInput(rawBody: Uint8Array): TokenizeInput | undefined {
+function parseInput(rawBody: Uint8Array, mediaType?: string): TokenizeInput | undefined {
   let bodyText: string;
   try {
     bodyText = textDecoder.decode(rawBody);
   } catch {
     return undefined;
+  }
+
+  if (mediaType === "text/plain") {
+    return { inputText: bodyText };
   }
 
   let parsed: unknown;
@@ -117,10 +121,14 @@ function parseInput(rawBody: Uint8Array): TokenizeInput | undefined {
   return tokenizeInputOf(parsed);
 }
 
-function acceptsJson(request: Request): boolean {
+function mediaTypeOf(request: Request): string | undefined {
   const contentType = request.headers.get("content-type");
-  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
-  return mediaType === "application/json";
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase();
+}
+
+function acceptsPayload(request: Request): boolean {
+  const mediaType = mediaTypeOf(request);
+  return mediaType === "application/json" || mediaType === "text/plain";
 }
 
 async function isAuthorized(
@@ -173,7 +181,7 @@ export function createTokenizerHandler(args: {
     ) {
       return errorResponse(401);
     }
-    if (!acceptsJson(request)) {
+    if (!acceptsPayload(request)) {
       return errorResponse(415);
     }
 
@@ -181,7 +189,7 @@ export function createTokenizerHandler(args: {
     if (rawBody instanceof Response) {
       return rawBody;
     }
-    const input = parseInput(rawBody);
+    const input = parseInput(rawBody, mediaTypeOf(request));
     if (input === undefined) {
       return errorResponse(400);
     }
