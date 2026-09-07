@@ -32,6 +32,7 @@ import {
   type QuotaSnapshot,
   type QuotaView,
   type InFlightLease,
+  type Usage,
 } from "@octg/shared";
 import { authenticate } from "./auth";
 import {
@@ -60,7 +61,6 @@ import type { TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import { assertNever } from "./exhaustiveness";
 import { workerVersionHeaders, type WorkerVersionMetadataLike } from "./version-metadata";
 
-type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
 const MAX_TOKENIZATION_RPC_INPUT_BYTES = MAX_INPUT_TEXT_BYTES;
@@ -694,9 +694,11 @@ export async function handleProxy(
       return upstreamResponse(upstream, requestId, snapshot, env.CF_VERSION_METADATA);
     }
 
+    let rawText: string;
     let data: Record<string, unknown> & { usage?: Usage };
     try {
-      data = (await upstream.json()) as Record<string, unknown> & { usage?: Usage };
+      rawText = await upstream.text();
+      data = JSON.parse(rawText) as Record<string, unknown> & { usage?: Usage };
     } catch {
       await stub.markUncertain(requestId);
       reservationState = "none";
@@ -713,10 +715,12 @@ export async function handleProxy(
       if (!settled.ok && settled.reason === "unknown_request") {
         completeAudit(ctx, env, requestId, auditInserted, { status: "orphaned", billingClass: "none" });
       } else {
+        const inputTokens = usage.prompt_tokens ?? usage.input_tokens;
+        const outputTokens = usage.completion_tokens ?? usage.output_tokens;
         completeAudit(ctx, env, requestId, auditInserted, {
           status: "completed",
-          inputTokens: usage.prompt_tokens,
-          outputTokens: usage.completion_tokens,
+          inputTokens,
+          outputTokens,
           totalTokens: usage.total_tokens,
           billingClass: "free",
         });
@@ -729,7 +733,7 @@ export async function handleProxy(
     await stub.releaseInFlight(requestId, inFlightLease.generation);
     inFlightAcquired = false;
     inFlightLease = undefined;
-    return new Response(JSON.stringify(data), {
+    return new Response(rawText, {
       status: 200,
       headers: {
         "content-type": "application/json",

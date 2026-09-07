@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { callUpstream, UpstreamConfigError, type UpstreamTransport } from "../src/upstream";
+import { buildUpstreamBody, callUpstream, UpstreamConfigError, type UpstreamTransport } from "../src/upstream";
 
 describe("callUpstream", () => {
   const meta = {
@@ -71,3 +71,40 @@ describe("callUpstream", () => {
     expect(requestedUrl).toBe("https://aigw.invalid/openai/chat/completions");
   });
 });
+
+describe("buildUpstreamBody", () => {
+  it("normalizes chat body in-place with max_completion_tokens and stream options", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-4o",
+      max_tokens: 100,
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const result = buildUpstreamBody("chat", body, 2048);
+    expect(result).toBe(body);
+    expect(result.max_tokens).toBeUndefined();
+    expect(result.max_completion_tokens).toBe(2048);
+    expect(result.stream_options).toEqual({ include_usage: true });
+  });
+
+  it("does not add stream_options when stream is not true", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const result = buildUpstreamBody("chat", body, 1024);
+    expect(result).toBe(body);
+    expect(result.max_completion_tokens).toBe(1024);
+    expect(result.stream_options).toBeUndefined();
+  });
+
+  it("normalizes responses body with max_output_tokens", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-4o",
+      input: ["hi"],
+    };
+    const result = buildUpstreamBody("responses", body, 512);
+    expect(result.max_output_tokens).toBe(512);
+  });
+});
+
