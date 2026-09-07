@@ -1,12 +1,111 @@
-import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot } from "@octg/shared";
+import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot, type Usage } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
+
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
 import type { ResourceStageOutcome } from "./resource-observation";
 import { workerVersionHeaders } from "./version-metadata";
 
 type Stub = DurableObjectStub<QuotaController>;
-type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+export type { Usage };
+
+export function extractUsageFromEvent(event: string): Usage | undefined {
+  let searchStart = 0;
+  while (searchStart < event.length) {
+    const usageKeyIndex = event.indexOf('"usage"', searchStart);
+    if (usageKeyIndex === -1) break;
+    searchStart = usageKeyIndex + 7;
+
+    const colonIndex = event.indexOf(":", searchStart);
+    if (colonIndex === -1 || colonIndex - searchStart > 20) continue;
+
+    let braceOpen = -1;
+    for (let i = colonIndex + 1; i < event.length && i < colonIndex + 20; i++) {
+      const ch = event.charCodeAt(i);
+      if (ch === 123) {
+        braceOpen = i;
+        break;
+      }
+      if (ch !== 32 && ch !== 9 && ch !== 10 && ch !== 13) break;
+    }
+    if (braceOpen === -1) continue;
+
+    let depth = 0;
+    let braceClose = -1;
+    for (let i = braceOpen; i < event.length; i++) {
+      const ch = event.charCodeAt(i);
+      if (ch === 123) {
+        depth++;
+      } else if (ch === 125) {
+        depth--;
+        if (depth === 0) {
+          braceClose = i;
+          break;
+        }
+      }
+    }
+    if (braceClose === -1) continue;
+
+    try {
+      const snippet = event.slice(braceOpen, braceClose + 1);
+      const parsed = JSON.parse(snippet) as Record<string, unknown>;
+      if (typeof parsed.total_tokens === "number") {
+        return parsed as Usage;
+      }
+    } catch {
+      // continue searching
+    }
+  }
+  return undefined;
+}
+
+export class RingTailBuffer {
+  private readonly buffer: Uint8Array;
+  private readonly capacity: number;
+  private writeIndex = 0;
+  private totalBytes = 0;
+
+  constructor(capacity = 32768) {
+    this.capacity = capacity;
+    this.buffer = new Uint8Array(capacity);
+  }
+
+  write(chunk: Uint8Array): void {
+    const len = chunk.byteLength;
+    if (len === 0) return;
+    this.totalBytes += len;
+
+    if (len >= this.capacity) {
+      this.buffer.set(chunk.subarray(len - this.capacity), 0);
+      this.writeIndex = 0;
+      return;
+    }
+
+    const firstPart = Math.min(len, this.capacity - this.writeIndex);
+    this.buffer.set(chunk.subarray(0, firstPart), this.writeIndex);
+    if (len > firstPart) {
+      const secondPart = len - firstPart;
+      this.buffer.set(chunk.subarray(firstPart, len), 0);
+      this.writeIndex = secondPart;
+    } else {
+      this.writeIndex = (this.writeIndex + len) % this.capacity;
+    }
+  }
+
+  getTail(): Uint8Array {
+    if (this.totalBytes === 0) {
+      return new Uint8Array(0);
+    }
+    if (this.totalBytes < this.capacity) {
+      return this.buffer.slice(0, this.totalBytes);
+    }
+    const result = new Uint8Array(this.capacity);
+    const firstPart = this.capacity - this.writeIndex;
+    result.set(this.buffer.subarray(this.writeIndex), 0);
+    result.set(this.buffer.subarray(0, this.writeIndex), firstPart);
+    return result;
+  }
+}
 
 export interface StreamLeaseOptions {
   readonly lease: InFlightLease;
@@ -33,8 +132,7 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
-  const decoder = new TextDecoder();
-  let buffer = "";
+  const ringBuffer = new RingTailBuffer(32768);
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -81,10 +179,12 @@ export function proxyStream(
           onFinalized?.(outcome);
           return;
         }
+        const inputTokens = usage.prompt_tokens ?? usage.input_tokens;
+        const outputTokens = usage.completion_tokens ?? usage.output_tokens;
         await completeRequestAuditBestEffort(env, requestId, {
           status: "completed",
-          inputTokens: usage.prompt_tokens,
-          outputTokens: usage.completion_tokens,
+          inputTokens,
+          outputTokens,
           totalTokens: usage.total_tokens,
           billingClass: "free",
         }, inserted);
@@ -109,23 +209,31 @@ export function proxyStream(
 
       if (!event.includes('"usage"') && !event.includes("response.completed")) continue;
 
-      let lineStart = 0;
-      while (lineStart < event.length) {
-        let lineEnd = event.indexOf("\n", lineStart);
-        if (lineEnd === -1) lineEnd = event.length;
-        const line = event.slice(lineStart, lineEnd);
-        lineStart = lineEnd + 1;
+      const extracted = extractUsageFromEvent(event);
+      if (extracted) {
+        usage = extracted;
+        continue;
+      }
 
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(payload) as Record<string, unknown>;
-          if (parsed.usage) usage = parsed.usage as Usage;
-          const response = parsed.response as { usage?: Usage } | undefined;
-          if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
-        } catch {
-          continue;
+      if (event.length < 2048) {
+        let lineStart = 0;
+        while (lineStart < event.length) {
+          let lineEnd = event.indexOf("\n", lineStart);
+          if (lineEnd === -1) lineEnd = event.length;
+          const line = event.slice(lineStart, lineEnd);
+          lineStart = lineEnd + 1;
+
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            if (parsed.usage) usage = parsed.usage as Usage;
+            const response = parsed.response as { usage?: Usage } | undefined;
+            if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
+          } catch {
+            continue;
+          }
         }
       }
     }
@@ -163,16 +271,15 @@ export function proxyStream(
   };
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const cut = buffer.lastIndexOf("\n\n");
-      if (cut >= 0) {
-        parseEvents(buffer.slice(0, cut + 2));
-        buffer = buffer.slice(cut + 2);
-      }
       controller.enqueue(chunk);
+      ringBuffer.write(chunk);
     },
     flush() {
-      if (buffer.trim()) parseEvents(`${buffer}\n\n`);
+      const tail = ringBuffer.getTail();
+      if (tail.byteLength > 0) {
+        const text = new TextDecoder().decode(tail);
+        parseEvents(text);
+      }
       ctx.waitUntil(finalize());
     },
     cancel() {
