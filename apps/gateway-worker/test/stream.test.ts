@@ -417,6 +417,42 @@ describe("proxy stream finalization", () => {
     expect(settle).toHaveBeenCalledWith(requestId, 150);
     await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
   });
+
+  it("settles and records audit when usage event is split across chunk boundaries", async () => {
+    const controller = controllerFor("2026-10-19");
+    const requestId = "stream-split-boundary-settlement";
+    await controller.reserve(requestId, 200, 200);
+    const lease = await acquireLease(controller, requestId);
+    const settle = vi.spyOn(controller, "settle").mockResolvedValue({ ok: true });
+    const context = createExecutionContext();
+
+    const chunk1 = 'data: {"type":"response.completed","response":{"id":"resp_boundary","us';
+    const chunk2 = 'age":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}\n\n';
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controllerStream) {
+        controllerStream.enqueue(new TextEncoder().encode(chunk1));
+        controllerStream.enqueue(new TextEncoder().encode(chunk2));
+        controllerStream.close();
+      },
+    });
+
+    const response = proxyStream(
+      new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    await response.text();
+    await waitOnExecutionContext(context);
+
+    expect(settle).toHaveBeenCalledWith(requestId, 150);
+    await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
+  });
 });
 
 describe("extractUsageFromEvent", () => {

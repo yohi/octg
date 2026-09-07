@@ -1,5 +1,22 @@
 import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot, type Usage } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
+
+interface BufferLike {
+  readonly length: number;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly buffer: ArrayBufferLike;
+  toString(encoding?: string): string;
+  includes(value: BufferLike | Uint8Array | string): boolean;
+  subarray(begin?: number, end?: number): BufferLike;
+}
+
+declare const Buffer: {
+  from(source: ArrayBufferLike | ArrayLike<number>, byteOffset?: number, length?: number): BufferLike;
+  from(str: string, encoding?: string): BufferLike;
+  concat(list: readonly (Uint8Array | BufferLike)[], totalLength?: number): BufferLike;
+  isBuffer(obj: unknown): obj is BufferLike;
+};
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
 import type { ResourceStageOutcome } from "./resource-observation";
@@ -83,8 +100,9 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
-  const decoder = new TextDecoder();
-  let buffer = "";
+  const USAGE_PATTERN = Buffer.from('"usage"');
+  const COMPLETED_PATTERN = Buffer.from("response.completed");
+  let tailBuf: BufferLike | undefined;
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -223,16 +241,27 @@ export function proxyStream(
   };
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const cut = buffer.lastIndexOf("\n\n");
-      if (cut >= 0) {
-        parseEvents(buffer.slice(0, cut + 2));
-        buffer = buffer.slice(cut + 2);
-      }
       controller.enqueue(chunk);
+      if (usage !== undefined) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      const combined = tailBuf ? Buffer.concat([tailBuf, buf]) : buf;
+      if (combined.includes(USAGE_PATTERN) || combined.includes(COMPLETED_PATTERN)) {
+        const text = combined.toString("utf-8");
+        parseEvents(text);
+        if (usage !== undefined) {
+          tailBuf = undefined;
+          return;
+        }
+        tailBuf = combined.length > 8192 ? combined.subarray(combined.length - 8192) : combined;
+        return;
+      }
+      tailBuf = buf.length > 2048 ? buf.subarray(buf.length - 2048) : buf;
     },
     flush() {
-      if (buffer.trim()) parseEvents(`${buffer}\n\n`);
+      if (usage === undefined && tailBuf !== undefined && tailBuf.length > 0) {
+        const text = tailBuf.toString("utf-8");
+        parseEvents(text);
+      }
       ctx.waitUntil(finalize());
     },
     cancel() {
