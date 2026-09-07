@@ -35,10 +35,6 @@ const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text", "text"]);
 const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text", "text"]);
 const UTF8_ENCODER = new TextEncoder();
 
-declare const Buffer: {
-  byteLength(string: string, encoding?: string): number;
-} | undefined;
-
 export function utf8ByteLength(str: string): number {
   const buf = (globalThis as unknown as { Buffer?: { byteLength(s: string): number } }).Buffer;
   if (buf !== undefined) {
