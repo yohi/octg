@@ -59,6 +59,33 @@ export function extractUsageFromEvent(event: string): Usage | undefined {
   return undefined;
 }
 
+export function bytesIncludesAscii(bytes: Uint8Array, needle: string): boolean {
+  const len = bytes.byteLength;
+  const nlen = needle.length;
+  if (len < nlen) return false;
+  const first = needle.charCodeAt(0);
+  for (let i = 0; i <= len - nlen; i++) {
+    if (bytes[i] === first) {
+      let match = true;
+      for (let j = 1; j < nlen; j++) {
+        if (bytes[i + j] !== needle.charCodeAt(j)) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+  }
+  return false;
+}
+
+const USAGE_NEEDLE = '"usage"';
+const RESPONSE_COMPLETED_NEEDLE = "response.completed";
+
+export function mightContainUsage(bytes: Uint8Array): boolean {
+  return bytesIncludesAscii(bytes, USAGE_NEEDLE) || bytesIncludesAscii(bytes, RESPONSE_COMPLETED_NEEDLE);
+}
+
 export class RingTailBuffer {
   private readonly buffer: Uint8Array;
   private readonly capacity: number;
@@ -273,12 +300,18 @@ export function proxyStream(
     transform(chunk, controller) {
       controller.enqueue(chunk);
       ringBuffer.write(chunk);
+      if (usage === undefined && mightContainUsage(chunk)) {
+        const text = new TextDecoder().decode(ringBuffer.getTail());
+        parseEvents(text);
+      }
     },
     flush() {
-      const tail = ringBuffer.getTail();
-      if (tail.byteLength > 0) {
-        const text = new TextDecoder().decode(tail);
-        parseEvents(text);
+      if (usage === undefined) {
+        const tail = ringBuffer.getTail();
+        if (tail.byteLength > 0) {
+          const text = new TextDecoder().decode(tail);
+          parseEvents(text);
+        }
       }
       ctx.waitUntil(finalize());
     },

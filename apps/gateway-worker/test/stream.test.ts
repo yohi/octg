@@ -2,7 +2,13 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import type { QuotaController } from "@octg/quota-controller";
 import type { InFlightLease, QuotaSnapshot } from "@octg/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractUsageFromEvent, proxyStream, RingTailBuffer } from "../src/stream";
+import {
+  bytesIncludesAscii,
+  extractUsageFromEvent,
+  mightContainUsage,
+  proxyStream,
+  RingTailBuffer,
+} from "../src/stream";
 
 const controllerFor = (day: string): DurableObjectStub<QuotaController> =>
   env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
@@ -483,6 +489,20 @@ describe("proxy stream finalization", () => {
     });
     await runStreamSettlementTest("stream-pruning-settlement", "2026-10-21", stream, 150);
   });
+
+  it("settles correctly when usage is followed by data exceeding the tail buffer", async () => {
+    // A response.completed event followed by 40KB of trailing data (exceeding the 32KB RingTailBuffer)
+    const usageChunk = new TextEncoder().encode('data: {"type":"response.completed","response":{"id":"resp_follow","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}\n\n');
+    const trailingChunk = new TextEncoder().encode('data: {"type":"response.padding","text":"' + "p".repeat(1024) + '"}\n\n');
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(usageChunk);
+        for (let i = 0; i < 40; i++) c.enqueue(trailingChunk);
+        c.close();
+      },
+    });
+    await runStreamSettlementTest("stream-usage-followed-by-large-data", "2026-10-22", stream, 150);
+  });
 });
 
 describe("extractUsageFromEvent", () => {
@@ -570,4 +590,24 @@ describe("RingTailBuffer", () => {
     expect(new TextDecoder().decode(ring.getTail())).toBe("56789");
   });
 });
+
+describe("mightContainUsage and bytesIncludesAscii", () => {
+  it("bytesIncludesAscii finds substrings accurately", () => {
+    const encoder = new TextEncoder();
+    const data = encoder.encode("abcdefghij");
+    expect(bytesIncludesAscii(data, "abc")).toBe(true);
+    expect(bytesIncludesAscii(data, "def")).toBe(true);
+    expect(bytesIncludesAscii(data, "hij")).toBe(true);
+    expect(bytesIncludesAscii(data, "xyz")).toBe(false);
+    expect(bytesIncludesAscii(data, "abcdefghijk")).toBe(false);
+  });
+
+  it("mightContainUsage detects usage and response.completed needles", () => {
+    const encoder = new TextEncoder();
+    expect(mightContainUsage(encoder.encode('data: {"usage":{"total_tokens":10}}'))).toBe(true);
+    expect(mightContainUsage(encoder.encode('data: {"type":"response.completed"}'))).toBe(true);
+    expect(mightContainUsage(encoder.encode('data: {"choices":[{"delta":{"content":"regular text"}}]}'))).toBe(false);
+  });
+});
+
 
