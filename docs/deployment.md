@@ -92,13 +92,14 @@ Admin API and Admin UI requests are rejected if the Access JWT cannot be verifie
 
 ## Prepare Secrets
 
-The production Worker requires these core secrets:
+The production Worker uses these core request-path secrets:
 
 - `OCTG_KEY_PEPPER`;
-- `OCTG_UPSTREAM_API_TOKEN`;
-- `OPENAI_USAGE_API_KEY`.
+- `OCTG_UPSTREAM_API_TOKEN`.
 
-Keep them outside committed files. `OCTG_KEY_PEPPER` must match the value used to create stored client-key hashes.
+`OPENAI_USAGE_API_KEY` is a Worker secret used by `fetchUsage` for scheduled or manual Usage API reconciliation. It is not used for normal request authentication or proxying. The deployment setup currently registers it as a Worker secret, so provide it when using `npm run setup:deploy`.
+
+Keep all secret values outside committed files. `OCTG_KEY_PEPPER` must match the value used to create stored client-key hashes.
 
 Optional Deno tokenization introduces its own shared-auth secret. See [deno-tokenizer.md](./deno-tokenizer.md).
 
@@ -149,7 +150,7 @@ Example:
 curl https://<worker-host>/v1/chat/completions \
   -H "Authorization: Bearer <octg-client-key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"<model-from-v1-models>","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 Use `/v1/models` rather than a copied model list to select a model available in your deployment.

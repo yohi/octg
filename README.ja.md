@@ -28,7 +28,7 @@ Chat Completions を呼び出します。
 curl https://octg-gateway.<subdomain>.workers.dev/v1/chat/completions \
   -H "Authorization: Bearer octg_sk_xxx" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"<model-from-v1-models>","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 成功時は OpenAI 互換 JSON response と `X-OCTG-Request-Id` response header が返ります。

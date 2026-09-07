@@ -34,6 +34,8 @@ Gateway B を Gateway A の `custom-octg` route や OCTG Worker 自身へ向け�
 - `octg_sk_*` client key の hash が D1 に登録済み
 - Gateway A / Gateway B の Run token を分離管理
 
+AI Gateway の `AI Gateway Run` permission は account-scoped で、単一の Gateway や BYOK credential に制限できません。同一 Cloudflare account 内の Gateway A / Gateway B で token を分離しても、強い認可境界を保証できません。より強い分離が必要な場合は、別 account または別アーキテクチャを利用してください。
+
 ## Gateway A の登録
 
 Custom Provider を次のように登録します。

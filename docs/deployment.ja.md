@@ -75,11 +75,12 @@ Admin surface 用 Access application を作成し、次を設定します。
 
 ## Secrets
 
-主要 Worker secrets:
+通常の request path で使用する主要 Worker secrets:
 
 - `OCTG_KEY_PEPPER`
 - `OCTG_UPSTREAM_API_TOKEN`
-- `OPENAI_USAGE_API_KEY`
+
+`OPENAI_USAGE_API_KEY` は一般的な request authentication / proxying 用ではありません。`fetchUsage` が scheduled / manual reconciliation で Usage API を呼び出すために必要な Worker secret です。`npm run setup:deploy` は現在この secret も登録するため、同コマンドを使う場合は値を用意してください。
 
 Deno enabled の場合は Deno tokenizer shared-auth も必要です。[deno-tokenizer.md](./deno-tokenizer.md) を参照してください。
 
@@ -115,7 +116,7 @@ exact side effects は setup script とその tests を executable authority と
 curl https://<worker-host>/v1/chat/completions \
   -H "Authorization: Bearer <octg-client-key>" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.6-luna","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"<model-from-v1-models>","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 利用可能 model は `/v1/models` を確認します。
