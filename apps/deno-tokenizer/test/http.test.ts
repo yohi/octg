@@ -172,40 +172,39 @@ function createTokenizeRequest(contentType: string, body: BodyInit): Request {
   });
 }
 
-Deno.test("returns 415 for an unsupported content type", async () => {
+async function expectTokenCountSuccess(contentType: string, expectedCount = 7) {
   const fixture = createFixture();
-  const request = createTokenizeRequest("application/xml", "<xml></xml>");
-  await expectRejection({ fixture, request, status: 415 });
+  const request = createTokenizeRequest(contentType, "hello");
+  const response = await fixture.handler(request);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), { baseTokenCount: expectedCount });
+  assertEquals(fixture.calls(), 1);
+}
+
+async function expectRejectedContentType(contentType: string, body: BodyInit, status = 415) {
+  const fixture = createFixture();
+  const request = createTokenizeRequest(contentType, body);
+  await expectRejection({ fixture, request, status });
+}
+
+Deno.test("returns 415 for an unsupported content type", async () => {
+  await expectRejectedContentType("application/xml", "<xml></xml>");
 });
 
 Deno.test("returns token count for text/plain content type with charset=utf-8", async () => {
-  const fixture = createFixture();
-  const request = createTokenizeRequest("text/plain; charset=utf-8", "hello");
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  assertEquals(await response.json(), { baseTokenCount: 7 });
-  assertEquals(fixture.calls(), 1);
+  await expectTokenCountSuccess("text/plain; charset=utf-8");
 });
 
 Deno.test("returns token count for text/plain without charset parameter", async () => {
-  const fixture = createFixture();
-  const request = createTokenizeRequest("text/plain", "hello");
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  assertEquals(await response.json(), { baseTokenCount: 7 });
-  assertEquals(fixture.calls(), 1);
+  await expectTokenCountSuccess("text/plain");
 });
 
 Deno.test("returns 415 for text/plain with non-utf8 charset", async () => {
-  const fixture = createFixture();
-  const request = createTokenizeRequest("text/plain; charset=iso-8859-1", "hello");
-  await expectRejection({ fixture, request, status: 415 });
+  await expectRejectedContentType("text/plain; charset=iso-8859-1", "hello");
 });
 
 Deno.test("returns 415 for application/json with non-utf8 charset", async () => {
-  const fixture = createFixture();
-  const request = createTokenizeRequest("application/json; charset=shift_jis", JSON.stringify({ inputText: "hello" }));
-  await expectRejection({ fixture, request, status: 415 });
+  await expectRejectedContentType("application/json; charset=shift_jis", JSON.stringify({ inputText: "hello" }));
 });
 
 Deno.test("returns 400 for malformed JSON", async () => {

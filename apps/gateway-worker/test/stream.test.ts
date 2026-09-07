@@ -508,22 +508,19 @@ describe("proxy stream finalization", () => {
 });
 
 describe("extractUsageFromEvent", () => {
-  it("extracts usage from Chat Completions chunk", () => {
-    const event = 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}';
-    expect(extractUsageFromEvent(event)).toEqual({
-      prompt_tokens: 10,
-      completion_tokens: 20,
-      total_tokens: 30,
-    });
-  });
-
-  it("extracts usage from Responses API response.completed chunk", () => {
-    const event = 'data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}';
-    expect(extractUsageFromEvent(event)).toEqual({
-      input_tokens: 100,
-      output_tokens: 50,
-      total_tokens: 150,
-    });
+  it.each([
+    {
+      name: "Chat Completions chunk",
+      event: 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}',
+      expected: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    },
+    {
+      name: "Responses API response.completed chunk",
+      event: 'data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}',
+      expected: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+    },
+  ])("extracts usage from $name", ({ event, expected }) => {
+    expect(extractUsageFromEvent(event)).toEqual(expected);
   });
 
   it("extracts usage from a large payload without parsing entire response", () => {
