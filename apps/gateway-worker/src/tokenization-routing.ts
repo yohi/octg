@@ -1,4 +1,4 @@
-import { estimatedInputTokensOf } from "@octg/shared";
+import { estimatedInputTokensOf, utf8ByteLength } from "@octg/shared";
 import type { TokenizeRequest, TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import {
   tokenizeWithDeno,
@@ -8,8 +8,6 @@ import {
 import type { DenoTokenizerConfig } from "./deno-tokenizer-config";
 import { assertNever } from "./exhaustiveness";
 import { tokenizeInput, type TokenizerNamespace, type TokenizerOutcome } from "./tokenizer";
-
-const textEncoder = new TextEncoder();
 
 export type TokenizationProvider = "cloudflare_do" | "deno";
 
@@ -53,7 +51,7 @@ export async function routeTokenization<Id>(args: {
     case "invalid":
       return { kind: "unavailable", provider: "deno", failureCategory: "configuration" };
     case "enabled": {
-      const inputTextBytes = args.request.inputTextBytes ?? textEncoder.encode(args.request.inputText).byteLength;
+      const inputTextBytes = args.request.inputTextBytes ?? utf8ByteLength(args.request.inputText);
       if (inputTextBytes < args.config.thresholdBytes) {
         return withCloudflareProvider(await tokenizeInput(args.namespace, tokenizerRequest));
       }

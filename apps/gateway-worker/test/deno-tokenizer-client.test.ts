@@ -32,8 +32,8 @@ describe("tokenizeWithDeno", () => {
     expect(requestInit.redirect).toBe("manual");
     const headers = new Headers(requestInit.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${authToken}`);
-    expect(headers.get("content-type")).toBe("application/json");
-    expect(requestInit.body).toBe(JSON.stringify({ inputText }));
+    expect(headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(requestInit.body).toBe(inputText);
     expect(headers.get("x-request-id")).toBeNull();
     expect(headers.get("x-quota-state")).toBeNull();
     expect(headers.get("x-policy")).toBeNull();

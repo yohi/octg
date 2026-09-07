@@ -1,3 +1,9 @@
+declare const Buffer: {
+  concat(list: readonly Uint8Array[], totalLength?: number): {
+    toString(encoding?: string): string;
+  };
+};
+
 export interface ReadJsonBodyMetrics {
   readonly rawBodyBytes: number;
   readonly rawBodyBytesSource: "measured" | "declared_content_length" | "measured_partial";
@@ -9,7 +15,7 @@ export interface ReadJsonBodyMetrics {
 }
 
 export type ReadJsonBodyResult =
-  | { readonly ok: true; readonly body: unknown; readonly metrics: ReadJsonBodyMetrics }
+  | { readonly ok: true; readonly body: unknown; readonly rawText: string; readonly metrics: ReadJsonBodyMetrics }
   | {
       readonly ok: false;
       readonly reason: "invalid_json" | "too_large";
@@ -19,8 +25,6 @@ export type ReadJsonBodyResult =
 function elapsedSince(start: number): number {
   return Math.max(0, performance.now() - start);
 }
-
-const UTF8_DECODER = new TextDecoder();
 
 function declaredContentLengthOf(request: Pick<Request, "headers" | "body">): number | null {
   const value = request.headers.get("content-length");
@@ -94,19 +98,15 @@ export async function readJsonBody(
     chunks.push(chunk.value);
   }
 
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
   const bodyReadMs = elapsedSince(bodyReadStartedAt);
   const parseStartedAt = performance.now();
   try {
-    const body = JSON.parse(UTF8_DECODER.decode(bytes));
+    const rawText = Buffer.concat(chunks, length).toString("utf-8");
+    const body = JSON.parse(rawText);
     return {
       ok: true,
       body,
+      rawText,
       metrics: {
         rawBodyBytes: length,
         rawBodyBytesSource: "measured",

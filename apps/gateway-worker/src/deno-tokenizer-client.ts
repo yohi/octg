@@ -60,9 +60,9 @@ export async function tokenizeWithDeno(args: {
         method: "POST",
         headers: {
           authorization: `Bearer ${args.authToken}`,
-          "content-type": "application/json",
+          "content-type": "text/plain; charset=utf-8",
         },
-        body: JSON.stringify({ inputText: args.inputText }),
+        body: args.inputText,
         // Workers supports "manual" but rejects the Fetch-standard "error" mode.
         redirect: "manual",
         signal: controller.signal,

@@ -37,6 +37,7 @@ describe("readJsonBody", () => {
     expect(result).toMatchObject({
       ok: true,
       body: { message: "あ" },
+      rawText: body,
       metrics: {
         rawBodyBytes: encoder.encode(body).byteLength,
         rawBodyBytesSource: "measured",

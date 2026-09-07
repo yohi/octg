@@ -1,12 +1,195 @@
-import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot } from "@octg/shared";
+import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot, type Usage } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
+
 import { completeRequestAuditBestEffort } from "./db";
 import type { Env } from "./index";
 import type { ResourceStageOutcome } from "./resource-observation";
 import { workerVersionHeaders } from "./version-metadata";
 
 type Stub = DurableObjectStub<QuotaController>;
-type Usage = { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+export type { Usage };
+
+function findBraceOpen(event: string, colonIndex: number): number {
+  const limit = Math.min(event.length, colonIndex + 20);
+  for (let i = colonIndex + 1; i < limit; i++) {
+    const code = event.codePointAt(i);
+    if (code === 123) return i;
+    if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
+  }
+  return -1;
+}
+
+function findUsageColon(event: string, searchStart: number): number {
+  let stringStart = -1;
+  let escaped = false;
+  for (let i = searchStart; i < event.length; i++) {
+    const code = event.codePointAt(i);
+    if (stringStart === -1) {
+      if (code === 34) stringStart = i;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (code === 92) {
+      escaped = true;
+      continue;
+    }
+    if (code !== 34) continue;
+
+    if (i - stringStart === 6 && event.startsWith("usage", stringStart + 1)) {
+      let colonIndex = i + 1;
+      while (colonIndex < event.length) {
+        const colonCode = event.codePointAt(colonIndex);
+        if (colonCode !== 32 && colonCode !== 9 && colonCode !== 10 && colonCode !== 13) {
+          if (colonCode === 58) return colonIndex;
+          break;
+        }
+        colonIndex++;
+      }
+    }
+    stringStart = -1;
+  }
+  return -1;
+}
+
+function findMatchingBraceClose(event: string, braceOpen: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = braceOpen; i < event.length; i++) {
+    const code = event.codePointAt(i);
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (code === 92) {
+        escaped = true;
+      } else if (code === 34) {
+        inString = false;
+      }
+      continue;
+    }
+    if (code === 34) {
+      inString = true;
+      continue;
+    }
+    if (code === 123) {
+      depth++;
+    } else if (code === 125) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function tryParseUsageSnippet(event: string, braceOpen: number, braceClose: number): Usage | undefined {
+  try {
+    const snippet = event.slice(braceOpen, braceClose + 1);
+    const parsed = JSON.parse(snippet) as Record<string, unknown>;
+    if (typeof parsed.total_tokens === "number") {
+      return parsed as Usage;
+    }
+  } catch {
+    // continue searching
+  }
+  return undefined;
+}
+
+export function extractUsageFromEvent(event: string): Usage | undefined {
+  let searchStart = 0;
+  while (searchStart < event.length) {
+    const colonIndex = findUsageColon(event, searchStart);
+    if (colonIndex === -1) break;
+    searchStart = colonIndex + 1;
+
+    const braceOpen = findBraceOpen(event, colonIndex);
+    if (braceOpen === -1) continue;
+
+    const braceClose = findMatchingBraceClose(event, braceOpen);
+    if (braceClose === -1) continue;
+
+    const parsed = tryParseUsageSnippet(event, braceOpen, braceClose);
+    if (parsed) return parsed;
+  }
+  return undefined;
+}
+
+export function bytesIncludesAscii(bytes: Uint8Array, needle: string): boolean {
+  const len = bytes.byteLength;
+  const nlen = needle.length;
+  if (len < nlen) return false;
+  const first = needle.codePointAt(0)!;
+  for (let i = 0; i <= len - nlen; i++) {
+    if (bytes[i] === first) {
+      let match = true;
+      for (let j = 1; j < nlen; j++) {
+        if (bytes[i + j] !== needle.codePointAt(j)) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+  }
+  return false;
+}
+
+const USAGE_NEEDLE = '"usage"';
+const RESPONSE_COMPLETED_NEEDLE = "response.completed";
+
+export function mightContainUsage(bytes: Uint8Array): boolean {
+  return bytesIncludesAscii(bytes, USAGE_NEEDLE) || bytesIncludesAscii(bytes, RESPONSE_COMPLETED_NEEDLE);
+}
+
+export class RingTailBuffer {
+  private readonly buffer: Uint8Array;
+  private readonly capacity: number;
+  private writeIndex = 0;
+  private totalBytes = 0;
+
+  constructor(capacity = 32768) {
+    this.capacity = capacity;
+    this.buffer = new Uint8Array(capacity);
+  }
+
+  write(chunk: Uint8Array): void {
+    const len = chunk.byteLength;
+    if (len === 0) return;
+    this.totalBytes += len;
+
+    if (len >= this.capacity) {
+      this.buffer.set(chunk.subarray(len - this.capacity), 0);
+      this.writeIndex = 0;
+      return;
+    }
+
+    const firstPart = Math.min(len, this.capacity - this.writeIndex);
+    this.buffer.set(chunk.subarray(0, firstPart), this.writeIndex);
+    if (len > firstPart) {
+      const secondPart = len - firstPart;
+      this.buffer.set(chunk.subarray(firstPart, len), 0);
+      this.writeIndex = secondPart;
+    } else {
+      this.writeIndex = (this.writeIndex + len) % this.capacity;
+    }
+  }
+
+  getTail(): Uint8Array {
+    if (this.totalBytes === 0) {
+      return new Uint8Array(0);
+    }
+    if (this.totalBytes < this.capacity) {
+      return this.buffer.slice(0, this.totalBytes);
+    }
+    const result = new Uint8Array(this.capacity);
+    const firstPart = this.capacity - this.writeIndex;
+    result.set(this.buffer.subarray(this.writeIndex), 0);
+    result.set(this.buffer.subarray(0, this.writeIndex), firstPart);
+    return result;
+  }
+}
 
 export interface StreamLeaseOptions {
   readonly lease: InFlightLease;
@@ -33,8 +216,12 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
-  const decoder = new TextDecoder();
-  let buffer = "";
+  let textDecoder: TextDecoder | undefined;
+  const ringBuffer = new RingTailBuffer(32768);
+  const decodeTail = (tail: Uint8Array): string => {
+    textDecoder ??= new TextDecoder();
+    return textDecoder.decode(tail);
+  };
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -81,10 +268,12 @@ export function proxyStream(
           onFinalized?.(outcome);
           return;
         }
+        const inputTokens = usage.prompt_tokens ?? usage.input_tokens;
+        const outputTokens = usage.completion_tokens ?? usage.output_tokens;
         await completeRequestAuditBestEffort(env, requestId, {
           status: "completed",
-          inputTokens: usage.prompt_tokens,
-          outputTokens: usage.completion_tokens,
+          inputTokens,
+          outputTokens,
           totalTokens: usage.total_tokens,
           billingClass: "free",
         }, inserted);
@@ -109,23 +298,31 @@ export function proxyStream(
 
       if (!event.includes('"usage"') && !event.includes("response.completed")) continue;
 
-      let lineStart = 0;
-      while (lineStart < event.length) {
-        let lineEnd = event.indexOf("\n", lineStart);
-        if (lineEnd === -1) lineEnd = event.length;
-        const line = event.slice(lineStart, lineEnd);
-        lineStart = lineEnd + 1;
+      const extracted = extractUsageFromEvent(event);
+      if (extracted) {
+        usage = extracted;
+        continue;
+      }
 
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(payload) as Record<string, unknown>;
-          if (parsed.usage) usage = parsed.usage as Usage;
-          const response = parsed.response as { usage?: Usage } | undefined;
-          if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
-        } catch {
-          continue;
+      if (event.length < 2048) {
+        let lineStart = 0;
+        while (lineStart < event.length) {
+          let lineEnd = event.indexOf("\n", lineStart);
+          if (lineEnd === -1) lineEnd = event.length;
+          const line = event.slice(lineStart, lineEnd);
+          lineStart = lineEnd + 1;
+
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            if (parsed.usage) usage = parsed.usage as Usage;
+            const response = parsed.response as { usage?: Usage } | undefined;
+            if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
+          } catch {
+            continue;
+          }
         }
       }
     }
@@ -163,16 +360,21 @@ export function proxyStream(
   };
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const cut = buffer.lastIndexOf("\n\n");
-      if (cut >= 0) {
-        parseEvents(buffer.slice(0, cut + 2));
-        buffer = buffer.slice(cut + 2);
-      }
       controller.enqueue(chunk);
+      ringBuffer.write(chunk);
+      if (usage === undefined && mightContainUsage(chunk)) {
+        const text = decodeTail(ringBuffer.getTail());
+        parseEvents(text);
+      }
     },
     flush() {
-      if (buffer.trim()) parseEvents(`${buffer}\n\n`);
+      if (usage === undefined) {
+        const tail = ringBuffer.getTail();
+        if (tail.byteLength > 0) {
+          const text = decodeTail(tail);
+          parseEvents(text);
+        }
+      }
       ctx.waitUntil(finalize());
     },
     cancel() {

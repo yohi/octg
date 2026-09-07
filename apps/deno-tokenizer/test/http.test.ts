@@ -161,18 +161,68 @@ Deno.test("returns 401 for an invalid bearer token before reading the body", asy
   assertEquals(request.bodyUsed, false);
 });
 
-Deno.test("returns 415 for a non-JSON content type", async () => {
-  const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
+function createTokenizeRequest(contentType: string, body: BodyInit): Request {
+  return new Request(tokenizeUrl, {
     method: "POST",
     headers: {
       authorization: `Bearer ${authToken}`,
-      "content-type": "text/plain",
+      "content-type": contentType,
     },
-    body: "hello",
+    body,
   });
+}
 
-  await expectRejection({ fixture, request, status: 415 });
+async function expectTokenCountSuccess(contentType: string, expectedCount = 7) {
+  const fixture = createFixture();
+  const request = createTokenizeRequest(contentType, "hello");
+  const response = await fixture.handler(request);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), { baseTokenCount: expectedCount });
+  assertEquals(fixture.calls(), 1);
+}
+
+async function expectRejectedContentType(contentType: string, body: BodyInit, status = 415) {
+  const fixture = createFixture();
+  const request = createTokenizeRequest(contentType, body);
+  await expectRejection({ fixture, request, status });
+}
+
+Deno.test("returns 415 for an unsupported content type", async () => {
+  await expectRejectedContentType("application/xml", "<xml></xml>");
+});
+
+Deno.test("returns token count for text/plain content type with charset=utf-8", async () => {
+  await expectTokenCountSuccess("text/plain; charset=utf-8");
+});
+
+Deno.test("returns token count for text/plain without charset parameter", async () => {
+  await expectTokenCountSuccess("text/plain");
+});
+
+Deno.test("reads content type once for an accepted tokenize request", async () => {
+  const fixture = createFixture();
+  const request = validRequest("hello");
+  const originalGet = request.headers.get.bind(request.headers);
+  let contentTypeReads = 0;
+  request.headers.get = (name: string): string | null => {
+    if (name.toLowerCase() === "content-type") {
+      contentTypeReads += 1;
+    }
+    return originalGet(name);
+  };
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 200);
+  assertEquals(contentTypeReads, 1);
+});
+
+Deno.test("returns 415 for text/plain with non-utf8 charset", async () => {
+  await expectRejectedContentType("text/plain; charset=iso-8859-1", "hello");
+});
+
+Deno.test("returns 415 for application/json with non-utf8 charset", async () => {
+  await expectRejectedContentType("application/json; charset=shift_jis", JSON.stringify({ inputText: "hello" }));
 });
 
 Deno.test("returns 400 for malformed JSON", async () => {

@@ -35,6 +35,14 @@ const RESPONSE_INPUT_CONTENT_TYPES = new Set(["input_text", "text"]);
 const RESPONSE_OUTPUT_CONTENT_TYPES = new Set(["output_text", "text"]);
 const UTF8_ENCODER = new TextEncoder();
 
+export function utf8ByteLength(str: string): number {
+  const buf = (globalThis as unknown as { Buffer?: { byteLength(s: string): number } }).Buffer;
+  if (buf !== undefined) {
+    return buf.byteLength(str);
+  }
+  return UTF8_ENCODER.encode(str).byteLength;
+}
+
 type ResponseTextPartType = "input_text" | "output_text";
 
 type ContentWalk = { ok: true; text: string } | { ok: false; error: NormalizeError };
@@ -145,7 +153,7 @@ export function normalizeChatCompletions(
   }
 
   const inputText = texts.join("\n");
-  const inputTextBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  const inputTextBytes = utf8ByteLength(inputText);
   const inputBytes = inputTextBytes;
   if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
 
@@ -259,7 +267,7 @@ export function normalizeResponses(
             }
             texts.push(summary.text);
           }
-          opaqueInputBytes += UTF8_ENCODER.encode(entry.encrypted_content).byteLength;
+          opaqueInputBytes += utf8ByteLength(entry.encrypted_content);
           break;
         }
         default:
@@ -288,7 +296,7 @@ export function normalizeResponses(
   if (value.max_output_tokens !== undefined && positiveInteger(value.max_output_tokens) === undefined) {
     return { ok: false, error: "invalid_body" };
   }
-  const inputTextBytes = UTF8_ENCODER.encode(inputText).byteLength;
+  const inputTextBytes = utf8ByteLength(inputText);
   const inputBytes = inputTextBytes + opaqueInputBytes;
   if (inputBytes > maxInputBytes) return { ok: false, error: "input_too_large" };
 
