@@ -453,6 +453,81 @@ describe("proxy stream finalization", () => {
     expect(settle).toHaveBeenCalledWith(requestId, 150);
     await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
   });
+
+  it("settles correctly when output chunks contain misleading usage text before the final usage chunk", async () => {
+    const controller = controllerFor("2026-10-20");
+    const requestId = "stream-misleading-usage-text";
+    await controller.reserve(requestId, 200, 200);
+    const lease = await acquireLease(controller, requestId);
+    const settle = vi.spyOn(controller, "settle").mockResolvedValue({ ok: true });
+    const context = createExecutionContext();
+
+    const chunkContentWithUsage = 'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Here is some code:\\n\\"usage\\": {\\\"invalid\\\": true}\\nresponse.completed"}}]}\n\n';
+    const chunkFinalUsage = 'data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"total_tokens":75}}\n\n';
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controllerStream) {
+        controllerStream.enqueue(new TextEncoder().encode(chunkContentWithUsage));
+        controllerStream.enqueue(new TextEncoder().encode(chunkFinalUsage));
+        controllerStream.close();
+      },
+    });
+
+    const response = proxyStream(
+      new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    await response.text();
+    await waitOnExecutionContext(context);
+
+    expect(settle).toHaveBeenCalledWith(requestId, 75);
+    await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
+  });
+
+  it("settles correctly when earlier stream chunks exceed the pruning threshold", async () => {
+    const controller = controllerFor("2026-10-21");
+    const requestId = "stream-pruning-settlement";
+    await controller.reserve(requestId, 200, 200);
+    const lease = await acquireLease(controller, requestId);
+    const settle = vi.spyOn(controller, "settle").mockResolvedValue({ ok: true });
+    const context = createExecutionContext();
+
+    // Stream 70KB of content chunks (exceeding PRUNE_THRESHOLD of 64KB)
+    const largeChunk = new TextEncoder().encode('data: {"choices":[{"delta":{"content":"' + "x".repeat(1024) + '"}}]}\n\n');
+    const chunkFinalUsage = new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}\n\n');
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controllerStream) {
+        for (let i = 0; i < 70; i++) {
+          controllerStream.enqueue(largeChunk);
+        }
+        controllerStream.enqueue(chunkFinalUsage);
+        controllerStream.close();
+      },
+    });
+
+    const response = proxyStream(
+      new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+      controller,
+      streamOptions(lease),
+      env,
+      context,
+      quotaSnapshot,
+      Promise.resolve(false),
+    );
+
+    await response.text();
+    await waitOnExecutionContext(context);
+
+    expect(settle).toHaveBeenCalledWith(requestId, 150);
+    await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
+  });
 });
 
 describe("extractUsageFromEvent", () => {
