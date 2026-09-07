@@ -140,7 +140,7 @@ Do not treat this list as a complete configuration reference. See [docs/configur
 | Monitoring, reconciliation, canary, rollback, and secrets | [docs/operations.md](./docs/operations.md) |
 | Deno tokenizer component | [docs/deno-tokenizer.md](./docs/deno-tokenizer.md) |
 | Cloudflare AI Gateway Custom Provider | [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) |
-| Historical requirements and design records | `REQUIREMENTS*.md` and `docs/superpowers/` — non-authoritative |
+| Future work and migration notes | [docs/roadmap.md](./docs/roadmap.md) |
 
 ## Development
 

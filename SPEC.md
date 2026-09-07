@@ -6,7 +6,10 @@ This document is the normative technical specification for the current Phase 1 b
 
 It is reconstructed from the implementation on `master`. After this specification is adopted, changes that alter externally observable behavior, quota safety, protocol semantics, or persistent-state invariants MUST update implementation and this document together.
 
-`REQUIREMENTS.md`, dated `REQUIREMENTS_*.md` files, and design records under `docs/superpowers/` are historical inputs. They are not current technical authority.
+Historical requirements and design records have been consolidated into this
+specification, the linked operational documents, and
+[roadmap.md](./docs/roadmap.md). Those records are not current technical
+authority.
 
 ## 2. Scope
 
@@ -28,6 +31,10 @@ Phase 1 supports:
 Phase 1 does **not** implement a paid request path. `PAID_SHARED`, `max_paid_usd_day`, and model fallback fields are retained in configuration/schema surfaces for forward compatibility only. They MUST NOT be interpreted as enabling paid fallback.
 
 Non-text model input is not supported by the gateway normalization contract.
+
+Future work and candidate directions are tracked in
+[docs/roadmap.md](./docs/roadmap.md). A roadmap item is not part of the Phase 1
+contract until this specification is updated.
 
 ## 3. Components and Trust Boundaries
 
@@ -234,6 +241,21 @@ Arithmetic outside safe-integer bounds is a fail-closed internal error.
 The default tokenization path uses `TokenizerController`.
 
 The controller is an RPC service. It does not use Durable Object storage for request text, API keys, or tokenizer state.
+
+The Worker uses the fixed logical object `tokenizer:primary`. Sharding is not
+part of the current contract.
+
+If exact BPE initialization or encoding raises an ordinary JavaScript `Error`,
+the controller may return a conservative UTF-8-byte estimate with
+`estimationPath = conservative_bytes`. An RPC failure, malformed result,
+arithmetic failure, or work-limit failure is not eligible for a Worker-local
+fallback and fails closed.
+
+The controller emits `octg.tokenizer_stage` events for `tokenizer_init` and
+`tokenizer_encode`. Start and finish events may include duration, safe byte or
+token counts, estimation path, and a failure category. These events MUST NOT
+contain input text, prompts, request bodies, credentials, or raw tokenizer
+output.
 
 ### 9.3 Optional Deno provider
 
@@ -587,5 +609,12 @@ npm test
 ```
 
 Contract-relevant changes SHOULD add or update tests in the component that owns the invariant, including gateway proxy/normalization, QuotaController, tokenizer routing, reconciliation, or workflow contract tests.
+
+Tokenizer and resource-limit changes MUST also be checked with representative
+synthetic text in the approximately 74k-token class. The acceptance run uses
+concurrency 1, concurrency 2, and the operator-defined expected peak. It
+confirms that the Worker does not report `exceededCpu`, the gateway has paired
+tokenization start/finish events, the TokenizerController has paired init/encode
+events, and a tokenizer failure reaches neither quota reservation nor upstream.
 
 The specification must be reviewed whenever those tests or externally visible contracts change.

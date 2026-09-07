@@ -35,4 +35,4 @@ npm run dev -w apps/gateway-worker
 - Architecture, API contracts, error semantics: [SPEC.md](./SPEC.md)
 - Deployment, secrets, rotation, and operations: [README.md](./README.md)
 - Cloudflare AI Gateway Custom Provider setup: [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md)
-- Template-based new-instance setup: [docs/DEPLOY_FROM_TEMPLATE.md](./docs/DEPLOY_FROM_TEMPLATE.md)
+- New-instance deployment: [docs/deployment.md](./docs/deployment.md)

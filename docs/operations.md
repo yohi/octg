@@ -38,6 +38,13 @@ Request processing emits resource-stage events for stages such as body read, par
 - whether upstream was reached;
 - stage outcome and duration.
 
+`TokenizerController` emits `octg.tokenizer_stage` events for
+`tokenizer_init` and `tokenizer_encode`. Check the paired start/finish events
+when investigating initialization or BPE CPU cost. Safe metadata may include
+duration, byte/token counts, estimation path, and failure category; it must not
+include input text, prompts, request bodies, credentials, or raw tokenizer
+output.
+
 Do not add raw prompts, response payloads, API keys, peppers, or tokenizer input text to operational logs.
 
 For a customer-visible failure, start with `X-OCTG-Request-Id` and, where present, Worker version metadata and `X-OCTG-Route`.
@@ -117,9 +124,15 @@ Operational rules:
 - target only explicitly allowed production hostnames;
 - use a dedicated production canary client;
 - start at low concurrency;
+- for the large-input regression, run concurrency 1, concurrency 2, and the
+  operator-defined expected peak using synthetic or sanitized approximately
+  74k-token text;
 - remember that canary requests consume real production complimentary quota;
 - compare the observed Worker version with the version intended for acceptance;
-- stop on unexpected quota, tokenizer, upstream, or resource-limit behavior.
+- stop on unexpected quota, tokenizer, upstream, or resource-limit behavior;
+- accept the rollout only when the Worker has no `exceededCpu` outcome, gateway
+  and tokenizer stage events are paired, and quota/upstream accounting is
+  correct.
 
 Do not use the canary as a load-test framework against the shared complimentary allowance.
 
@@ -138,6 +151,14 @@ Monitor:
 - network error name where emitted;
 - tokenization duration;
 - Worker resource-limit outcomes.
+
+For Preview, the dedicated Deno smoke runs after the Deno-disabled Durable
+Object smoke. It intentionally checks an invalid-auth version before a
+valid-auth version. The invalid request must fail with HTTP 500
+`internal_error` rather than silently using the Durable Object path; the valid
+request must return HTTP 200. Both versions remain at 0% beside the captured
+100% version, and cleanup always restores the captured version with
+`wrangler rollback`. Fork pull requests use secret-free validation only.
 
 See [deno-tokenizer.md](./deno-tokenizer.md) for Deno-specific deployment and acceptance.
 
@@ -168,6 +189,13 @@ Before rollback:
 4. verify the target code can operate against the already-applied persistent schema.
 
 Do not rewrite or remove an already applied Durable Object migration tag to make rollback easier.
+
+After the TokenizerController migration has been applied, prefer a rollback
+target that still includes the compatible migration and binding. Rolling back
+only to avoid the migration can re-enable the Worker-local large-input BPE path
+and repeat the resource-limit incident. If a new migration or class registration
+cannot be deployed, repair forward with a new deployment; do not rewrite an
+already applied migration tag.
 
 After rollback:
 
