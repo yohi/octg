@@ -505,6 +505,21 @@ describe("proxy stream finalization", () => {
     ]);
     await runStreamSettlementTest("stream-usage-followed-by-large-data", "2026-10-22", stream, 150);
   });
+
+  it("reuses one TextDecoder while scanning multiple usage chunks", async () => {
+    const decoderDecode = vi.spyOn(TextDecoder.prototype, "decode");
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"usage"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":25,"total_tokens":75}}\n\n'));
+        c.close();
+      },
+    });
+
+    await runStreamSettlementTest("stream-decoder-reuse", "2026-10-23", stream, 75);
+
+    expect(new Set(decoderDecode.mock.instances).size).toBe(1);
+  });
 });
 
 describe("extractUsageFromEvent", () => {
@@ -541,6 +556,14 @@ describe("extractUsageFromEvent", () => {
   it("returns undefined when the word usage appears in message content", () => {
     const event = 'data: {"choices":[{"delta":{"content":"Discussing \\"usage\\": { not real tokens }"}}]}';
     expect(extractUsageFromEvent(event)).toBeUndefined();
+  });
+
+  it("ignores braces inside usage string values", () => {
+    const event = 'data: {"usage":{"total_tokens":30,"note":"closing brace } inside text"}}';
+    expect(extractUsageFromEvent(event)).toEqual({
+      total_tokens: 30,
+      note: "closing brace } inside text",
+    });
   });
 });
 
@@ -608,5 +631,3 @@ describe("mightContainUsage and bytesIncludesAscii", () => {
     expect(mightContainUsage(encoder.encode('data: {"choices":[{"delta":{"content":"regular text"}}]}'))).toBe(false);
   });
 });
-
-

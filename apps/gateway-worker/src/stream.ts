@@ -19,10 +19,61 @@ function findBraceOpen(event: string, colonIndex: number): number {
   return -1;
 }
 
+function findUsageColon(event: string, searchStart: number): number {
+  let stringStart = -1;
+  let escaped = false;
+  for (let i = searchStart; i < event.length; i++) {
+    const code = event.codePointAt(i);
+    if (stringStart === -1) {
+      if (code === 34) stringStart = i;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (code === 92) {
+      escaped = true;
+      continue;
+    }
+    if (code !== 34) continue;
+
+    if (i - stringStart === 6 && event.startsWith("usage", stringStart + 1)) {
+      let colonIndex = i + 1;
+      while (colonIndex < event.length) {
+        const colonCode = event.codePointAt(colonIndex);
+        if (colonCode !== 32 && colonCode !== 9 && colonCode !== 10 && colonCode !== 13) {
+          if (colonCode === 58) return colonIndex;
+          break;
+        }
+        colonIndex++;
+      }
+    }
+    stringStart = -1;
+  }
+  return -1;
+}
+
 function findMatchingBraceClose(event: string, braceOpen: number): number {
   let depth = 0;
+  let inString = false;
+  let escaped = false;
   for (let i = braceOpen; i < event.length; i++) {
     const code = event.codePointAt(i);
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (code === 92) {
+        escaped = true;
+      } else if (code === 34) {
+        inString = false;
+      }
+      continue;
+    }
+    if (code === 34) {
+      inString = true;
+      continue;
+    }
     if (code === 123) {
       depth++;
     } else if (code === 125) {
@@ -49,12 +100,9 @@ function tryParseUsageSnippet(event: string, braceOpen: number, braceClose: numb
 export function extractUsageFromEvent(event: string): Usage | undefined {
   let searchStart = 0;
   while (searchStart < event.length) {
-    const usageKeyIndex = event.indexOf('"usage"', searchStart);
-    if (usageKeyIndex === -1) break;
-    searchStart = usageKeyIndex + 7;
-
-    const colonIndex = event.indexOf(":", searchStart);
-    if (colonIndex === -1 || colonIndex - searchStart > 20) continue;
+    const colonIndex = findUsageColon(event, searchStart);
+    if (colonIndex === -1) break;
+    searchStart = colonIndex + 1;
 
     const braceOpen = findBraceOpen(event, colonIndex);
     if (braceOpen === -1) continue;
@@ -168,7 +216,12 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
+  let textDecoder: TextDecoder | undefined;
   const ringBuffer = new RingTailBuffer(32768);
+  const decodeTail = (tail: Uint8Array): string => {
+    textDecoder ??= new TextDecoder();
+    return textDecoder.decode(tail);
+  };
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -310,7 +363,7 @@ export function proxyStream(
       controller.enqueue(chunk);
       ringBuffer.write(chunk);
       if (usage === undefined && mightContainUsage(chunk)) {
-        const text = new TextDecoder().decode(ringBuffer.getTail());
+        const text = decodeTail(ringBuffer.getTail());
         parseEvents(text);
       }
     },
@@ -318,7 +371,7 @@ export function proxyStream(
       if (usage === undefined) {
         const tail = ringBuffer.getTail();
         if (tail.byteLength > 0) {
-          const text = new TextDecoder().decode(tail);
+          const text = decodeTail(tail);
           parseEvents(text);
         }
       }
