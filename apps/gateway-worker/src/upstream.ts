@@ -57,6 +57,6 @@ export async function callUpstream(
   return transport(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
