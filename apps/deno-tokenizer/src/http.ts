@@ -149,8 +149,7 @@ function parseContentType(request: Request): ParsedContentType {
   return { mediaType, charset };
 }
 
-function acceptsPayload(request: Request): boolean {
-  const { mediaType, charset } = parseContentType(request);
+function acceptsPayload({ mediaType, charset }: ParsedContentType): boolean {
   if (mediaType === "application/json" || mediaType === "text/plain") {
     return charset === undefined || charset === "utf-8";
   }
@@ -207,7 +206,8 @@ export function createTokenizerHandler(args: {
     ) {
       return errorResponse(401);
     }
-    if (!acceptsPayload(request)) {
+    const contentType = parseContentType(request);
+    if (!acceptsPayload(contentType)) {
       return errorResponse(415);
     }
 
@@ -215,7 +215,6 @@ export function createTokenizerHandler(args: {
     if (rawBody instanceof Response) {
       return rawBody;
     }
-    const contentType = parseContentType(request);
     const input = parseInput(rawBody, contentType.mediaType);
     if (input === undefined) {
       return errorResponse(400);

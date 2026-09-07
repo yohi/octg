@@ -199,6 +199,24 @@ Deno.test("returns token count for text/plain without charset parameter", async 
   await expectTokenCountSuccess("text/plain");
 });
 
+Deno.test("reads content type once for an accepted tokenize request", async () => {
+  const fixture = createFixture();
+  const request = validRequest("hello");
+  const originalGet = request.headers.get.bind(request.headers);
+  let contentTypeReads = 0;
+  request.headers.get = (name: string): string | null => {
+    if (name.toLowerCase() === "content-type") {
+      contentTypeReads += 1;
+    }
+    return originalGet(name);
+  };
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 200);
+  assertEquals(contentTypeReads, 1);
+});
+
 Deno.test("returns 415 for text/plain with non-utf8 charset", async () => {
   await expectRejectedContentType("text/plain; charset=iso-8859-1", "hello");
 });
