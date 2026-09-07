@@ -19,15 +19,17 @@ export function buildUpstreamBody(
   maxOutputTokens: number,
 ): Record<string, unknown> {
   if (endpoint === "chat") {
-    const { max_tokens: _legacy, max_completion_tokens: _completion, ...rest } = body;
-    return {
-      ...rest,
-      max_completion_tokens: maxOutputTokens,
-      ...(body.stream === true ? { stream_options: { include_usage: true } } : {}),
-    };
+    delete body.max_tokens;
+    body.max_completion_tokens = maxOutputTokens;
+    if (body.stream === true) {
+      body.stream_options = { include_usage: true };
+    }
+    return body;
   }
-  const { max_output_tokens: _output, ...rest } = normalizeResponsesUpstreamBody(body);
-  return { ...rest, max_output_tokens: maxOutputTokens };
+  const normalized = normalizeResponsesUpstreamBody(body);
+  delete normalized.max_output_tokens;
+  normalized.max_output_tokens = maxOutputTokens;
+  return normalized;
 }
 
 export async function callUpstream(

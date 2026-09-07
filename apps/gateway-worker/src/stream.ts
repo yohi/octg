@@ -59,6 +59,54 @@ export function extractUsageFromEvent(event: string): Usage | undefined {
   return undefined;
 }
 
+export class RingTailBuffer {
+  private readonly buffer: Uint8Array;
+  private readonly capacity: number;
+  private writeIndex = 0;
+  private totalBytes = 0;
+
+  constructor(capacity = 32768) {
+    this.capacity = capacity;
+    this.buffer = new Uint8Array(capacity);
+  }
+
+  write(chunk: Uint8Array): void {
+    const len = chunk.byteLength;
+    if (len === 0) return;
+    this.totalBytes += len;
+
+    if (len >= this.capacity) {
+      this.buffer.set(chunk.subarray(len - this.capacity), 0);
+      this.writeIndex = 0;
+      return;
+    }
+
+    const firstPart = Math.min(len, this.capacity - this.writeIndex);
+    this.buffer.set(chunk.subarray(0, firstPart), this.writeIndex);
+    if (len > firstPart) {
+      const secondPart = len - firstPart;
+      this.buffer.set(chunk.subarray(firstPart, len), 0);
+      this.writeIndex = secondPart;
+    } else {
+      this.writeIndex = (this.writeIndex + len) % this.capacity;
+    }
+  }
+
+  getTail(): Uint8Array {
+    if (this.totalBytes === 0) {
+      return new Uint8Array(0);
+    }
+    if (this.totalBytes < this.capacity) {
+      return this.buffer.slice(0, this.totalBytes);
+    }
+    const result = new Uint8Array(this.capacity);
+    const firstPart = this.capacity - this.writeIndex;
+    result.set(this.buffer.subarray(this.writeIndex), 0);
+    result.set(this.buffer.subarray(0, this.writeIndex), firstPart);
+    return result;
+  }
+}
+
 export interface StreamLeaseOptions {
   readonly lease: InFlightLease;
   readonly ttlMs: number;
@@ -84,10 +132,7 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
-  const MAX_TAIL_BYTES = 32768;
-  const PRUNE_THRESHOLD = 65536;
-  const tailChunks: Uint8Array[] = [];
-  let tailLength = 0;
+  const ringBuffer = new RingTailBuffer(32768);
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -227,25 +272,12 @@ export function proxyStream(
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       controller.enqueue(chunk);
-      tailChunks.push(chunk);
-      tailLength += chunk.byteLength;
-      if (tailLength > PRUNE_THRESHOLD) {
-        while (tailChunks.length > 1) {
-          const first = tailChunks[0];
-          if (first === undefined || tailLength - first.byteLength < MAX_TAIL_BYTES) break;
-          tailLength -= tailChunks.shift()!.byteLength;
-        }
-      }
+      ringBuffer.write(chunk);
     },
     flush() {
-      if (tailChunks.length > 0) {
-        const combined = new Uint8Array(tailLength);
-        let offset = 0;
-        for (const chunk of tailChunks) {
-          combined.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        const text = new TextDecoder().decode(combined);
+      const tail = ringBuffer.getTail();
+      if (tail.byteLength > 0) {
+        const text = new TextDecoder().decode(tail);
         parseEvents(text);
       }
       ctx.waitUntil(finalize());

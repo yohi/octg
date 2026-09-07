@@ -2,7 +2,7 @@ import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:
 import type { QuotaController } from "@octg/quota-controller";
 import type { InFlightLease, QuotaSnapshot } from "@octg/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractUsageFromEvent, proxyStream } from "../src/stream";
+import { extractUsageFromEvent, proxyStream, RingTailBuffer } from "../src/stream";
 
 const controllerFor = (day: string): DurableObjectStub<QuotaController> =>
   env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
@@ -524,3 +524,50 @@ describe("extractUsageFromEvent", () => {
     expect(extractUsageFromEvent(event)).toBeUndefined();
   });
 });
+
+describe("RingTailBuffer", () => {
+  it("returns empty buffer when no chunks written", () => {
+    const ring = new RingTailBuffer(16);
+    expect(ring.getTail()).toEqual(new Uint8Array(0));
+  });
+
+  it("handles write of empty chunks without error", () => {
+    const ring = new RingTailBuffer(16);
+    ring.write(new Uint8Array(0));
+    expect(ring.getTail()).toEqual(new Uint8Array(0));
+  });
+
+  it("returns exact data when total bytes is less than capacity", () => {
+    const ring = new RingTailBuffer(16);
+    const chunk1 = new TextEncoder().encode("hello ");
+    const chunk2 = new TextEncoder().encode("world");
+    ring.write(chunk1);
+    ring.write(chunk2);
+    expect(new TextDecoder().decode(ring.getTail())).toBe("hello world");
+  });
+
+  it("returns exact data when total bytes equals capacity", () => {
+    const ring = new RingTailBuffer(10);
+    ring.write(new TextEncoder().encode("0123456789"));
+    expect(new TextDecoder().decode(ring.getTail())).toBe("0123456789");
+  });
+
+  it("returns last capacity bytes when total bytes exceeds capacity across multiple chunks", () => {
+    const ring = new RingTailBuffer(8);
+    // Write 4 chunks of 3 bytes each: "abc", "def", "ghi", "jkl" -> "abcdefghijkl" (12 bytes)
+    // Tail 8 bytes should be "efghijkl"
+    ring.write(new TextEncoder().encode("abc"));
+    ring.write(new TextEncoder().encode("def"));
+    ring.write(new TextEncoder().encode("ghi"));
+    ring.write(new TextEncoder().encode("jkl"));
+    expect(new TextDecoder().decode(ring.getTail())).toBe("efghijkl");
+  });
+
+  it("returns tail of chunk when a single chunk exceeds capacity", () => {
+    const ring = new RingTailBuffer(5);
+    ring.write(new TextEncoder().encode("initial"));
+    ring.write(new TextEncoder().encode("0123456789"));
+    expect(new TextDecoder().decode(ring.getTail())).toBe("56789");
+  });
+});
+
