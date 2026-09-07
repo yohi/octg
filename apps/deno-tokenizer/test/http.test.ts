@@ -161,31 +161,26 @@ Deno.test("returns 401 for an invalid bearer token before reading the body", asy
   assertEquals(request.bodyUsed, false);
 });
 
-Deno.test("returns 415 for an unsupported content type", async () => {
-  const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
+function createTokenizeRequest(contentType: string, body: BodyInit): Request {
+  return new Request(tokenizeUrl, {
     method: "POST",
     headers: {
       authorization: `Bearer ${authToken}`,
-      "content-type": "application/xml",
+      "content-type": contentType,
     },
-    body: "<xml></xml>",
+    body,
   });
+}
 
+Deno.test("returns 415 for an unsupported content type", async () => {
+  const fixture = createFixture();
+  const request = createTokenizeRequest("application/xml", "<xml></xml>");
   await expectRejection({ fixture, request, status: 415 });
 });
 
 Deno.test("returns token count for text/plain content type with charset=utf-8", async () => {
   const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${authToken}`,
-      "content-type": "text/plain; charset=utf-8",
-    },
-    body: "hello",
-  });
-
+  const request = createTokenizeRequest("text/plain; charset=utf-8", "hello");
   const response = await fixture.handler(request);
   assertEquals(response.status, 200);
   assertEquals(await response.json(), { baseTokenCount: 7 });
@@ -194,15 +189,7 @@ Deno.test("returns token count for text/plain content type with charset=utf-8", 
 
 Deno.test("returns token count for text/plain without charset parameter", async () => {
   const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${authToken}`,
-      "content-type": "text/plain",
-    },
-    body: "hello",
-  });
-
+  const request = createTokenizeRequest("text/plain", "hello");
   const response = await fixture.handler(request);
   assertEquals(response.status, 200);
   assertEquals(await response.json(), { baseTokenCount: 7 });
@@ -211,29 +198,13 @@ Deno.test("returns token count for text/plain without charset parameter", async 
 
 Deno.test("returns 415 for text/plain with non-utf8 charset", async () => {
   const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${authToken}`,
-      "content-type": "text/plain; charset=iso-8859-1",
-    },
-    body: "hello",
-  });
-
+  const request = createTokenizeRequest("text/plain; charset=iso-8859-1", "hello");
   await expectRejection({ fixture, request, status: 415 });
 });
 
 Deno.test("returns 415 for application/json with non-utf8 charset", async () => {
   const fixture = createFixture();
-  const request = new Request(tokenizeUrl, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${authToken}`,
-      "content-type": "application/json; charset=shift_jis",
-    },
-    body: JSON.stringify({ inputText: "hello" }),
-  });
-
+  const request = createTokenizeRequest("application/json; charset=shift_jis", JSON.stringify({ inputText: "hello" }));
   await expectRejection({ fixture, request, status: 415 });
 });
 

@@ -40,8 +40,9 @@ declare const Buffer: {
 } | undefined;
 
 export function utf8ByteLength(str: string): number {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.byteLength(str);
+  const buf = (globalThis as unknown as { Buffer?: { byteLength(s: string): number } }).Buffer;
+  if (buf !== undefined) {
+    return buf.byteLength(str);
   }
   return UTF8_ENCODER.encode(str).byteLength;
 }

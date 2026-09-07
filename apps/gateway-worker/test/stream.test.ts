@@ -477,30 +477,32 @@ describe("proxy stream finalization", () => {
     await runStreamSettlementTest("stream-misleading-usage-text", "2026-10-20", stream, 75);
   });
 
-  it("settles correctly when earlier stream chunks exceed the pruning threshold", async () => {
-    const largeChunk = new TextEncoder().encode('data: {"choices":[{"delta":{"content":"' + "x".repeat(1024) + '"}}]}\n\n');
-    const finalChunk = new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}\n\n');
-    const stream = new ReadableStream<Uint8Array>({
+  const createChunkedStream = (
+    chunks: readonly { data: Uint8Array; repeat?: number }[],
+  ): ReadableStream<Uint8Array> => {
+    return new ReadableStream<Uint8Array>({
       start(c) {
-        for (let i = 0; i < 70; i++) c.enqueue(largeChunk);
-        c.enqueue(finalChunk);
+        for (const { data, repeat = 1 } of chunks) {
+          for (let i = 0; i < repeat; i++) c.enqueue(data);
+        }
         c.close();
       },
     });
+  };
+
+  it("settles correctly when earlier stream chunks exceed the pruning threshold", async () => {
+    const stream = createChunkedStream([
+      { data: new TextEncoder().encode('data: {"choices":[{"delta":{"content":"' + "x".repeat(1024) + '"}}]}\n\n'), repeat: 70 },
+      { data: new TextEncoder().encode('data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}\n\n') },
+    ]);
     await runStreamSettlementTest("stream-pruning-settlement", "2026-10-21", stream, 150);
   });
 
   it("settles correctly when usage is followed by data exceeding the tail buffer", async () => {
-    // A response.completed event followed by 40KB of trailing data (exceeding the 32KB RingTailBuffer)
-    const usageChunk = new TextEncoder().encode('data: {"type":"response.completed","response":{"id":"resp_follow","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}\n\n');
-    const trailingChunk = new TextEncoder().encode('data: {"type":"response.padding","text":"' + "p".repeat(1024) + '"}\n\n');
-    const stream = new ReadableStream<Uint8Array>({
-      start(c) {
-        c.enqueue(usageChunk);
-        for (let i = 0; i < 40; i++) c.enqueue(trailingChunk);
-        c.close();
-      },
-    });
+    const stream = createChunkedStream([
+      { data: new TextEncoder().encode('data: {"type":"response.completed","response":{"id":"resp_follow","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}\n\n') },
+      { data: new TextEncoder().encode('data: {"type":"response.padding","text":"' + "p".repeat(1024) + '"}\n\n'), repeat: 40 },
+    ]);
     await runStreamSettlementTest("stream-usage-followed-by-large-data", "2026-10-22", stream, 150);
   });
 });

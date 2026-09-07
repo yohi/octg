@@ -9,6 +9,43 @@ import { workerVersionHeaders } from "./version-metadata";
 type Stub = DurableObjectStub<QuotaController>;
 export type { Usage };
 
+function findBraceOpen(event: string, colonIndex: number): number {
+  const limit = Math.min(event.length, colonIndex + 20);
+  for (let i = colonIndex + 1; i < limit; i++) {
+    const code = event.codePointAt(i);
+    if (code === 123) return i;
+    if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
+  }
+  return -1;
+}
+
+function findMatchingBraceClose(event: string, braceOpen: number): number {
+  let depth = 0;
+  for (let i = braceOpen; i < event.length; i++) {
+    const code = event.codePointAt(i);
+    if (code === 123) {
+      depth++;
+    } else if (code === 125) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function tryParseUsageSnippet(event: string, braceOpen: number, braceClose: number): Usage | undefined {
+  try {
+    const snippet = event.slice(braceOpen, braceClose + 1);
+    const parsed = JSON.parse(snippet) as Record<string, unknown>;
+    if (typeof parsed.total_tokens === "number") {
+      return parsed as Usage;
+    }
+  } catch {
+    // continue searching
+  }
+  return undefined;
+}
+
 export function extractUsageFromEvent(event: string): Usage | undefined {
   let searchStart = 0;
   while (searchStart < event.length) {
@@ -19,42 +56,14 @@ export function extractUsageFromEvent(event: string): Usage | undefined {
     const colonIndex = event.indexOf(":", searchStart);
     if (colonIndex === -1 || colonIndex - searchStart > 20) continue;
 
-    let braceOpen = -1;
-    for (let i = colonIndex + 1; i < event.length && i < colonIndex + 20; i++) {
-      const ch = event.charCodeAt(i);
-      if (ch === 123) {
-        braceOpen = i;
-        break;
-      }
-      if (ch !== 32 && ch !== 9 && ch !== 10 && ch !== 13) break;
-    }
+    const braceOpen = findBraceOpen(event, colonIndex);
     if (braceOpen === -1) continue;
 
-    let depth = 0;
-    let braceClose = -1;
-    for (let i = braceOpen; i < event.length; i++) {
-      const ch = event.charCodeAt(i);
-      if (ch === 123) {
-        depth++;
-      } else if (ch === 125) {
-        depth--;
-        if (depth === 0) {
-          braceClose = i;
-          break;
-        }
-      }
-    }
+    const braceClose = findMatchingBraceClose(event, braceOpen);
     if (braceClose === -1) continue;
 
-    try {
-      const snippet = event.slice(braceOpen, braceClose + 1);
-      const parsed = JSON.parse(snippet) as Record<string, unknown>;
-      if (typeof parsed.total_tokens === "number") {
-        return parsed as Usage;
-      }
-    } catch {
-      // continue searching
-    }
+    const parsed = tryParseUsageSnippet(event, braceOpen, braceClose);
+    if (parsed) return parsed;
   }
   return undefined;
 }
@@ -63,12 +72,12 @@ export function bytesIncludesAscii(bytes: Uint8Array, needle: string): boolean {
   const len = bytes.byteLength;
   const nlen = needle.length;
   if (len < nlen) return false;
-  const first = needle.charCodeAt(0);
+  const first = needle.codePointAt(0)!;
   for (let i = 0; i <= len - nlen; i++) {
     if (bytes[i] === first) {
       let match = true;
       for (let j = 1; j < nlen; j++) {
-        if (bytes[i + j] !== needle.charCodeAt(j)) {
+        if (bytes[i + j] !== needle.codePointAt(j)) {
           match = false;
           break;
         }
