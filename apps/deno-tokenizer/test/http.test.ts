@@ -175,7 +175,7 @@ Deno.test("returns 415 for an unsupported content type", async () => {
   await expectRejection({ fixture, request, status: 415 });
 });
 
-Deno.test("returns token count for text/plain content type", async () => {
+Deno.test("returns token count for text/plain content type with charset=utf-8", async () => {
   const fixture = createFixture();
   const request = new Request(tokenizeUrl, {
     method: "POST",
@@ -190,6 +190,51 @@ Deno.test("returns token count for text/plain content type", async () => {
   assertEquals(response.status, 200);
   assertEquals(await response.json(), { baseTokenCount: 7 });
   assertEquals(fixture.calls(), 1);
+});
+
+Deno.test("returns token count for text/plain without charset parameter", async () => {
+  const fixture = createFixture();
+  const request = new Request(tokenizeUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "text/plain",
+    },
+    body: "hello",
+  });
+
+  const response = await fixture.handler(request);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), { baseTokenCount: 7 });
+  assertEquals(fixture.calls(), 1);
+});
+
+Deno.test("returns 415 for text/plain with non-utf8 charset", async () => {
+  const fixture = createFixture();
+  const request = new Request(tokenizeUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "text/plain; charset=iso-8859-1",
+    },
+    body: "hello",
+  });
+
+  await expectRejection({ fixture, request, status: 415 });
+});
+
+Deno.test("returns 415 for application/json with non-utf8 charset", async () => {
+  const fixture = createFixture();
+  const request = new Request(tokenizeUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "application/json; charset=shift_jis",
+    },
+    body: JSON.stringify({ inputText: "hello" }),
+  });
+
+  await expectRejection({ fixture, request, status: 415 });
 });
 
 Deno.test("returns 400 for malformed JSON", async () => {

@@ -121,14 +121,40 @@ function parseInput(rawBody: Uint8Array, mediaType?: string): TokenizeInput | un
   return tokenizeInputOf(parsed);
 }
 
-function mediaTypeOf(request: Request): string | undefined {
+interface ParsedContentType {
+  readonly mediaType?: string;
+  readonly charset?: string;
+}
+
+function parseContentType(request: Request): ParsedContentType {
   const contentType = request.headers.get("content-type");
-  return contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  if (!contentType) return {};
+  const parts = contentType.split(";").map((p) => p.trim());
+  const mediaType = parts[0]?.toLowerCase();
+  let charset: string | undefined;
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
+    const equalIndex = part.indexOf("=");
+    if (equalIndex !== -1) {
+      const key = part.slice(0, equalIndex).trim().toLowerCase();
+      if (key === "charset") {
+        let value = part.slice(equalIndex + 1).trim().toLowerCase();
+        if (value.startsWith('"') && value.endsWith('"')) {
+          value = value.slice(1, -1).trim();
+        }
+        charset = value;
+      }
+    }
+  }
+  return { mediaType, charset };
 }
 
 function acceptsPayload(request: Request): boolean {
-  const mediaType = mediaTypeOf(request);
-  return mediaType === "application/json" || mediaType === "text/plain";
+  const { mediaType, charset } = parseContentType(request);
+  if (mediaType === "application/json" || mediaType === "text/plain") {
+    return charset === undefined || charset === "utf-8";
+  }
+  return false;
 }
 
 async function isAuthorized(
@@ -189,7 +215,8 @@ export function createTokenizerHandler(args: {
     if (rawBody instanceof Response) {
       return rawBody;
     }
-    const input = parseInput(rawBody, mediaTypeOf(request));
+    const contentType = parseContentType(request);
+    const input = parseInput(rawBody, contentType.mediaType);
     if (input === undefined) {
       return errorResponse(400);
     }
