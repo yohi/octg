@@ -362,7 +362,7 @@ Each code step below includes the test assertion, command, expected RED result, 
 **Interfaces:**
 
 - Consumes: authenticated `POST /prepare` with `application/json` raw Responses body, the existing `DenoTokenizerServiceConfig` auth and input-size settings, and no Deno-side timeout setting. The Worker client reuses `DENO_TOKENIZER_TIMEOUT_MS` as its request/body deadline in Task 5.
-- Produces: `200 application/json`, a normalized upstream JSON body, and `X-OCTG-Prepare-Metadata` containing base64url-encoded `PrepareMetadata`; error responses contain only the shared allowlisted codes.
+- Produces: `200 application/json`, a normalized upstream JSON body, and `X-OCTG-Prepare-Metadata` containing base64url-encoded `PrepareMetadata`; validation responses contain only the shared allowlisted codes, while internal failures are status-only `500` responses with no validation envelope.
 - The `/prepare` raw-body bound is `config.maxInputBytes`, the resolved `MAX_INPUT_BYTES`. The existing `/tokenize` raw-body bound `config.maxRawBodyBytes`, fatal UTF-8 decoder, and response contract remain unchanged.
 - The successful metadata uses `rawBodyBytes` from bytes actually read, `inputBytes = inputTextBytes + opaqueInputBytes`, exact `estimatedInputTokensOf` accounting, positive `maxOutputTokens`, and an `octg_prepare_` plus 32 lowercase hexadecimal marker.
 - The response body contains exactly one quoted marker in `max_output_tokens`. Deno regenerates the marker for up to 16 attempts if the candidate appears elsewhere in the serialized body.
@@ -376,7 +376,8 @@ Worker client in Task 5:
 | `413` | `input_too_large` or `request_too_large` | `rejected` |
 | `200` | Valid success metadata and normalized body | `resolved` |
 | `200` | Any error envelope, or malformed/oversized success metadata/body | `unavailable: malformed_response` |
-| Any other status, including `401`, `415`, and all `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
+| `500` | Internal prepare failure with no validation envelope | `unavailable` |
+| Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
 The `400` and `413` error bodies are bounded `application/json` objects with
 exactly one `code` field, and the code must match the status row. Raw-body
@@ -389,7 +390,7 @@ defined in this task before the endpoint handler uses them:
 ```ts
 type PrepareRawBodyResult =
   | { readonly ok: true; readonly bytes: Uint8Array }
-  | { readonly ok: false; readonly reason: "too_large" | "invalid_body" };
+  | { readonly ok: false; readonly reason: "too_large" | "read_failure" };
 
 async function readBoundedRawBody(
   request: Request,
@@ -400,13 +401,22 @@ function prepareError(status: 400 | 413, code: PrepareErrorCode): Response;
 ```
 
 `readBoundedRawBody` returns `too_large` for declared or measured raw-body
-oversize and `invalid_body` for a body-read failure; it retains no request
-content. `prepareError` emits the exact bounded envelope for the status/code
-matrix and has no other side effect.
+oversize and `read_failure` when `getReader()` or `reader.read()` rejects; it
+retains no request content. `read_failure` is an internal helper result and is
+never passed as `PrepareErrorCode`. A body that reaches normal end-of-stream
+returns `ok: true`, including an empty body. `prepareError` emits the exact
+bounded envelope for the validation status/code matrix and has no other side
+effect. Add this local helper for the status-only internal contract:
+
+```ts
+function prepareInternalFailure(): Response {
+  return new Response(null, { status: 500 });
+}
+```
 
 - [ ] **RED: add failing `/prepare` endpoint tests**
 
-  Test method/path/auth/content type, declared and measured raw-body oversize, replacement-style UTF-8 decoding, invalid JSON, all shared normalization errors, exact metadata values, non-ASCII `rawBodyBytes`, generic `text` normalization for user/system/developer/assistant and `function_call_output`, exactly one quoted marker in the returned body, marker regeneration on collision, and no request-derived error detail. Test the complete status/body matrix above, including valid `400` and `413` envelopes, wrong status/code combinations, `500` plus `invalid_body`, `401` plus an allowlisted code, and `415` plus an allowlisted code.
+  Test method/path/auth/content type, declared and measured raw-body oversize, replacement-style UTF-8 decoding, invalid JSON, all shared normalization errors, exact metadata values, non-ASCII `rawBodyBytes`, generic `text` normalization for user/system/developer/assistant and `function_call_output`, exactly one quoted marker in the returned body, marker regeneration on collision, and no request-derived error detail. Add separate cases for a request-body reader rejection returning HTTP `500` with no `code`, invalid JSON after a complete body read returning `400` with `invalid_body`, normalization `invalid_body` returning `400` with `invalid_body`, and declared/measured oversize returning `413` with `request_too_large`. Test the complete status/body matrix above, including valid `400` and `413` envelopes, wrong status/code combinations, `500` plus `invalid_body`, `500` with no body, `401` plus an allowlisted code, and `415` plus an allowlisted code.
 
   ```ts
   const requestBody = JSON.stringify({
@@ -444,15 +454,13 @@ matrix and has no other side effect.
 
 - [ ] **GREEN: add the prepare service without changing `/tokenize`**
 
-  Reuse the configured auth token and resolved input limit; the Deno service has no new timeout setting. Authorize and validate the request before reading it. Read the raw body with a bounded byte reader using `config.maxInputBytes`; return `request_too_large` for declared or measured raw oversize; decode UTF-8 with replacement semantics; parse JSON; call the shared normalizer; and map its errors without including request-derived detail. Return `400` for `invalid_body`, `non_text`, and `max_tokens_conflict`, and `413` for `input_too_large` and `request_too_large`, exactly as shown in the status/body matrix.
+  Reuse the configured auth token and resolved input limit; the Deno service has no new timeout setting. Authorize and validate the request before reading it. Read the raw body with a bounded byte reader using `config.maxInputBytes`; return `request_too_large` for declared or measured raw oversize; return status-only `500` from `prepareInternalFailure()` for `getReader()` or `reader.read()` rejection; decode UTF-8 with replacement semantics only after a complete read; parse JSON; call the shared normalizer; and map its errors without including request-derived detail. Return `400` for `invalid_body`, `non_text`, and `max_tokens_conflict`, and `413` for `input_too_large` and `request_too_large`, exactly as shown in the status/body matrix. A raw-body read failure must never be passed to `prepareError` or represented by `PrepareErrorCode.invalid_body`.
 
   ```ts
   const rawBody = await readBoundedRawBody(request, config.maxInputBytes);
   if (!rawBody.ok) {
-    return prepareError(
-      rawBody.reason === "too_large" ? 413 : 400,
-      rawBody.reason === "too_large" ? "request_too_large" : "invalid_body",
-    );
+    if (rawBody.reason === "read_failure") return prepareInternalFailure();
+    return prepareError(413, "request_too_large");
   }
 
   let parsedBody: unknown;
@@ -489,7 +497,7 @@ matrix and has no other side effect.
 
 - [ ] **REFACTOR: keep endpoint phases and error mapping explicit**
 
-  Keep authentication and media-type checks before body reads, keep raw-body rejection distinct from normalized `input_too_large`, and keep `/tokenize` implementation untouched apart from shared imports required by compilation. Rerun the focused Deno tests.
+  Keep authentication and media-type checks before body reads, keep raw-body rejection distinct from normalized `input_too_large`, keep raw-body read failure as a status-only internal response, and keep `/tokenize` implementation untouched apart from shared imports required by compilation. Rerun the focused Deno tests.
 
 ### Task 5: Add Worker prepare configuration and client
 
@@ -534,8 +542,8 @@ matrix and has no other side effect.
   | enabled and valid | partial or invalid | legacy Deno tokenizer | prepare configuration error |
 
 - A complete prepare pair reuses `DENO_TOKENIZER_AUTH_TOKEN` and `DENO_TOKENIZER_TIMEOUT_MS`; it does not create parallel auth or timeout settings. Validate HTTPS without URL credentials, a positive safe threshold no greater than `maxInputBytes`, and the same positive safe timeout rule as the tokenizer group.
-- Produces `prepareWithDeno(args: { endpoint: string; authToken: string; timeoutMs: number; maxInputBytes: number; request: Request; fetchImpl?: typeof fetch }): Promise<PrepareOutcome>`. It forwards the original body stream without calling `request.text()`, `request.json()`, or `readJsonBody()`.
-- `PrepareOutcome` has `resolved`, `rejected`, and `unavailable` variants. `resolved` carries validated metadata, the response body, and an idempotent `cancel`; `rejected` carries one shared `PrepareErrorCode`; `unavailable` carries only `timeout`, `network`, `upstream_status`, or `malformed_response`.
+- Produces `prepareWithDeno(args: { endpoint: string; authToken: string; timeoutMs: number; maxInputBytes: number; request: Request; fetchImpl?: typeof fetch; onTimeout?: () => void }): Promise<PrepareOutcome>`. It forwards the original body stream without calling `request.text()`, `request.json()`, or `readJsonBody()`. `onTimeout` is a local lifecycle callback for the proxy and is not serialized or added to the shared protocol.
+- `PrepareOutcome` has `resolved`, `rejected`, and `unavailable` variants. `resolved` carries validated metadata, the response body, and an idempotent `cancel`; `rejected` carries one shared `PrepareErrorCode`; `unavailable` carries only `timeout`, `network`, `upstream_status`, or `malformed_response`. A Deno `500` body-read failure is classified by status as `unavailable: upstream_status`; it is never parsed as a validation code.
 
 The client classifies HTTP status before inspecting an error body, using this
 exact matrix:
@@ -545,7 +553,8 @@ exact matrix:
 | `400` | `invalid_body`, `non_text`, or `max_tokens_conflict` | `rejected` |
 | `413` | `input_too_large` or `request_too_large` | `rejected` |
 | `200` | Any error envelope, or malformed/oversized success metadata/body | `unavailable: malformed_response` |
-| Any other status, including `401`, `415`, and all `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
+| `500` | Internal prepare failure with no validation envelope | `unavailable: upstream_status` |
+| Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
 The first two rows require a bounded `application/json` object with exactly
 one `code` field, and the code must match the status row. A `2xx` status other
@@ -553,7 +562,7 @@ than `200` is unavailable even when its body resembles a valid envelope.
 
 - [ ] **RED: write configuration and client tests**
 
-  Test the complete truth table, both prepare settings absent, one missing, empty-string placeholders, invalid HTTPS URL, credentials in URL, invalid/too-large threshold, invalid timeout, and unchanged tokenizer configuration cases. Test body forwarding without a preliminary read, auth/content-type headers, response-body cancellation, timeout through body close/cancel, network failure, and successful metadata/body return. Test the complete status/body matrix above: valid `400` and `413` envelopes, `400`/`413` with unknown codes, every other wrong status/code combination, `500` plus `invalid_body`, `500` plus `request_too_large`, `401` plus an allowlisted code, `415` plus an allowlisted code, missing/invalid metadata, oversized metadata headers, and malformed bodies.
+  Test the complete truth table, both prepare settings absent, one missing, empty-string placeholders, invalid HTTPS URL, credentials in URL, invalid/too-large threshold, invalid timeout, and unchanged tokenizer configuration cases. Test body forwarding without a preliminary read, auth/content-type headers, response-body cancellation, timeout through body close/cancel, a resolved-body timeout invoking `onTimeout` exactly once, network failure, and successful metadata/body return. Test the complete status/body matrix above: valid `400` and `413` envelopes, `400`/`413` with unknown codes, every other wrong status/code combination, `500` plus `invalid_body`, `500` plus `request_too_large`, `500` with no body from a Deno body-read failure, `401` plus an allowlisted code, `415` plus an allowlisted code, missing/invalid metadata, oversized metadata headers, and malformed bodies. Assert that the body-read failure is `unavailable` and never `rejected`.
 
   ```ts
   const config = resolveDenoRuntimeConfig({
@@ -589,8 +598,18 @@ than `200` is unavailable even when its body resembles a valid envelope.
 
   ```ts
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const response = await fetchImpl(endpoint, {
+  let response: Response | undefined;
+  const cancelResponseBody = async (): Promise<void> => {
+    const body = response?.body;
+    if (body === null || body === undefined) return;
+    await body.cancel().catch(() => undefined);
+  };
+  const timeout = setTimeout(() => {
+    controller.abort();
+    void cancelResponseBody();
+    args.onTimeout?.();
+  }, timeoutMs);
+  response = await fetchImpl(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${authToken}`, "content-type": "application/json" },
     body: request.body,
@@ -600,11 +619,11 @@ than `200` is unavailable even when its body resembles a valid envelope.
   const cancel = async (): Promise<void> => {
     clearTimeout(timeout);
     controller.abort();
-    await response.body?.cancel().catch(() => undefined);
+    await cancelResponseBody();
   };
   ```
 
-  Wrap the successful response body so normal close clears the same timer. Classify the HTTP status before parsing any error body. Map only the exact `400`/code and `413`/code combinations in the matrix to `rejected`; map `401`, `415`, all `5xx`, every other status/code combination, malformed metadata/body, timeout, and network failures to `unavailable`. An allowlisted code on `500`, `401`, or `415` must never become `rejected`.
+  Add an optional local `onTimeout?: () => void` callback to `prepareWithDeno`; it is invoked after the shared controller aborts and a best-effort response-body cancellation is requested when headers have already arrived. It is not part of the transport protocol. Wrap the successful response body so normal close clears the same timer, while a timeout keeps the resolved body in its terminal-failure path. Classify the HTTP status before parsing any error body. Map only the exact `400`/code and `413`/code combinations in the matrix to `rejected`; map a `500` with no envelope, `401`, `415`, all other `5xx`, every other status/code combination, malformed metadata/body, timeout, and network failures to `unavailable`. An allowlisted code on `500`, `401`, or `415` must never become `rejected`.
 
 - [ ] **GREEN check: run focused tests and type checks**
 
@@ -635,6 +654,25 @@ than `200` is unavailable even when its body resembles a valid envelope.
 - Do not reconstruct or tokenize `metadata.inputText` in the Worker. Use a metadata-only prepared request shape containing `model`, `inputBytes`, `inputTextBytes`, `opaqueInputBytes`, `messageCount`, `estimatedInputTokens`, `maxOutputTokens`, `stream`, and `isToolUse`.
 - `PrepareOutcome.rejected` maps only the five shared codes to existing public OCTG errors. `PrepareOutcome.unavailable` maps to `errInternal`; neither variant invokes `routeTokenization` or reserves quota.
 - Track `upstreamAttemptStarted` through the transport passed to `callUpstream`: the wrapper sets it immediately before the actual upstream fetch. `UpstreamConfigError` therefore remains a pre-upstream cleanup path, while transport/body failures after fetch starts use existing uncertain semantics.
+- Use the shared `PrepareMetadata` type for the retained metadata-only request
+  shape; do not introduce a second metadata interface in `proxy.ts`.
+
+The prepare branch keeps these request-local lifecycle flags in the same
+`handleProxy` scope as the quota and upstream state:
+
+```ts
+let upstreamAttemptStarted = false;
+let preparedQuotaReserved = false;
+let explicitCancelInProgress = false;
+let prepareTimedOut = false;
+```
+
+`preparedQuotaReserved` is set only after a resolved reservation and is not
+derived from the later cleanup state. `explicitCancelInProgress` gates the
+observer callback while the explicit cancellation wrapper is awaiting the
+idempotent Deno cancellation. `prepareTimedOut` prevents any later
+pre-upstream transition from starting quota or upstream work after the Deno
+deadline has fired.
 
 The following helpers are local to `apps/gateway-worker/src/proxy.ts` and are
 part of this task's implementation contract:
@@ -661,14 +699,82 @@ existing `declaredContentLengthOf` helper, it does not collapse absent and
 malformed values.
 
 ```ts
-function finishPrepare(
+function createPrepareFinalizer(
   env: Env,
   requestId: string,
   startedAt: number,
+): (
   outcome: ResourceStageOutcome,
-  fields: ResourceStageFields = {},
-): void {
-  finishResourceStage(env, requestId, "prepare", startedAt, outcome, fields);
+  fields?: ResourceStageFields,
+) => void {
+  let finished = false;
+  return function finishPrepareOnce(
+    outcome: ResourceStageOutcome,
+    fields: ResourceStageFields = {},
+  ): void {
+    if (finished) return;
+    finished = true;
+    finishResourceStage(env, requestId, "prepare", startedAt, outcome, fields);
+  };
+}
+
+type PreparedBodyTerminal = "close" | "error" | "cancel";
+
+function observePreparedBody(
+  body: ReadableStream<Uint8Array>,
+  cancelSource: () => Promise<void>,
+  onTerminal: (terminal: PreparedBodyTerminal) => void,
+): {
+  readonly body: ReadableStream<Uint8Array>;
+  readonly cancel: () => Promise<void>;
+} {
+  const reader = body.getReader();
+  let terminalSeen = false;
+  let cancelPromise: Promise<void> | undefined;
+  const releaseReader = (): void => {
+    try {
+      reader.releaseLock();
+    } catch {
+      // The terminal path may already have released the lock.
+    }
+  };
+  const notify = (terminal: PreparedBodyTerminal): void => {
+    if (terminalSeen) return;
+    terminalSeen = true;
+    onTerminal(terminal);
+  };
+  const cancel = (): Promise<void> => {
+    if (terminalSeen) return Promise.resolve();
+    cancelPromise ??= (async () => {
+      notify("cancel");
+      await cancelSource().catch(() => undefined);
+      await reader.cancel().catch(() => undefined);
+      releaseReader();
+    })();
+    return cancelPromise;
+  };
+  return {
+    body: new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            notify("close");
+            releaseReader();
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk.value);
+        } catch {
+          notify("error");
+          releaseReader();
+          controller.error(new Error("Prepared body read failed."));
+        }
+      },
+      cancel,
+    }),
+    cancel,
+  };
 }
 
 function mapPrepareError(
@@ -691,9 +797,16 @@ function mapPrepareError(
 }
 ```
 
-Both helpers are local to `proxy.ts`. `finishPrepare` has no side effect other
-than delegating to the existing `finishResourceStage` for stage `"prepare"`
-with the supplied safe fields. `mapPrepareError` is pure and maps
+The finalizer and observer are local to `proxy.ts`; they are not a generic
+stream or lifecycle framework. `finishPrepareOnce` is the closure returned by
+`createPrepareFinalizer` and is the only producer allowed to emit the prepare
+finish event for a request. The first terminal callback wins and every later
+callback is a no-op. `observePreparedBody` forwards each chunk once without
+buffering or parsing, reports `close`, `error`, and `cancel`, and composes an
+idempotent cancellation path with the Deno client's `cancel`. The observer is
+wrapped around the marker-replacement stream immediately before
+`callUpstream`, so a marker-transform failure is an error terminal rather than
+a false successful close. `mapPrepareError` is pure and maps
 `invalid_body` to `errInvalidRequest`, `non_text` to `errNonTextInput`,
 `max_tokens_conflict` to `errMaxTokensConflict`, and both size codes to
 `errInputTooLarge`.
@@ -702,7 +815,7 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
 
 - [ ] **RED: add routing, lifecycle, and resource-stage tests**
 
-  Split the scenarios so success and failure expectations cannot be mixed. For a resolved large Responses request, assert that `/prepare` is called before `readJsonBody`, `readJsonBody` and `routeTokenization` are not called, quota reservation is called once, upstream is called once, and settlement completes. Also cover a request without `Content-Length`, small Responses requests using the legacy path, Chat Completions never using prepare, malformed `Content-Length` using the legacy path, and declared raw oversize canceling before Deno.
+  Split the scenarios so success and failure expectations cannot be mixed. For a resolved large Responses request, assert that `/prepare` is called before `readJsonBody`, `readJsonBody` and `routeTokenization` are not called, quota reservation is called once, upstream is called once, and settlement completes. The upstream transport fixture must consume its request body to EOF; consuming only the returned Worker response does not prove that the prepared body reached a terminal event. Also cover a request without `Content-Length`, small Responses requests using the legacy path, Chat Completions never using prepare, malformed `Content-Length` using the legacy path, and declared raw oversize canceling before Deno.
 
   ```ts
   const success = await handleProxy(largeResponsesRequest, env, ctx, "responses", "req-1");
@@ -717,13 +830,49 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
   expect(routeTokenizationSpy).not.toHaveBeenCalled();
   expect(quotaReserve).toHaveBeenCalledOnce();
   expect(upstreamFetch).toHaveBeenCalledOnce();
-  expect(resourceStages).toContainEqual(expect.objectContaining({ stage: "prepare", phase: "finish" }));
+  const prepareFinishes = resourceStages.filter((event) => event.stage === "prepare" && event.phase === "finish");
+  expect(prepareFinishes).toHaveLength(1);
+  expect(prepareFinishes[0]).toMatchObject({
+    outcome: "success",
+    rawBodyBytes: metadata.rawBodyBytes,
+    inputBytes: metadata.inputBytes,
+    inputTextBytes: metadata.inputTextBytes,
+    opaqueInputBytes: metadata.opaqueInputBytes,
+    estimationPath: "exact_bpe",
+    tokenizationProvider: "deno",
+  });
   ```
 
   For separate `rejected` and `unavailable` prepare fixtures, assert
   `callOrder` is exactly `["prepare"]`, `readJsonBody`, `routeTokenization`,
   quota reservation, upstream, and settlement are not called, and the
-  resolved-body `cancel` is not expected because no resolved body exists.
+  resolved-body `cancel` is not expected because no resolved body exists. Add
+  a Deno body-read internal-failure fixture that returns `unavailable`, maps to
+  `errInternal`, and likewise does not call `routeTokenization`, quota
+  reservation, upstream, or settlement. Add
+  the following resolved-body lifecycle cases with a controllable stream and
+  inspect the prepare finish events by request ID:
+
+  ```text
+  resolved + normal close
+    -> exactly one finish, outcome success, validated metadata counts present
+  resolved + pre-upstream policy/quota rejection + cancel
+    -> cancel underlying body, exactly one finish, rejection route, no upstream
+  resolved + timeout/error before upstream attempt
+    -> exactly one finish, outcome exception, pre-upstream cleanup
+  resolved + body error after upstream attempt
+    -> exactly one finish, outcome uncertain, in-flight-only uncertain cleanup
+  explicit cancel and stream terminal callback both fire
+    -> exactly one finish event
+  rejected/unavailable
+    -> existing immediate finish exactly once
+  ```
+
+  `onTimeout` and the observer terminal callback must both exercise the same
+  `finishPrepareOnce` closure. Every pre-upstream cancellation site must call
+  one local `cancelPreparedBeforeUpstream` wrapper rather than calling
+  `prepared.cancel()` directly, so explicit cancellation and a later stream
+  callback cannot emit two finish events.
 
   Add quota/upstream cases asserting metadata model and policy checks, exact `metadata.estimatedInputTokens` passed to `resolveTokenBudget`, no second message/opaque overhead, CLAMP changing only the marker replacement value, REJECT returning before upstream, and body cancellation/release behavior for every pre-upstream terminal path.
 
@@ -749,12 +898,26 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
     (declared.kind === "absent" || declared.value > prepare.thresholdBytes);
   if (usePrepare) {
     const prepareStartedAt = startResourceStage(env, requestId, "prepare");
+    const finishPrepareOnce = createPrepareFinalizer(env, requestId, prepareStartedAt);
+    explicitCancelInProgress = false;
+    preparedQuotaReserved = false;
+    prepareTimedOut = false;
+    const finishPrepareTimeout = (): void => {
+      prepareTimedOut = true;
+      if (explicitCancelInProgress) return;
+      finishPrepareOnce(upstreamAttemptStarted ? "uncertain" : "exception", {
+        route: upstreamAttemptStarted ? "error:upstream_uncertain" : "error:pre_upstream",
+        quotaReserved: preparedQuotaReserved,
+        upstreamReached,
+      });
+    };
     const outcome = await prepareWithDeno({
       endpoint: prepare.endpoint,
       authToken: prepare.authToken,
       timeoutMs: prepare.timeoutMs,
       maxInputBytes: prepare.maxInputBytes,
       request,
+      onTimeout: finishPrepareTimeout,
     });
     // Handle resolved/rejected/unavailable before quota state or tokenization.
   }
@@ -762,24 +925,47 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
 
 - [ ] **GREEN: map outcomes and preserve metadata-only downstream decisions**
 
-  Map `invalid_body` to `errInvalidRequest`, `non_text` to `errNonTextInput`, `max_tokens_conflict` to `errMaxTokensConflict`, and both size codes to `errInputTooLarge`. Map `unavailable` to `errInternal` with safe resource-stage fields. Finish the prepare stage for every non-resolved outcome. The switch below remains inside the `if (usePrepare)` block immediately after the client call, so `prepareStartedAt` and `outcome` are in scope. For `resolved`, retain `metadata`, `body`, and `cancel` as one ownership record and use metadata directly for model classification, tool policy, audit, and budget inputs; never create a large `inputText` placeholder or call `routeTokenization`.
+  Create `finishPrepareOnce` immediately after `startResourceStage` and pass
+  its callback as `onTimeout` to `prepareWithDeno`. Map `invalid_body` to
+  `errInvalidRequest`, `non_text` to `errNonTextInput`,
+  `max_tokens_conflict` to `errMaxTokensConflict`, and both size codes to
+  `errInputTooLarge`. Map a `500` body-read failure and every other
+  `unavailable` outcome to `errInternal` with safe resource-stage fields.
+  Finish the prepare stage immediately for every non-resolved outcome. The
+  switch below remains inside the `if (usePrepare)` block immediately after
+  the client call, so `prepareStartedAt`, `finishPrepareOnce`, and `outcome`
+  are in scope. For `resolved`, retain `metadata`, `body`, and `cancel` as
+  one ownership record and use metadata directly for model classification,
+  tool policy, audit, and budget inputs; never create a large `inputText`
+  placeholder or call `routeTokenization`. After every await that can outlive
+  the Deno deadline (policy load, quota state, reservation, and in-flight
+  admission), check `prepareTimedOut`; if it is true, call
+  `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, release known state, and return `errInternal`. Repeat the guard immediately before `callUpstream` so a timeout cannot start an upstream attempt.
 
   ```ts
+  let metadata: PrepareMetadata;
+  let prepared: {
+    metadata: PrepareMetadata;
+    body: ReadableStream<Uint8Array>;
+    cancel: () => Promise<void>;
+  };
+
   switch (outcome.kind) {
     case "rejected":
-      finishPrepare(env, requestId, prepareStartedAt, "rejected", {
+      finishPrepareOnce("rejected", {
         quotaReserved: false,
         upstreamReached: false,
       });
       return errorResponse(mapPrepareError(outcome.code, requestId));
     case "unavailable":
-      finishPrepare(env, requestId, prepareStartedAt, "exception", {
+      finishPrepareOnce("exception", {
         quotaReserved: false,
         upstreamReached: false,
       });
       return errorResponse(errInternal(requestId));
     case "resolved":
-      prepared = { metadata: outcome.metadata, body: outcome.body, cancel: outcome.cancel };
+      metadata = outcome.metadata;
+      prepared = { metadata, body: outcome.body, cancel: outcome.cancel };
       break;
     default:
       return assertNever(outcome, "prepare outcome");
@@ -788,7 +974,59 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
 
 - [ ] **GREEN: preserve quota lifecycle and transfer stream ownership at upstream transport**
 
-  Read quota state and call `resolveTokenBudget` exactly once with `metadata.estimatedInputTokens` and `metadata.maxOutputTokens`. Apply model/policy failures and reservation/in-flight rejections before upstream ownership transfer, calling `prepared.cancel()` and releasing known state. After successful reservation and in-flight admission, build the marker transform and pass it to `callUpstream`. Wrap the transport so `upstreamAttemptStarted` is set immediately before the actual fetch:
+  Read quota state and call `resolveTokenBudget` exactly once with `metadata.estimatedInputTokens` and `metadata.maxOutputTokens`. Track `preparedQuotaReserved` separately from later cleanup mutations; set it to `true` immediately after a reservation is accepted and leave it available to the prepare finalizer even when later cleanup releases the reservation. Apply model/policy failures and reservation/in-flight rejections before upstream ownership transfer through a local `cancelPreparedBeforeUpstream(outcome, fields)` wrapper that awaits the idempotent Deno cancellation and then calls `finishPrepareOnce`; the wrapper is the only direct caller of `prepared.cancel()`. After successful reservation and in-flight admission, build the marker transform, wrap that transformed stream with `observePreparedBody`, and pass the observed stream to `callUpstream`. The terminal callback must use the following mapping:
+
+```ts
+const finishPreparedTerminal = (terminal: PreparedBodyTerminal): void => {
+  if (explicitCancelInProgress) return;
+  const attempted = upstreamAttemptStarted;
+  if (terminal === "close") {
+    finishPrepareOnce("success", {
+      rawBodyBytes: metadata.rawBodyBytes,
+      inputBytes: metadata.inputBytes,
+      inputTextBytes: metadata.inputTextBytes,
+      opaqueInputBytes: metadata.opaqueInputBytes,
+      estimationPath: metadata.estimationPath,
+      tokenizationProvider: "deno",
+      quotaReserved: preparedQuotaReserved,
+      upstreamReached,
+    });
+    return;
+  }
+  finishPrepareOnce(attempted ? "uncertain" : "exception", {
+    route: attempted ? "error:upstream_uncertain" : "error:pre_upstream",
+    quotaReserved: preparedQuotaReserved,
+    upstreamReached,
+  });
+};
+
+const cancelPreparedBeforeUpstream = async (
+  outcome: "rejected" | "exception",
+  fields: ResourceStageFields,
+): Promise<void> => {
+  explicitCancelInProgress = true;
+  try {
+    await prepared.cancel().catch(() => undefined);
+  } finally {
+    explicitCancelInProgress = false;
+    finishPrepareOnce(outcome, fields);
+  }
+};
+```
+
+`explicitCancelInProgress` is a request-local boolean declared before these
+closures and is reset only by `cancelPreparedBeforeUpstream`. The `onTimeout`
+callback uses the same failure mapping, with `terminal` treated as `error`; it
+must not record body content, marker, credentials, or the thrown error. A
+pre-upstream explicit rejection calls
+`cancelPreparedBeforeUpstream("rejected", { route, quotaReserved, upstreamReached: false })`.
+The observer's `cancel` callback and the explicit cancellation wrapper race
+through the same one-shot finalizer, so only the first call emits the finish
+event. The observer forwards the marker-replacement stream one chunk at a
+time; it never buffers or parses the large body.
+
+Wrap the transport so `upstreamAttemptStarted` is set immediately before the
+actual fetch:
 
   ```ts
   const upstreamTransport: UpstreamTransport = (input, init) => {
@@ -802,11 +1040,17 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
     limit: before.limit,
     outputLimitMode: policy.outputLimitMode,
   });
-  const body = replaceOutputMarker(prepared.body, metadata.outputMarker, budget.maxOutputTokens);
-  const upstream = await callUpstream(env, "/responses", body, meta, cacheKey, idempotencyKey, upstreamTransport);
+  const replacedBody = replaceOutputMarker(prepared.body, metadata.outputMarker, budget.maxOutputTokens);
+  const observed = observePreparedBody(replacedBody, prepared.cancel, finishPreparedTerminal);
+  prepared = {
+    ...prepared,
+    body: observed.body,
+    cancel: observed.cancel,
+  };
+  const upstream = await callUpstream(env, "/responses", prepared.body, meta, cacheKey, idempotencyKey, upstreamTransport);
   ```
 
-  A transform construction failure or `UpstreamConfigError` before the transport wrapper runs cancels and releases known state. A failure after the wrapper runs marks the request uncertain and releases only the in-flight lease, following the existing stream settlement path. Keep the prepare resource stage open until the prepared body closes or is canceled.
+  A transform construction failure or `UpstreamConfigError` before the transport wrapper runs calls `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, releases known state, and finishes the prepare stage exactly once. A failure after the wrapper runs marks the request uncertain and releases only the in-flight lease, following the existing stream settlement path. The prepare resource stage remains open until the observed prepared body closes, errors, is canceled, or the shared timeout callback fires.
 
 - [ ] **GREEN check: run focused integration checks and type check**
 
@@ -818,7 +1062,7 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
 
 - [ ] **REFACTOR: isolate prepared and legacy lifecycles**
 
-  Keep existing Chat/legacy code paths and quota settlement helpers unchanged; add branching only at the documented prepare boundary. Ensure every resolved prepared body has exactly one terminal `cancel` or upstream ownership transfer, and ensure prepare telemetry contains only safe counts/enums/provider state. Rerun the focused commands.
+  Keep existing Chat/legacy code paths and quota settlement helpers unchanged; add branching only at the documented prepare boundary. Ensure every resolved prepared body has exactly one terminal finalizer invocation, whether the event is normal close, read error, timeout, explicit cancel, or upstream cancellation. Ensure prepare telemetry contains only safe counts/enums/provider state and never body content, markers, credentials, or thrown error text. Rerun the focused commands.
 
 ### Task 7: Update deployment configuration and documentation
 
@@ -992,6 +1236,39 @@ with the supplied safe fields. `mapPrepareError` is pure and maps
   Run: `git diff --check`
 
   Expected: only intended implementation, test, and documentation files are changed; pre-existing `deno.lock` remains untouched. Rerun the relevant focused command after any cleanup-only change.
+
+## Bidirectional Traceability
+
+The following matrix is the implementation gate for the decisions that were
+revised in the review. Each row names both the design source and the plan
+steps that must provide executable evidence.
+
+| Requirement or decision | Design location | Plan verification |
+| --- | --- | --- |
+| Raw-body read transport failure is internal | `Prepare Response Contract`, `Error Handling`, `Testing` | Tasks 1, 4, 5, and 6: reader rejection, status-only `500`, `unavailable`, `errInternal`, and no downstream calls |
+| Invalid JSON is public validation only after complete read | `Prepare Response Contract`, `Error Handling` | Tasks 1 and 4: complete-read parse failure returns `400 invalid_body`; Tasks 5/6 preserve the mapping |
+| Raw oversize remains `request_too_large` | `Stage 2: Deno Prepare`, `Prepare Response Contract`, `Testing` | Tasks 1, 2, 4, 5, and 6: declared/measured oversize, `413`, cancellation, and no Deno/quota/upstream call where applicable |
+| Prepare-resolution failure fails closed | `Invariants`, `Worker Data Flow`, `Error Handling` | Tasks 4-6: no Durable Object tokenizer fallback, quota reservation, or upstream call |
+| Resolved prepare resource stage stays open through ownership | `Observability`, `Worker Data Flow` | Task 6: observer, timeout callback, cancellation wrapper, and one-shot finish |
+| Normal resolved body close finishes successfully with metadata | `Observability`, `Testing` | Task 6: upstream fixture consumes the body to EOF; exactly one success finish with validated counts |
+| Resolved body error or timeout finishes in the correct phase | `Worker Data Flow`, `Observability`, `Testing` | Tasks 5 and 6: pre-upstream exception cleanup, post-attempt uncertain cleanup, exactly once |
+| Pre-upstream explicit cancel is idempotent and observable | `Worker Data Flow`, `Testing` | Task 6: `cancelPreparedBeforeUpstream` and cancel/terminal race test |
+| Exact token accounting is preserved | `Stage 2: Deno Prepare`, `Prepare Response Contract` | Tasks 4 and 6: exact BPE metadata and one `resolveTokenBudget` call with no double overhead |
+| Preview three-layer propagation is preserved | `Rollout and Acceptance` | Task 7: workflow, setup, and generated binding tests |
+| Rollback remains explicit and verifiable | `Rollout and Acceptance` | Tasks 7 and 8: known previous Worker version and post-rollback legacy behavior |
+
+The reverse mapping from implementation tasks to design decisions is:
+
+| Plan task | Production step | Design decision realized |
+| --- | --- | --- |
+| Task 1 | Native in-bound Worker body reader with preserved metrics/errors | Stage 1 body-read optimization and existing public semantics |
+| Task 2 | Caller-level regression coverage without caller behavior changes | Stage 1 safety and legacy route preservation |
+| Task 3 | Shared metadata, marker, and stream ownership contracts | Prepare response contract and single-pass upstream body handling |
+| Task 4 | Authenticated Deno `/prepare` endpoint and bounded raw-body classification | Deno prepare processing, validation matrix, and no `/tokenize` change |
+| Task 5 | Combined configuration and Worker prepare client | Configuration truth table, status-first classification, and timeout ownership |
+| Task 6 | Proxy routing, quota lifecycle, marker forwarding, and prepare telemetry | Worker data flow, fail-closed phases, resource-stage finalization, and exact accounting |
+| Task 7 | Production/Preview propagation and operator documentation | Rollout, Preview mapping, security, and rollback procedure |
+| Task 8 | Full verification and sanitized canary/rollback acceptance | End-to-end acceptance criteria and CPU-limit mitigation evidence |
 
 ## Implementation Order
 

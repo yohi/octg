@@ -274,8 +274,8 @@ Worker. `callUpstream` accepts either the existing string/object body or a
 `JSON.stringify(outputMarker)` and the decimal token count is emitted as JSON
 number bytes.
 
-The Deno response error envelope is bounded JSON with exactly one allowlisted
-code:
+Validation failures from Deno use a bounded JSON error envelope with exactly
+one allowlisted code:
 
 ```ts
 export type PrepareErrorCode =
@@ -300,7 +300,8 @@ status/code matrix is:
 | `413` | `input_too_large` or `request_too_large` | `rejected` |
 | `200` | Valid success metadata and normalized body | `resolved` |
 | `200` | Any error envelope, or malformed/oversized success metadata/body | `unavailable: malformed_response` |
-| Any other status, including `401`, `415`, and all `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
+| `500` | Internal prepare failure with no validation envelope | `unavailable` |
+| Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
 Only the first two rows are validation responses. The `400` and `413` bodies
 must be bounded JSON objects with exactly one `code` field, and the code must
@@ -309,6 +310,15 @@ malformed body, or an oversized error body is unavailable. Error bodies never
 contain input-derived text. Raw-body `request_too_large` continues to use Deno
 HTTP `413`; normalized `input_too_large` also uses `413` so the status/code
 combination is fixed rather than implementation-defined.
+
+`invalid_body` is reserved for a request whose raw body was read to completion
+but whose JSON or normalized Responses shape is invalid. If `getReader()` or
+`reader.read()` rejects before the raw body is read to completion, Deno returns
+HTTP `500` with no `PrepareErrorBody` and no validation code. The Worker
+classifies that response by status first as `unavailable` and returns
+`errInternal`; it never upgrades the transport failure to a public validation
+error. An empty body that reaches normal end-of-stream is a completed read and
+therefore follows the `invalid_body` JSON parsing path.
 
 The Worker client returns three variants and preserves the response-body
 ownership on success:
@@ -381,24 +391,29 @@ The two failure phases are explicit:
 
 ## Error Handling
 
-The Deno endpoint returns a small JSON error body with one allowed `code` and
-no input-derived text. The Worker only accepts the following error codes:
+Validation failures from the Deno endpoint return a small JSON error body with
+one allowed `code` and no input-derived text. Internal and raw-body transport
+failures are status-only and do not carry a `PrepareErrorBody`. The Worker
+only accepts the following validation error codes:
 
-| Deno code | Worker response |
+| Prepare failure or Deno code | Worker response |
 | --- | --- |
 | `invalid_body` | `errInvalidRequest` |
 | `non_text` | `errNonTextInput` |
 | `max_tokens_conflict` | `errMaxTokensConflict` |
 | `input_too_large` | `errInputTooLarge` |
 | `request_too_large` | `errInputTooLarge` |
-| timeout, network, malformed response, 5xx, auth failure, unsupported media type, unknown code, or malformed/oversized error body | `errInternal` |
+| status-only internal prepare failure (`500`, including raw-body read failure, with no validation envelope) | `errInternal` |
+| timeout, network, malformed response, other `5xx`, auth failure, unsupported media type, unknown code, or malformed/oversized error body | `errInternal` |
 
 The public `errInputTooLarge` response uses the existing OCTG
 `request_too_large` code for both normalized-input and raw-body limits. The
 prepare protocol still distinguishes `input_too_large` from
 `request_too_large` so the Worker can identify which validation boundary
 failed. No prepare-resolution failure reserves quota or calls the upstream
-gateway.
+gateway. A raw-body read failure is a prepare-resolution failure, not an
+`invalid_body` validation result. The existing `/tokenize` endpoint and its
+error mapping are unchanged.
 
 ## Observability
 
@@ -432,6 +447,8 @@ Errors remain status-only or use the bounded allowlisted error code.
 
 - Authentication and method/path checks.
 - JSON content type and bounded raw body.
+- A request-body reader rejection returns HTTP `500` with no validation code;
+  it is distinct from a complete body followed by invalid JSON.
 - Replacement-style UTF-8 decode parity with the legacy Worker reader.
 - Responses normalization parity with the shared implementation.
 - Exact BPE count and final estimated input token metadata using
@@ -453,8 +470,9 @@ Errors remain status-only or use the bounded allowlisted error code.
 - Metadata version and field validation.
 - Bounded error response parsing.
 - HTTP status/body precedence matrix, including `500` plus an allowlisted code,
-  `401` plus an allowlisted code, `415` plus an allowlisted code, valid `400`
-  and `413` validation envelopes, and unknown status/code combinations.
+  `500` with no body from a Deno body-read failure, `401` plus an allowlisted
+  code, `415` plus an allowlisted code, valid `400` and `413` validation
+  envelopes, and unknown status/code combinations.
 - All three `PrepareOutcome` variants and all five allowlisted error codes.
 - Timeout deadline through body close/cancel, network, non-2xx, malformed
   metadata, oversized metadata header, and malformed body handling.
@@ -469,11 +487,16 @@ Errors remain status-only or use the bounded allowlisted error code.
 - Model, policy, tool, quota, reservation, and in-flight failures match current
   semantics.
 - Deno failure does not invoke the Durable Object tokenizer.
+- Deno body-read internal failure maps to `errInternal` without invoking
+  `routeTokenization`, quota reservation, or upstream transport.
 - Upstream receives normalized Responses JSON with the final output limit.
 - Prepared and legacy routes produce the same final estimated input tokens for
   the same accepted normalized request, including message and opaque-input
   overhead.
 - Every pre-upstream terminal path cancels a resolved prepared body.
+- A resolved prepare body finishes its resource stage exactly once on normal
+  close, read error, timeout, or cancellation, including races between an
+  explicit cancel and a stream terminal callback.
 - Prepared body failure before upstream releases known state; failure after an
   upstream attempt uses uncertain semantics.
 - Streaming and non-streaming upstream settlement remain correct.
