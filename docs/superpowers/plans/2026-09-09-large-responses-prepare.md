@@ -930,7 +930,32 @@ a false successful close. `mapPrepareError` is pure and maps
   `prepared.cancel()` directly, so explicit cancellation and a later stream
   callback cannot emit two finish events.
 
-  Add quota/upstream cases asserting metadata model and policy checks, exact `metadata.estimatedInputTokens` passed to `resolveTokenBudget`, no second message/opaque overhead, CLAMP changing only the marker replacement value, REJECT returning before upstream, and body cancellation/release behavior for every pre-upstream terminal path.
+  Add quota/upstream cases asserting metadata model and policy checks, exact
+  `metadata.estimatedInputTokens` passed to `resolveTokenBudget`, no second
+  message/opaque overhead, CLAMP changing only the marker replacement value,
+  REJECT returning before upstream, and body cancellation/release behavior for
+  every pre-upstream terminal path. The cases must retain distinct triggers and
+  cleanup assertions rather than collapsing all failures into one policy test:
+
+  | Case | Required assertions |
+  | --- | --- |
+  | Model rejected | Prepared cancel exactly once; no reservation; no upstream |
+  | Registry or policy load throws | Prepared cancel exactly once from outer catch; existing internal response and cleanup |
+  | Tool-policy rejection | Prepared cancel exactly once; preserve quota snapshot; no reservation or upstream |
+  | Quota `getState` throws | Prepared cancel exactly once; `errInternal`; no upstream |
+  | Budget `arithmetic_error` | Prepared cancel exactly once; existing internal response; no reservation |
+  | Budget `request_too_large` | Prepared cancel exactly once; existing request-too-large response; no reservation |
+  | Budget `quota_exceeded` | Prepared cancel exactly once; existing quota-exceeded response; no reservation |
+  | Reserve throws | Prepared cancel exactly once; existing fail-closed cleanup and internal response |
+  | Reserve `unknown` | Prepared cancel exactly once; `markReserveOutcomeUnknown`; never release as known-unused |
+  | Reserve rejected | Prepared cancel exactly once; existing rejection response |
+  | In-flight admission rejected | Prepared cancel exactly once; resolved reservation released as existing behavior requires |
+  | Generic pre-upstream outer-catch exception | Prepared cancel exactly once before existing quota cleanup |
+  | Same failures after `upstreamAttempted === true` | Do not run pre-upstream cancellation; preserve existing uncertain semantics |
+
+  Table-driven tests may be used only where the trigger and cleanup semantics
+  are identical. Do not add a generic cleanup framework or hide a distinct
+  quota-state transition behind a test abstraction.
 
 - [ ] **RED check: run focused integration tests**
 
@@ -994,9 +1019,9 @@ a false successful close. `mapPrepareError` is pure and maps
   one ownership record and use metadata directly for model classification,
   tool policy, audit, and budget inputs; never create a large `inputText`
   placeholder or call `routeTokenization`. After every await that can outlive
-  the Deno deadline (policy load, quota state, reservation, and in-flight
-  admission), check `prepareTimedOut`; if it is true, call
-  `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, release known state, and return `errInternal`. Repeat the guard immediately before `callUpstream` so a timeout cannot start an upstream attempt.
+  the Deno deadline (registry load, policy load, quota state, reservation, and
+  in-flight admission), check `prepareTimedOut`; if it is true, call
+  `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, release known state, and return `errInternal`. A successful `loadRegistry` await must have this guard before model classification. An await that throws follows the pre-transfer exception path in the cleanup matrix below. Repeat the guard immediately before `callUpstream` so a timeout cannot start an upstream attempt.
 
   ```ts
   let metadata: PrepareMetadata;
@@ -1027,6 +1052,43 @@ a false successful close. `mapPrepareError` is pure and maps
       return assertNever(outcome, "prepare outcome");
   }
   ```
+
+**Pre-transfer cleanup matrix:**
+
+The following matrix is exhaustive for a resolved prepared body while ownership
+is still in the Worker. Add the cancellation at the named existing branch; do
+not replace the branch with a generic error path. The existing public response,
+quota snapshot, audit status, resource-stage route, and reservation semantics
+remain unchanged.
+
+| Existing pre-transfer path in `proxy.ts` | Required prepared-body action | Existing quota/audit/public behavior to preserve |
+| --- | --- | --- |
+| `loadRegistry(env)` or model classification throws (`370`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing quota cleanup | No reservation; existing internal error and audit cleanup |
+| `pool === "NONE"` model rejection (`371`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No quota action; preserve `errModelRequiresPaid` |
+| `loadPolicy` throws (`375`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing quota cleanup | No reservation; existing internal error and audit cleanup |
+| Tool-policy rejection after `getState` succeeds (`377-383`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the quota snapshot and `errModelNotAllowed` |
+| Tool-policy or main quota `getState` throws (`383-407`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing quota cleanup | No known reservation; existing internal error and audit cleanup |
+| `resolveTokenBudget` returns `arithmetic_error` (`476-489`) | Call `cancelPreparedBeforeUpstream("exception", ...)` before the existing return | No reservation; preserve the existing internal response and tokenize finish |
+| `resolveTokenBudget` returns `request_too_large` (`490-493`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the existing request-too-large response |
+| `resolveTokenBudget` returns `quota_exceeded` (`494-497`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the existing quota-exceeded response |
+| `reserveFailClosed` throws (`508-527`) | Its catch path calls `cancelPreparedBeforeUpstream("exception", ...)` before rethrowing to outer cleanup | Preserve existing fail-closed cleanup and internal error mapping |
+| Reserve outcome is `unknown` (`529-538`) | Call `cancelPreparedBeforeUpstream("exception", ...)` exactly once before return; then preserve the existing unknown outcome state | Call `markReserveOutcomeUnknown`; never release as known-unused; preserve audit/internal response |
+| Reserve outcome is rejected (`540-574`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No resolved reservation; preserve duplicate-idempotency or quota-exceeded response and snapshot |
+| `acquireInFlight` throws (`580-584`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing cleanup | Preserve resolved-reservation release and existing internal error mapping |
+| In-flight admission is rejected (`585-590`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` exactly once before the existing reservation release and return | Preserve resolved-reservation release, audit status, and `errWorkerConcurrencyExceeded` |
+| Transform/observer setup or `UpstreamConfigError` before the transport wrapper (`594-646`) | Call `cancelPreparedBeforeUpstream("exception", ...)` before releasing known state | Preserve reservation release, in-flight release, and existing pre-upstream error path |
+| Any other outer-catch exception while the prepared body is Worker-owned and `upstreamAttempted === false` | Idempotently call `cancelPreparedBeforeUpstream("exception", ...)` before the current quota/in-flight cleanup | Preserve the existing reservation-state cleanup and internal error response |
+
+Controlled return branches must await the cancellation immediately before the
+existing return or its existing audit/quota cleanup. Exception branches must
+use the same request-local prepared ownership record and cancellation wrapper
+from the outer catch, before the current cleanup at `744-776`. Keep the
+cancellation callback reachable from that outer catch; do not hide it inside a
+block that ends before the catch. If timeout, observer terminal handling, or an
+earlier explicit cancellation already finished the body, the idempotent cancel
+and `finishPrepareOnce` no-op rather than emitting a second finish event. Once
+the transport wrapper sets the existing `upstreamAttempted` flag, the outer
+catch must not run this pre-upstream cancellation path.
 
 - [ ] **GREEN: preserve quota lifecycle and transfer stream ownership at upstream transport**
 
@@ -1106,7 +1168,7 @@ immediately before the actual fetch:
   const upstream = await callUpstream(env, "/responses", prepared.body, meta, cacheKey, idempotencyKey, upstreamTransport);
   ```
 
-  A transform or observer setup failure or `UpstreamConfigError` before the transport wrapper runs calls `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, releases known state, and finishes the prepare stage exactly once. A failure after the wrapper runs marks the request uncertain, never releases the reservation as known-unused, and releases only the in-flight lease, following the existing stream settlement path. The prepare resource stage remains open until the observed prepared body closes, errors, is canceled, or the shared timeout callback fires.
+  A transform or observer setup failure or `UpstreamConfigError` before the transport wrapper runs calls `cancelPreparedBeforeUpstream("exception", { route: "error:pre_upstream", quotaReserved: preparedQuotaReserved, upstreamReached: false })`, releases known state, and finishes the prepare stage exactly once. The same request-local cancellation callback is reachable from the outer catch for every matrix row whose `upstreamAttempted` value is still `false`; invoke it before the existing reservation and in-flight cleanup. A failure after the wrapper runs marks the request uncertain, never releases the reservation as known-unused, and releases only the in-flight lease, following the existing stream settlement path. The prepare resource stage remains open until the observed prepared body closes, errors, is canceled, or the shared timeout callback fires.
 
 - [ ] **GREEN check: run focused integration checks and type check**
 
@@ -1122,7 +1184,7 @@ immediately before the actual fetch:
 
 - [ ] **REFACTOR: isolate prepared and legacy lifecycles**
 
-  Keep existing Chat/legacy code paths and quota settlement helpers unchanged; add branching only at the documented prepare boundary. Ensure the proxy has only the existing `upstreamAttempted` attempt flag, with `upstreamReached` retained only as the separate response-received fact. Ensure every resolved prepared body has exactly one terminal finalizer invocation, whether the event is normal close, read error, timeout, explicit cancel, or upstream cancellation. Ensure prepare telemetry contains only safe counts/enums/provider state and never body content, markers, credentials, or thrown error text. Rerun the focused commands.
+  Keep existing Chat/legacy code paths and quota settlement helpers unchanged; add branching only at the documented prepare boundary. Ensure the proxy has only the existing `upstreamAttempted` attempt flag, with `upstreamReached` retained only as the separate response-received fact. Recheck every row of the pre-transfer cleanup matrix, including synchronous budget returns, thrown awaits, the outer catch, and the registry-load timeout guard. Ensure every resolved prepared body has exactly one terminal finalizer invocation, whether the event is normal close, read error, timeout, explicit cancel, or upstream cancellation. Ensure prepare telemetry contains only safe counts/enums/provider state and never body content, markers, credentials, or thrown error text. Rerun the focused commands.
 
 ### Task 7: Update deployment configuration and documentation
 
@@ -1283,9 +1345,11 @@ immediately before the actual fetch:
 
   Run: `deno check apps/deno-tokenizer/src/main.ts apps/deno-tokenizer/test/*.test.ts`
 
+  Run: `deno test --allow-env --allow-read apps/deno-tokenizer/test`
+
   Run: `npm run test:preview-workflow`
 
-  Expected GREEN result: all automated checks pass and the canary acceptance record contains only safe metrics and identifiers.
+  Expected GREEN result: all five automated commands above pass and the canary acceptance record contains only safe metrics and identifiers.
 
 - [ ] **REFACTOR: verify rollback and final scope**
 
@@ -1316,7 +1380,9 @@ steps that must provide executable evidence.
 | Resolved body error or timeout finishes in the correct phase | `Worker Data Flow`, `Observability`, `Testing` | Tasks 5 and 6: pre-upstream exception cleanup, post-attempt uncertain cleanup, exactly once |
 | Existing `upstreamAttempted` is the only attempt authority | `Invariants`, `Worker Data Flow`, `Error Handling` | Task 6: legacy assignment preserved, prepared transport sets the same flag before fetch, post-attempt release is forbidden, and no parallel attempt flag exists |
 | `ResourceStage` includes the prepare stage | `Observability`, `Testing` | Task 6: add `"prepare"` to the existing union and run the Worker typecheck over all prepare stage calls |
-| Pre-upstream explicit cancel is idempotent and observable | `Worker Data Flow`, `Testing` | Task 6: `cancelPreparedBeforeUpstream` and cancel/terminal race test |
+| Every resolved prepared-body terminal path before transport transfer cancels the body | `Worker Data Flow` steps 6-10, `Error Handling` | Task 6: exhaustive matrix for registry/model/policy/quota/budget/reserve/in-flight/setup/outer-catch paths; each controlled return and thrown exception has a cancel-once assertion |
+| Pre-upstream explicit cancel is idempotent and observable | `Worker Data Flow`, `Observability`, `Testing` | Task 6: request-local `cancelPreparedBeforeUpstream`, outer-catch ordering before existing quota cleanup, and cancel/terminal race test |
+| Prepare timeout guards cover every long await | `Worker Data Flow` steps 6-10, `Observability` | Task 6: guards after registry load, policy load, quota state, reservation, and in-flight admission, with thrown-await cancellation covered separately |
 | Exact token accounting is preserved | `Stage 2: Deno Prepare`, `Prepare Response Contract` | Tasks 4 and 6: exact BPE metadata and one `resolveTokenBudget` call with no double overhead |
 | Preview three-layer propagation is preserved | `Rollout and Acceptance` | Task 7: workflow, setup, and generated binding tests |
 | Rollback remains explicit and verifiable | `Rollout and Acceptance` | Tasks 7 and 8: known previous Worker version and post-rollback legacy behavior |
@@ -1330,7 +1396,7 @@ The reverse mapping from implementation tasks to design decisions is:
 | Task 3 | Shared metadata, marker, and stream ownership contracts | Prepare response contract and single-pass upstream body handling |
 | Task 4 | Authenticated Deno `/prepare` endpoint and bounded raw-body classification | Deno prepare processing, validation matrix, and no `/tokenize` change |
 | Task 5 | Combined configuration and Worker prepare client | Configuration truth table, status-first classification, and timeout ownership |
-| Task 6 | Proxy routing, quota lifecycle, marker forwarding, and prepare telemetry | Worker data flow, fail-closed phases, resource-stage finalization, and exact accounting |
+| Task 6 | Proxy routing, exhaustive pre-transfer cleanup, quota lifecycle, marker forwarding, and prepare telemetry | Worker data flow, fail-closed phases, resource-stage finalization, exact accounting, and the existing `upstreamAttempted` boundary |
 | Task 7 | Production/Preview propagation and operator documentation | Rollout, Preview mapping, security, and rollback procedure |
 | Task 8 | Full verification and sanitized canary/rollback acceptance | End-to-end acceptance criteria and CPU-limit mitigation evidence |
 
