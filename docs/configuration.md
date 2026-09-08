@@ -103,6 +103,41 @@ GitHub/Deno deployment inputs from `.env.example`:
 
 See [deno-tokenizer.md](./deno-tokenizer.md).
 
+### Deno ownership and rollout
+
+For Production GitHub Actions, `DENO_TOKENIZER_ENDPOINT`,
+`DENO_TOKENIZER_THRESHOLD_BYTES`, and `DENO_TOKENIZER_TIMEOUT_MS` are
+Repository Variables. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` is the protected
+shared-auth source in the `deno-production` Environment. The Production Worker
+workflow validates all four Deno settings before the remote D1 migration, then
+uploads a version with `--keep-vars`, the three explicit Variables, and the
+Worker-side `DENO_TOKENIZER_AUTH_TOKEN` Secret together.
+
+The Deno Deploy workflow uses `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, and the
+separate `DENO_DEPLOY_TOKEN` management Secret. The Deno runtime receives the
+same protected shared-auth value as `OCTG_TOKENIZER_AUTH_TOKEN`; the management
+Secret is never used for tokenizer HTTP authentication.
+
+Preview Deno values belong only to the `preview` Environment. Its Deno Deploy
+identity, endpoint, threshold, timeout, Worker Secret, runtime Secret, D1,
+Durable Objects, registry, audit state, and upstream resources must not reuse
+Production values.
+
+The checked-in Production workflow requires the complete Deno setting group and
+the protected authentication Secret. It does not implement a Deno-disabled
+first deployment. Establishing a Deno-disabled baseline therefore requires a
+separate, explicitly reviewed deployment procedure that excludes Deno settings
+and does not preserve stale Deno variables; do not treat the Production
+workflow as that baseline procedure.
+
+After the Deno-disabled baseline has been verified, deploy the Deno application
+and runtime Secret, configure the complete Worker Deno group, verify the
+tokenizer input ceiling, and run the Deno route canary.
+
+Changing a Worker runtime Secret must produce an active version containing both
+the Secret and its required Variables. A Secret-only update is not a complete
+Deno rollout.
+
 ## Preview Inputs
 
 Preview must use its own control-plane resources and credentials.

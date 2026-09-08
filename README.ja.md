@@ -129,7 +129,7 @@ machine-usable template は [.env.example](./.env.example) です。
 | monitoring / reconciliation / canary / rollback / secrets | [docs/operations.md](./docs/operations.md) |
 | Deno tokenizer | [docs/deno-tokenizer.md](./docs/deno-tokenizer.md) |
 | Cloudflare AI Gateway Custom Provider | [docs/cloudflare-ai-gateway-custom-provider.md](./docs/cloudflare-ai-gateway-custom-provider.md) |
-| 過去の要件・設計記録 | `REQUIREMENTS*.md` と `docs/superpowers/` — 非 authoritative |
+| 将来計画・移行記録 | [docs/roadmap.md](./docs/roadmap.md) |
 
 ## Development
 

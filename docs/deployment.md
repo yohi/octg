@@ -175,6 +175,24 @@ See [configuration.md](./configuration.md) for Preview input names.
 
 The Deno tokenizer has a separate deployment workflow and deployment model. See [deno-tokenizer.md](./deno-tokenizer.md).
 
+The Production Worker workflow reads the three non-secret Deno settings from
+GitHub Repository Variables and the shared-auth source from the protected
+`deno-production` Environment Secret. It validates them before applying remote
+D1 migrations, then uploads a version containing the explicit Variables and
+Worker Secret together. The checked-in Worker configuration intentionally does
+not hard-code these environment-owned Deno values.
+
+The Deno Deploy workflow validates from `apps/deno-tokenizer` and deploys from
+the staged repository-root source described in
+[deno-tokenizer.md](./deno-tokenizer.md). `DENO_DEPLOY_TOKEN` is a Deno Deploy
+management credential; `OCTG_TOKENIZER_AUTH_TOKEN` remains a Deno runtime
+Secret.
+
+Preview has a separate Deno application and `preview` Environment. Its
+credential-bearing smoke first proves that invalid Deno authentication fails
+closed, then proves the valid route, and always restores the previous Worker
+version. Fork pull requests do not receive Preview credentials.
+
 ## Production and Preview Isolation
 
 Production and Preview SHOULD be separate for:

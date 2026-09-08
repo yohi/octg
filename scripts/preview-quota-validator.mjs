@@ -1,4 +1,4 @@
-// Tier 3 provider ceilings documented in docs/DEPLOY_FROM_TEMPLATE.md and
+// Tier 3 provider ceilings documented in SPEC.md and
 // mirrored by packages/shared/src/pool.ts.
 export const PROVIDER_QUOTA_CEILINGS = Object.freeze({
   STANDARD: 1_000_000,
