@@ -128,9 +128,10 @@ stream to the upstream gateway.
 
 ### Configuration
 
-The existing Deno authentication and timeout settings are reused. No new
-prepare-specific auth token or timeout is introduced. Prepare routing adds an
-optional endpoint and raw-body threshold:
+The Worker prepare client reuses the existing tokenizer authentication token
+and timeout. The Deno service reuses its existing authentication and input-size
+settings; no new prepare-specific auth token or timeout is introduced. Prepare
+routing adds an optional endpoint and raw-body threshold:
 
 - `DENO_PREPARE_ENDPOINT`
 - `DENO_PREPARE_THRESHOLD_BYTES`
@@ -256,6 +257,14 @@ elsewhere in the serialized body, so the serialized body contains exactly one
 occurrence of the quoted marker. Marker generation is bounded to 16 attempts;
 failure to obtain a collision-free marker is an internal prepare failure.
 
+HTTP status is classified before an error body is considered. Only `200` can
+produce a successful response, and its metadata and body must satisfy the
+success contract. A malformed or oversized success response is
+`unavailable: malformed_response`. Only the exact validation status/code
+combinations defined in `Error Handling` can produce `rejected`; an allowlisted
+code on an authentication, media-type, server-error, or other status never
+changes that status classification.
+
 After quota budgeting, the Worker attaches a byte `TransformStream` that
 replaces exactly the quoted marker with the decimal final output token count.
 The stream transform rejects a missing or duplicate marker. The replacement is
@@ -282,11 +291,24 @@ export interface PrepareErrorBody {
 ```
 
 `request_too_large` is mandatory for raw-body limit rejection, whether the
-limit is detected from `Content-Length` or while reading. Error bodies never
-contain input-derived text. Authentication failures, unsupported media types,
-5xx responses, unknown codes, malformed bodies, and oversized error bodies are
-not public validation outcomes; the Worker maps them to an internal prepare
-failure.
+limit is detected from `Content-Length` or while reading. The fixed validation
+status/code matrix is:
+
+| HTTP status | Response contract | Worker outcome |
+| --- | --- | --- |
+| `400` | `invalid_body`, `non_text`, or `max_tokens_conflict` | `rejected` |
+| `413` | `input_too_large` or `request_too_large` | `rejected` |
+| `200` | Valid success metadata and normalized body | `resolved` |
+| `200` | Any error envelope, or malformed/oversized success metadata/body | `unavailable: malformed_response` |
+| Any other status, including `401`, `415`, and all `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
+
+Only the first two rows are validation responses. The `400` and `413` bodies
+must be bounded JSON objects with exactly one `code` field, and the code must
+match the status row. A `2xx` status other than `200`, an unknown code, a
+malformed body, or an oversized error body is unavailable. Error bodies never
+contain input-derived text. Raw-body `request_too_large` continues to use Deno
+HTTP `413`; normalized `input_too_large` also uses `413` so the status/code
+combination is fixed rather than implementation-defined.
 
 The Worker client returns three variants and preserves the response-body
 ownership on success:
@@ -430,6 +452,9 @@ Errors remain status-only or use the bounded allowlisted error code.
 
 - Metadata version and field validation.
 - Bounded error response parsing.
+- HTTP status/body precedence matrix, including `500` plus an allowlisted code,
+  `401` plus an allowlisted code, `415` plus an allowlisted code, valid `400`
+  and `413` validation envelopes, and unknown status/code combinations.
 - All three `PrepareOutcome` variants and all five allowlisted error codes.
 - Timeout deadline through body close/cancel, network, non-2xx, malformed
   metadata, oversized metadata header, and malformed body handling.
@@ -480,14 +505,20 @@ prepare before rollback. After the version rollback, verify that:
   `DENO_TOKENIZER_THRESHOLD_BYTES` setting and is not assumed to be the DO;
 - quota reservation and upstream settlement remain correct.
 
-Production and Preview source-to-Worker mappings are explicit:
+Production and Preview mappings are explicit. Production deployment sources
+`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` map directly to the
+same Worker bindings. Preview uses three distinct layers:
 
-| Source | Worker binding |
-| --- | --- |
-| Production `DENO_PREPARE_ENDPOINT` | `DENO_PREPARE_ENDPOINT` |
-| Production `DENO_PREPARE_THRESHOLD_BYTES` | `DENO_PREPARE_THRESHOLD_BYTES` |
-| Preview `DENO_PREVIEW_PREPARE_ENDPOINT` | `DENO_PREPARE_ENDPOINT` |
-| Preview `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` | `DENO_PREPARE_THRESHOLD_BYTES` |
+| Layer | Prepare endpoint | Prepare threshold |
+| --- | --- | --- |
+| `.env` / GitHub Environment variable | `DENO_PREVIEW_PREPARE_ENDPOINT` | `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` |
+| Workflow / process environment | `PREVIEW_DENO_PREPARE_ENDPOINT` | `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES` |
+| Generated Worker binding | `DENO_PREPARE_ENDPOINT` | `DENO_PREPARE_THRESHOLD_BYTES` |
+
+`setup-preview.zsh` reads and publishes the first-layer `DENO_PREVIEW_*`
+names. `preview-smoke.yml` maps those values into the second-layer
+`PREVIEW_DENO_*` names, and `preview-worker-config.mjs` writes the final
+Worker-binding names. These names are not interchangeable.
 
 The checked-in `apps/gateway-worker/wrangler.jsonc` remains without optional
 prepare variables. Disabled-by-default is represented by variable absence, not
