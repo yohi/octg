@@ -44,8 +44,9 @@ corresponding tokenization or upstream completion.
   `@octg/shared`; neither runtime imports the other runtime's source tree.
 - A prepare-resolution failure never falls back to the Durable Object tokenizer,
   reserves quota, or calls the upstream gateway.
-- A prepared body stream failure after resolution uses the upstream-attempt
-  state to select pre-upstream cleanup or the existing uncertain semantics.
+- A prepared body stream failure after resolution uses the existing
+  `upstreamAttempted` state to select pre-upstream cleanup or the existing
+  uncertain semantics.
 - Quota reservation, in-flight admission, release, settlement, and uncertain
   upstream handling remain unchanged.
 - `MAX_INPUT_BYTES` applies to both the gateway raw body and normalized input
@@ -250,20 +251,42 @@ The Worker validates the metadata version, exact field set, the non-empty
 and the semantic relationships above before using it. A malformed or oversized
 metadata header is never accepted.
 
-The response body is a normalized upstream JSON object. Deno always writes a
-single `max_output_tokens` property whose JSON value is the quoted,
+Success validation has two separate phases:
+
+1. **Prepare-resolution validation:** Before returning `PrepareOutcome.resolved`,
+   the Worker checks only facts available without consuming the response body:
+   the status is exactly `200`, the response `Content-Type` is the expected
+   `application/json` media type, the metadata header is present and no more
+   than 4096 ASCII bytes, the decoded metadata passes all validation above, and
+   `response.body` is not `null`. Any failure is
+   `unavailable: malformed_response`; no quota is reserved and no upstream call
+   is made.
+2. **Resolved-body stream validation:** After resolution, the Worker owns the
+   response body as a stream and does not call `response.text()` or
+   `response.json()` to validate or buffer it. The marker transform and stream
+   observer validate only the stream invariants that can be observed while the
+   body is consumed: exactly one quoted marker, normal close, and read/error
+   termination. Missing or duplicate markers, EOF-only truncation, and body
+   read failures are resolved-body failures, not new `PrepareOutcome.unavailable`
+   results. Their cleanup phase is selected from the existing
+   `upstreamAttempted` state.
+
+The response body is a single-pass normalized upstream JSON stream. Deno always
+writes a single `max_output_tokens` property whose JSON value is the quoted,
 request-specific `outputMarker`. Deno regenerates the marker if it appears
 elsewhere in the serialized body, so the serialized body contains exactly one
 occurrence of the quoted marker. Marker generation is bounded to 16 attempts;
 failure to obtain a collision-free marker is an internal prepare failure.
 
 HTTP status is classified before an error body is considered. Only `200` can
-produce a successful response, and its metadata and body must satisfy the
-success contract. A malformed or oversized success response is
-`unavailable: malformed_response`. Only the exact validation status/code
-combinations defined in `Error Handling` can produce `rejected`; an allowlisted
-code on an authentication, media-type, server-error, or other status never
-changes that status classification.
+produce a successful response. A successful `200` is resolved after the
+header-level checks above; the body is not parsed in the Worker. Normal Deno
+behavior never emits a `200` error envelope. If a body stream violates the
+marker or stream invariants after resolution, it follows the resolved-body
+failure path rather than being converted to `unavailable` by buffering it.
+Only the exact validation status/code combinations defined in `Error Handling`
+can produce `rejected`; an allowlisted code on an authentication, media-type,
+server-error, or other status never changes that status classification.
 
 After quota budgeting, the Worker attaches a byte `TransformStream` that
 replaces exactly the quoted marker with the decimal final output token count.
@@ -298,18 +321,22 @@ status/code matrix is:
 | --- | --- | --- |
 | `400` | `invalid_body`, `non_text`, or `max_tokens_conflict` | `rejected` |
 | `413` | `input_too_large` or `request_too_large` | `rejected` |
-| `200` | Valid success metadata and normalized body | `resolved` |
-| `200` | Any error envelope, or malformed/oversized success metadata/body | `unavailable: malformed_response` |
+| `200` | Expected success media type, valid metadata, and non-null body | `resolved` |
+| `200` | Missing/wrong success media type, malformed/oversized metadata, or null body | `unavailable: malformed_response` |
 | `500` | Internal prepare failure with no validation envelope | `unavailable` |
 | Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
 Only the first two rows are validation responses. The `400` and `413` bodies
 must be bounded JSON objects with exactly one `code` field, and the code must
 match the status row. A `2xx` status other than `200`, an unknown code, a
-malformed body, or an oversized error body is unavailable. Error bodies never
-contain input-derived text. Raw-body `request_too_large` continues to use Deno
-HTTP `413`; normalized `input_too_large` also uses `413` so the status/code
-combination is fixed rather than implementation-defined.
+malformed error body, or an oversized error body is unavailable. Error bodies
+never contain input-derived text. Raw-body `request_too_large` continues to
+use Deno HTTP `413`; normalized `input_too_large` also uses `413` so the
+status/code combination is fixed rather than implementation-defined. A `200`
+error envelope is not a valid Deno success response, but the Worker does not
+parse a resolved body to discover one; the normal Deno implementation never
+produces it, and any observable stream/marker violation follows the
+resolved-body failure contract above.
 
 `invalid_body` is reserved for a request whose raw body was read to completion
 but whose JSON or normalized Responses shape is invalid. If `getReader()` or
@@ -321,7 +348,9 @@ error. An empty body that reaches normal end-of-stream is a completed read and
 therefore follows the `invalid_body` JSON parsing path.
 
 The Worker client returns three variants and preserves the response-body
-ownership on success:
+ownership on success. `unavailable: malformed_response` applies only to
+resolution-time status, success media type, metadata, or null-body failures;
+it is not used for a body-stream failure after `resolved` has been returned:
 
 ```ts
 type PrepareOutcome =
@@ -341,7 +370,10 @@ type PrepareOutcome =
 `cancel` is idempotent and aborts the underlying Deno request and response
 body. `DENO_TOKENIZER_TIMEOUT_MS` is one deadline beginning at `/prepare`
 dispatch and ending only when the prepared response body closes or is canceled;
-the timer is not cleared merely because response headers were received.
+the timer is not cleared merely because response headers were received. A
+timeout before resolution produces `unavailable: timeout`; a timeout after
+resolution is a resolved-body failure and uses the same pre/post-upstream
+cleanup classification as any other body terminal event.
 
 ### Worker Data Flow
 
@@ -371,10 +403,13 @@ The prepare branch follows this order:
    Object methods. Reservation rejection, unknown reservation, exceptions, and
    in-flight rejection all cancel the prepared body before returning.
 10. Attach the marker transform and pass the resulting stream to `callUpstream`.
-    Ownership transfers only at this call. `UpstreamConfigError` and any
-    transform failure before the upstream attempt cancel the body, release
-    the in-flight lease when acquired, release the resolved reservation when
-    present, and use the existing pre-upstream error path.
+    Ownership transfers only at this call. Stream setup failure and
+    `UpstreamConfigError` before the upstream transport wrapper runs cancel the
+    body, release the in-flight lease when acquired, release the resolved
+    reservation when present, and use the existing pre-upstream error path.
+    Once the transport wrapper runs, marker-transform, body-read, and transport
+    failures are post-attempt failures even if the upstream response has not
+    yet been received.
 11. Run the existing stream settlement or non-stream settlement path. A body or
     transport failure after the upstream attempt begins marks the request
     uncertain and releases only the in-flight lease, as in the existing path.
@@ -382,19 +417,24 @@ The prepare branch follows this order:
 The two failure phases are explicit:
 
 1. **Prepare-resolution failure:** `prepareWithDeno` has not returned
-   `resolved`; there is no quota reservation, upstream call, or Durable Object
-   tokenizer fallback.
+   `resolved`; only status, success media type, metadata, and null-body checks
+   can classify a `200` response at this point. There is no quota reservation,
+   upstream call, or Durable Object tokenizer fallback.
 2. **Resolved prepared-body failure:** ownership has been returned to the
-   proxy. Before upstream attempt, cancel and release known state. After
-   upstream attempt, use existing uncertain semantics. The statement that no
-   Deno failure reserves quota or calls upstream applies only to phase 1.
+   proxy. Before the transport wrapper runs, cancel and release known state.
+   After the transport wrapper runs, use existing uncertain semantics. The
+   statement that no Deno failure reserves quota or calls upstream applies only
+   to phase 1.
 
 ## Error Handling
 
 Validation failures from the Deno endpoint return a small JSON error body with
 one allowed `code` and no input-derived text. Internal and raw-body transport
 failures are status-only and do not carry a `PrepareErrorBody`. The Worker
-only accepts the following validation error codes:
+only accepts the following validation error codes. Resolution-time malformed
+responses mean invalid status, success media type, metadata, or null-body
+conditions; a body-stream failure after resolution is not mapped through this
+table:
 
 | Prepare failure or Deno code | Worker response |
 | --- | --- |
@@ -404,7 +444,7 @@ only accepts the following validation error codes:
 | `input_too_large` | `errInputTooLarge` |
 | `request_too_large` | `errInputTooLarge` |
 | status-only internal prepare failure (`500`, including raw-body read failure, with no validation envelope) | `errInternal` |
-| timeout, network, malformed response, other `5xx`, auth failure, unsupported media type, unknown code, or malformed/oversized error body | `errInternal` |
+| timeout, network, resolution-time malformed response, other `5xx`, auth failure, unsupported media type, unknown code, or malformed/oversized error body | `errInternal` |
 
 The public `errInputTooLarge` response uses the existing OCTG
 `request_too_large` code for both normalized-input and raw-body limits. The
@@ -413,7 +453,11 @@ prepare protocol still distinguishes `input_too_large` from
 failed. No prepare-resolution failure reserves quota or calls the upstream
 gateway. A raw-body read failure is a prepare-resolution failure, not an
 `invalid_body` validation result. The existing `/tokenize` endpoint and its
-error mapping are unchanged.
+error mapping are unchanged. A resolved-body read, timeout, marker, or other
+stream-integrity failure is classified by whether the existing
+`upstreamAttempted` flag is false or true: known state is released only in the
+former case, and the latter uses `markUncertain` without releasing the
+reservation as known-unused.
 
 ## Observability
 
@@ -474,10 +518,16 @@ Errors remain status-only or use the bounded allowlisted error code.
   code, `415` plus an allowlisted code, valid `400` and `413` validation
   envelopes, and unknown status/code combinations.
 - All three `PrepareOutcome` variants and all five allowlisted error codes.
+- Successful `200` resolution checks the expected success media type, bounded
+  metadata, and non-null body without reading the body; missing or wrong
+  `Content-Type`, invalid/oversized metadata, and null body are
+  `unavailable: malformed_response`.
 - Timeout deadline through body close/cancel, network, non-2xx, malformed
-  metadata, oversized metadata header, and malformed body handling.
+  metadata, oversized metadata header, and resolution-time malformed response
+  handling.
 - Marker replacement across chunk boundaries.
-- Missing and duplicate marker rejection.
+- Missing and duplicate marker rejection after resolution, including EOF-only
+  missing-marker detection and body read failure during consumption.
 - Final output token count remains the value selected after quota budgeting.
 
 ### Proxy behavior
@@ -499,6 +549,9 @@ Errors remain status-only or use the bounded allowlisted error code.
   explicit cancel and a stream terminal callback.
 - Prepared body failure before upstream releases known state; failure after an
   upstream attempt uses uncertain semantics.
+- Missing or duplicate markers and EOF-only body failures are resolved-body
+  failures; they are classified by the existing upstream-attempt state rather
+  than by the prepare-resolution error mapping.
 - Streaming and non-streaming upstream settlement remain correct.
 
 ## Rollout and Acceptance
