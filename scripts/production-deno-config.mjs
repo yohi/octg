@@ -6,6 +6,13 @@ export const PRODUCTION_DENO_VARIABLE_NAMES = [
   "DENO_TOKENIZER_TIMEOUT_MS",
 ];
 
+export const PRODUCTION_PREPARE_VARIABLE_NAMES = [
+  "DENO_PREPARE_ENDPOINT",
+  "DENO_PREPARE_THRESHOLD_BYTES",
+];
+
+export const PRODUCTION_INPUT_LIMIT_VARIABLE_NAME = "MAX_INPUT_BYTES";
+
 export function validateProductionDenoConfig(environment) {
   const values = environment !== null && typeof environment === "object"
     ? environment
@@ -13,7 +20,7 @@ export function validateProductionDenoConfig(environment) {
   const missing = [];
   const invalid = [];
 
-  for (const name of PRODUCTION_DENO_VARIABLE_NAMES) {
+  for (const name of [...PRODUCTION_DENO_VARIABLE_NAMES, PRODUCTION_INPUT_LIMIT_VARIABLE_NAME]) {
     const value = values[name];
     if (value === undefined || (typeof value === "string" && value.trim() === "")) {
       missing.push(name);
@@ -28,16 +35,41 @@ export function validateProductionDenoConfig(environment) {
   for (const name of [
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
+    PRODUCTION_INPUT_LIMIT_VARIABLE_NAME,
   ]) {
     if (!missing.includes(name) && !isPositiveSafeInteger(values[name])) {
       invalid.push(name);
     }
   }
 
+  const prepareEndpoint = values.DENO_PREPARE_ENDPOINT;
+  const prepareThreshold = values.DENO_PREPARE_THRESHOLD_BYTES;
+  const hasPrepareEndpoint = isPresent(prepareEndpoint);
+  const hasPrepareThreshold = isPresent(prepareThreshold);
+  if (hasPrepareEndpoint !== hasPrepareThreshold) {
+    invalid.push(hasPrepareEndpoint
+      ? "DENO_PREPARE_ENDPOINT"
+      : "DENO_PREPARE_THRESHOLD_BYTES");
+  } else if (hasPrepareEndpoint && hasPrepareThreshold) {
+    if (!isValidHttpsEndpoint(prepareEndpoint)) invalid.push("DENO_PREPARE_ENDPOINT");
+    if (!isPositiveSafeInteger(prepareThreshold)) {
+      invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
+    } else if (
+      isPositiveSafeInteger(values.MAX_INPUT_BYTES) &&
+      Number(prepareThreshold.trim()) > Number(values.MAX_INPUT_BYTES.trim())
+    ) {
+      invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(values, "OCTG_EXPECTED_MAX_INPUT_BYTES")) {
+    invalid.push("OCTG_EXPECTED_MAX_INPUT_BYTES");
+  }
+
   return {
     valid: missing.length === 0 && invalid.length === 0,
     missing,
-    invalid,
+    invalid: [...new Set(invalid)],
   };
 }
 
@@ -55,6 +87,10 @@ function isValidHttpsEndpoint(value) {
   } catch {
     return false;
   }
+}
+
+function isPresent(value) {
+  return value !== undefined && !(typeof value === "string" && value.trim() === "");
 }
 
 function isPositiveSafeInteger(value) {

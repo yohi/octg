@@ -21,6 +21,7 @@ OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/o
 OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
 OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
 OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_MAX_INPUT_BYTES=1048576
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME="CI Smoke"
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_test
@@ -32,6 +33,8 @@ DENO_PREVIEW_TOKENIZER_ENDPOINT=https://octg-tokenizer-preview.deno.dev/tokenize
 DENO_PREVIEW_TOKENIZER_AUTH_TOKEN=preview-deno-auth-token
 DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES=1
 DENO_PREVIEW_TOKENIZER_TIMEOUT_MS=5000
+DENO_PREVIEW_PREPARE_ENDPOINT=https://octg-tokenizer-preview.deno.dev/prepare
+DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=700000
 GITHUB_REPOSITORY=yohi/octg
 EOF
 
@@ -69,6 +72,7 @@ OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/o
 OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
 OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
 OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_MAX_INPUT_BYTES=1048576
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME=CI Smoke
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_preview
@@ -171,6 +175,18 @@ for name in \
     exit 1
   }
 done
+[[ "$preview_config" == *'"MAX_INPUT_BYTES": "1048576"'* ]] || {
+  print -u2 "Preview config did not map the canonical input limit"
+  exit 1
+}
+[[ "$preview_config" == *'"DENO_PREPARE_ENDPOINT": "https://octg-tokenizer-preview.deno.dev/prepare"'* ]] || {
+  print -u2 "Preview config did not map the prepare endpoint"
+  exit 1
+}
+[[ "$preview_config" == *'"DENO_PREPARE_THRESHOLD_BYTES": "700000"'* ]] || {
+  print -u2 "Preview config did not map the prepare threshold"
+  exit 1
+}
 wrangler_log="$(< "$TEMP_DIR/wrangler.log")"
 [[ "$wrangler_log" == *"d1 migrations apply DB --remote"* ]] || {
   print -u2 "reuse flow did not apply migrations"
@@ -245,6 +261,18 @@ gh_log="$(< "$TEMP_DIR/gh.log")"
   print -u2 "GitHub setup did not synchronize the Preview Deno endpoint variable"
   exit 1
 }
+[[ "$gh_log" == *"variable set OCTG_PREVIEW_MAX_INPUT_BYTES --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview input limit variable"
+  exit 1
+}
+[[ "$gh_log" == *"variable set DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview prepare endpoint variable"
+  exit 1
+}
+[[ "$gh_log" == *"variable set DENO_PREVIEW_PREPARE_THRESHOLD_BYTES --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not synchronize the Preview prepare threshold variable"
+  exit 1
+}
 [[ "$gh_log" == *"secret set DENO_PREVIEW_DEPLOY_TOKEN --env preview --repo yohi/octg"* ]] || {
   print -u2 "GitHub setup did not synchronize the Preview Deno deploy token"
   exit 1
@@ -267,6 +295,13 @@ if PATH="$TEMP_DIR:$PATH" \
   OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/missing-preview-deno.env" \
   zsh "$SCRIPT_PATH" --github > /dev/null 2>&1; then
   print -u2 "Preview GitHub setup accepted missing Deno deployment configuration"
+  exit 1
+fi
+
+sed '/^DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/partial-preview-prepare.env"
+if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/partial-preview-prepare.env" \
+  zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup accepted a one-sided prepare pair"
   exit 1
 fi
 

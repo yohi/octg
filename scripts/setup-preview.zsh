@@ -82,14 +82,11 @@ import { readFileSync } from "node:fs";
 const [root, envFile, name] = process.argv.slice(2);
 const { parseSetupEnvFile } = await import(`${root}/scripts/setup-env.mjs`);
 const values = parseSetupEnvFile(readFileSync(envFile, "utf8"));
-  if (Object.prototype.hasOwnProperty.call(values, name)) {
-    process.stdout.write(`__OCTG_PRESENT__${values[name]}`);
-  }
+  const value = values[name];
+  if (typeof value === "string") process.stdout.write(value);
 NODE
 )"
-  if [[ "$value" == __OCTG_PRESENT__* ]]; then
-    typeset -g "$name=${value#__OCTG_PRESENT__}"
-  elif [[ -n "$value" ]]; then
+  if [[ -n "$value" ]]; then
     typeset -g "$name=$value"
   fi
   return 0
@@ -164,21 +161,6 @@ require_https_url() {
   [[ "$value" == https://* && "$value" != *[[:space:]]* ]] || die "$name は空白を含まないhttps URLである必要があります"
 }
 
-require_https_endpoint() {
-  local name="$1"
-  local value="$2"
-  require_value "$name" "$value"
-  [[ "$value" != *[[:space:]]* ]] || die "$name は空白を含まないhttps URLである必要があります"
-  node -e '
-    try {
-      const url = new URL(process.argv[1]);
-      if (url.protocol !== "https:" || url.username !== "" || url.password !== "") process.exit(1);
-    } catch {
-      process.exit(1);
-    }
-  ' "$value" || die "$name は認証情報を含まないhttps URLである必要があります"
-}
-
 require_value CLOUDFLARE_PREVIEW_ACCOUNT_ID "${CLOUDFLARE_PREVIEW_ACCOUNT_ID:-}"
 [[ "${CLOUDFLARE_PREVIEW_ACCOUNT_ID}" =~ '^[0-9a-fA-F]{32}$' ]] || die "CLOUDFLARE_PREVIEW_ACCOUNT_ID は32桁のhex文字列である必要があります"
 require_value CLOUDFLARE_PREVIEW_API_TOKEN "${CLOUDFLARE_PREVIEW_API_TOKEN:-}"
@@ -197,12 +179,12 @@ require_value OCTG_PREVIEW_CLIENT_KEY "${OCTG_PREVIEW_CLIENT_KEY:-}"
 [[ "${OCTG_PREVIEW_CLIENT_KEY}" == octg_sk_* ]] || die "OCTG_PREVIEW_CLIENT_KEY はoctg_sk_で始める必要があります"
 require_value OCTG_PREVIEW_KEY_PEPPER "${OCTG_PREVIEW_KEY_PEPPER:-}"
 
-if [[ -v DENO_PREVIEW_PREPARE_ENDPOINT || -v DENO_PREVIEW_PREPARE_THRESHOLD_BYTES ]]; then
+if [[ -n "${DENO_PREVIEW_PREPARE_ENDPOINT:-}" || -n "${DENO_PREVIEW_PREPARE_THRESHOLD_BYTES:-}" ]]; then
   if [[ -z "${DENO_PREVIEW_PREPARE_ENDPOINT:-}" || -z "${DENO_PREVIEW_PREPARE_THRESHOLD_BYTES:-}" ]]; then
     die "DENO_PREVIEW_PREPARE_ENDPOINT と DENO_PREVIEW_PREPARE_THRESHOLD_BYTES は同時に指定してください"
   fi
-  require_https_endpoint DENO_PREVIEW_PREPARE_ENDPOINT "$DENO_PREVIEW_PREPARE_ENDPOINT"
-  require_safe_positive_integer DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
+  require_https_url DENO_PREVIEW_PREPARE_ENDPOINT "$DENO_PREVIEW_PREPARE_ENDPOINT"
+  require_positive_integer DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
   if (( DENO_PREVIEW_PREPARE_THRESHOLD_BYTES > OCTG_PREVIEW_MAX_INPUT_BYTES )); then
     die "DENO_PREVIEW_PREPARE_THRESHOLD_BYTES は OCTG_PREVIEW_MAX_INPUT_BYTES 以下である必要があります"
   fi
@@ -370,9 +352,6 @@ if [[ "$CONFIGURE_GITHUB" == true ]]; then
   if [[ -n "${DENO_PREVIEW_PREPARE_ENDPOINT:-}" && -n "${DENO_PREVIEW_PREPARE_THRESHOLD_BYTES:-}" ]]; then
     set_github_variable DENO_PREVIEW_PREPARE_ENDPOINT "$DENO_PREVIEW_PREPARE_ENDPOINT"
     set_github_variable DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
-  else
-    gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo "$GITHUB_REPOSITORY" --confirm 2>/dev/null || true
-    gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES --env preview --repo "$GITHUB_REPOSITORY" --confirm 2>/dev/null || true
   fi
   set_github_secret CLOUDFLARE_PREVIEW_API_TOKEN "$CLOUDFLARE_PREVIEW_API_TOKEN"
   set_github_secret OCTG_UPSTREAM_API_TOKEN "$OCTG_PREVIEW_UPSTREAM_API_TOKEN"

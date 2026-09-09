@@ -120,24 +120,27 @@ Raw client keys are not the D1 authentication record.
 
 ## 6. Request Processing Order
 
-For a valid proxy route, the implementation performs these stages in order:
+For a valid proxy route, the implementation performs these stages in order.
+Responses requests that select the optional prepare route use the prepare
+branch before ordinary body parsing; Chat Completions never selects it:
 
 1. client authentication;
 2. Deno tokenizer configuration validation;
 3. `Idempotency-Key` validation;
-4. bounded raw body read and JSON parse;
-5. endpoint-specific normalization;
-6. model classification through the runtime registry;
-7. client policy lookup and tool-use admission;
-8. best-effort D1 audit insertion;
-9. current quota-state read;
-10. tokenization;
-11. token budget resolution;
-12. fail-closed reservation;
-13. per-pool in-flight admission;
-14. upstream request construction and execution;
-15. settlement, release, or uncertainty transition;
-16. best-effort D1 audit completion.
+4. prepare configuration/threshold decision for a Responses request;
+5. bounded raw body read and JSON parse, or authenticated Deno `/prepare`;
+6. endpoint-specific normalization;
+7. model classification through the runtime registry;
+8. client policy lookup and tool-use admission;
+9. best-effort D1 audit insertion;
+10. current quota-state read;
+11. tokenization, or validated prepare metadata consumption;
+12. token budget resolution;
+13. fail-closed reservation;
+14. per-pool in-flight admission;
+15. upstream request construction and execution;
+16. settlement, release, or uncertainty transition;
+17. best-effort D1 audit completion.
 
 No upstream request is permitted before a successful quota reservation and in-flight admission.
 
@@ -148,6 +151,13 @@ No upstream request is permitted before a successful quota reservation and in-fl
 The request body MUST be valid JSON and MUST fit within the resolved input-size limit.
 
 The resolved HTTP input limit is capped by the tokenization RPC safety ceiling even if a larger environment value is provided.
+
+`MAX_INPUT_BYTES` is a positive safe integer and is the canonical limit for
+both the Worker binding and the Production Deno runtime. The Deno deployment
+workflow generates `OCTG_EXPECTED_MAX_INPUT_BYTES` from that same value;
+missing, invalid, or mismatched startup assertions fail closed before
+`Deno.serve`. Preview resolves its limit independently from
+`OCTG_PREVIEW_MAX_INPUT_BYTES` and must not share mutable Production config.
 
 OCTG accepts text-oriented request forms only. Unsupported non-text forms are rejected before reservation.
 
@@ -278,6 +288,36 @@ When enabled:
 A Deno failure does not fall back to the Durable Object provider for that request.
 
 See `docs/deno-tokenizer.md` for deployment and component-specific operational details.
+
+### 9.4 Responses prepare provider
+
+The Worker prepare pair is optional and all-or-nothing:
+
+- `DENO_PREPARE_ENDPOINT` is an HTTPS `/prepare` endpoint;
+- `DENO_PREPARE_THRESHOLD_BYTES` is a positive threshold no greater than
+  `MAX_INPUT_BYTES`.
+
+Both absent disables prepare. A one-sided, invalid, or tokenizer-incompatible
+pair is a configuration error for Responses and does not alter Chat
+Completions behavior. A request with a valid declared body length above
+`MAX_INPUT_BYTES` is rejected before Deno; otherwise a large Responses request
+is sent to `/prepare` without reconstructing or logging the body.
+
+The Deno `/prepare` protocol exposes exactly these five validation codes:
+`invalid_body`, `non_text`, `max_tokens_conflict`, `input_too_large`, and
+`request_too_large`. `400`/`413` validation bodies contain only one `code`
+field and are bounded to 4096 UTF-8 bytes. Internal/read failures are
+status-only. Successful responses carry metadata in
+`X-OCTG-Prepare-Metadata`; the encoded metadata header and accepted metadata
+boundary are bounded to 4096 bytes. The normalized body contains one output
+marker, which the Worker replaces with the final output-token value.
+
+Prepare metadata is trusted only after schema, byte-bound, and marker checks.
+The prepare result is consumed directly for model, policy, token-budget, and
+quota decisions. Preparation precedes quota reservation, and neither a
+rejected nor unavailable prepare result may fall back to
+`TokenizerController` or reach upstream. No payload, metadata input, bearer
+token, client key, or other secret may be written to logs.
 
 ## 10. Quota Model
 
@@ -594,6 +634,9 @@ D1 audit writes are intentionally best effort on the request path. A failed audi
 - Secrets MUST not be committed to the repository.
 - Changing `OCTG_KEY_PEPPER` without re-hashing or reissuing client credentials invalidates existing key lookup.
 - A partial Deno tokenizer configuration is an error, not a request-time fallback condition.
+- Both prepare variables absent is disabled; a one-sided prepare pair is invalid and must not become empty Worker bindings.
+- Prepare-only invalidity affects Responses configuration, not the Chat Completions route.
+- Production and Preview input-limit sources are isolated; each Deno runtime receives a generated expected-value assertion from its own canonical limit.
 - Quota limits configured below the shared fallback allowance are valid operational ceilings.
 - Cache use is opt-in per client. The default is off.
 
@@ -616,5 +659,13 @@ concurrency 1, concurrency 2, and the operator-defined expected peak. It
 confirms that the Worker does not report `exceededCpu`, the gateway has paired
 tokenization start/finish events, the TokenizerController has paired init/encode
 events, and a tokenizer failure reaches neither quota reservation nor upstream.
+
+Prepare acceptance additionally requires a Stage 1 deployment with prepare
+absent, authenticated `/health` and `/prepare` verification, sanitized
+approximately 74k-token Responses canaries at concurrency 1 and 2, and a
+resource-stage result with no `exceededCpu` outcome. A prepare rejection or
+unavailable result must reach neither quota reservation nor upstream. Rollback
+must target a known Worker version that predates prepare, or a reviewed
+prepare-absent version, and must repeat the Chat/Responses route checks.
 
 The specification must be reviewed whenever those tests or externally visible contracts change.

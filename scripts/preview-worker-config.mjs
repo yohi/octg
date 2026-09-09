@@ -12,6 +12,8 @@ export const PREVIEW_DENO_VARIABLE_NAMES = Object.freeze([
 const DENO_CONFIG_NAMES = Object.freeze([
   ...PREVIEW_DENO_VARIABLE_NAMES,
   "DENO_TOKENIZER_AUTH_TOKEN",
+  "DENO_PREPARE_ENDPOINT",
+  "DENO_PREPARE_THRESHOLD_BYTES",
 ]);
 
 export function buildPreviewWorkerConfig(baseConfig, options) {
@@ -28,7 +30,9 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     upstreamBaseUrl,
     standardLimit,
     miniLimit,
+    maxInputBytes,
     deno,
+    prepare,
   } = options ?? {};
 
   requireNonEmpty("Preview database ID", databaseId);
@@ -38,6 +42,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   requireNonEmpty("Preview STANDARD quota", standardLimit);
   requireNonEmpty("Preview MINI quota", miniLimit);
   requireNonEmpty("Preview project root", projectRoot);
+  requirePositiveSafeInteger("Preview input limit", maxInputBytes);
 
   const productionDatabase = Array.isArray(config.d1_databases)
     ? config.d1_databases.find((entry) => entry?.binding === "DB")
@@ -47,6 +52,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
+  const normalizedPrepare = normalizeOptionalPrepare(prepare);
 
   assertPreviewQuotaAllocation({
     production: {
@@ -66,6 +72,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     ...config.vars,
     QUOTA_LIMIT_STANDARD: standardLimit,
     QUOTA_LIMIT_MINI: miniLimit,
+    MAX_INPUT_BYTES: maxInputBytes.trim(),
     OCTG_UPSTREAM_BASE_URL: upstreamBaseUrl,
   };
   for (const name of DENO_CONFIG_NAMES) {
@@ -82,16 +89,30 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }];
 
   if (deno !== undefined) {
-    validatePreviewDenoConfig(deno, productionEndpoint);
+    validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes);
     config.vars.DENO_TOKENIZER_ENDPOINT = deno.endpoint.trim();
     config.vars.DENO_TOKENIZER_THRESHOLD_BYTES = deno.thresholdBytes.trim();
     config.vars.DENO_TOKENIZER_TIMEOUT_MS = deno.timeoutMs.trim();
   }
 
+  if (normalizedPrepare !== undefined) {
+    validatePreviewPrepareConfig(normalizedPrepare, maxInputBytes);
+    config.vars.DENO_PREPARE_ENDPOINT = normalizedPrepare.endpoint.trim();
+    config.vars.DENO_PREPARE_THRESHOLD_BYTES = normalizedPrepare.thresholdBytes.trim();
+  }
+
   return config;
 }
 
-function validatePreviewDenoConfig(deno, productionEndpoint) {
+function normalizeOptionalPrepare(prepare) {
+  if (prepare === undefined) return undefined;
+  if (prepare === null || typeof prepare !== "object") return prepare;
+  const hasEndpoint = typeof prepare.endpoint === "string" && prepare.endpoint.trim().length > 0;
+  const hasThreshold = typeof prepare.thresholdBytes === "string" && prepare.thresholdBytes.trim().length > 0;
+  return hasEndpoint || hasThreshold ? prepare : undefined;
+}
+
+function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
   if (deno === null || typeof deno !== "object") {
     throw new TypeError("Deno Preview configuration must be an object");
   }
@@ -107,6 +128,22 @@ function validatePreviewDenoConfig(deno, productionEndpoint) {
   }
   requirePositiveSafeInteger("Deno Preview threshold", thresholdBytes);
   requirePositiveSafeInteger("Deno Preview timeout", timeoutMs);
+  if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
+    throw new TypeError("Deno Preview threshold must not exceed Preview input limit");
+  }
+}
+
+function validatePreviewPrepareConfig(prepare, maxInputBytes) {
+  if (prepare === null || typeof prepare !== "object") {
+    throw new TypeError("Deno Preview prepare configuration must be an object");
+  }
+
+  const { endpoint, thresholdBytes } = prepare;
+  requireHttpsEndpoint("Deno Preview prepare endpoint", endpoint);
+  requirePositiveSafeInteger("Deno Preview prepare threshold", thresholdBytes);
+  if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
+    throw new TypeError("Deno Preview prepare threshold must not exceed Preview input limit");
+  }
 }
 
 function normalizeEndpoint(value) {
@@ -169,11 +206,21 @@ if (isMainModule()) {
       upstreamBaseUrl: process.env.PREVIEW_UPSTREAM_BASE_URL,
       standardLimit: process.env.PREVIEW_QUOTA_LIMIT_STANDARD,
       miniLimit: process.env.PREVIEW_QUOTA_LIMIT_MINI,
+      maxInputBytes: process.env.PREVIEW_MAX_INPUT_BYTES,
       deno: mode === "deno"
         ? {
             endpoint: process.env.PREVIEW_DENO_TOKENIZER_ENDPOINT,
             thresholdBytes: process.env.PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES,
             timeoutMs: process.env.PREVIEW_DENO_TOKENIZER_TIMEOUT_MS,
+          }
+        : undefined,
+      prepare: mode === "deno" && (
+        (process.env.PREVIEW_DENO_PREPARE_ENDPOINT ?? "").trim() !== "" ||
+        (process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES ?? "").trim() !== ""
+      )
+        ? {
+            endpoint: process.env.PREVIEW_DENO_PREPARE_ENDPOINT,
+            thresholdBytes: process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES,
           }
         : undefined,
     });

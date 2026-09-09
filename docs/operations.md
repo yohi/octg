@@ -144,6 +144,12 @@ When enabled, requests below the configured text-byte threshold use the Durable 
 
 A Deno failure does not transparently retry through the Durable Object path.
 
+Responses prepare is disabled when both `DENO_PREPARE_ENDPOINT` and
+`DENO_PREPARE_THRESHOLD_BYTES` are absent. Treat a one-sided or invalid pair
+as a deployment failure, not as a reason to silently use the Durable Object.
+Prepare-only invalidity affects Responses; Chat Completions remains on its
+existing path.
+
 Monitor:
 
 - tokenization provider;
@@ -161,6 +167,47 @@ request must return HTTP 200. Both versions remain at 0% beside the captured
 `wrangler rollback`. Fork pull requests use secret-free validation only.
 
 See [deno-tokenizer.md](./deno-tokenizer.md) for Deno-specific deployment and acceptance.
+
+## Responses Prepare Rollout and Acceptance
+
+Use the following staged procedure for prepare:
+
+1. **Stage 1 — prepare absent.** Deploy the Worker and Deno tokenizer with
+   both prepare variables absent. Do not upload empty-string `--var`
+   placeholders. Confirm ordinary Chat Completions and Responses requests use
+   the existing tokenizer path.
+2. **Verify the service.** Check `/health`, then send an authenticated
+   `/tokenize` request and an authenticated `/prepare` request using sanitized
+   JSON. Confirm invalid authentication is rejected and no request body,
+   metadata input, bearer token, or other secret appears in logs.
+3. **Verify the shared limit.** Confirm the exact canonical
+   `MAX_INPUT_BYTES` value is present in the Worker binding and Deno runtime.
+   Confirm `OCTG_EXPECTED_MAX_INPUT_BYTES` was generated from that value and
+   that startup fails before `Deno.serve` for a missing, invalid, or mismatched
+   assertion. Preview must use `OCTG_PREVIEW_MAX_INPUT_BYTES` independently.
+4. **Enable the pair.** Configure both prepare variables together, with an
+   HTTPS endpoint and threshold no greater than the canonical input limit.
+   Confirm a one-sided pair is rejected before any deployment arguments are
+   built. Confirm the Worker config contains both generated
+   `DENO_PREPARE_*` bindings and contains neither when both source values are
+   absent.
+5. **Canary.** Send sanitized approximately 74k-token Responses payloads at
+   concurrency 1 and 2. Confirm the prepare stage precedes quota reservation,
+   successful requests reach upstream only after reservation, marker
+   replacement produces the requested output limit, and normal quota headers
+   remain correct. Confirm a prepare rejection, timeout, authentication
+   failure, or network failure reaches neither quota reservation nor upstream
+   and never falls back to `TokenizerController`.
+6. **Resource acceptance.** Review Worker resource-stage telemetry and Deno
+   logs for paired start/finish outcomes. Accept only when there is no
+   `exceededCpu` outcome, no payload/secret logging, and quota/upstream
+   accounting is correct at concurrency 1, 2, and the operator-defined peak.
+
+The five Deno prepare validation codes are `invalid_body`, `non_text`,
+`max_tokens_conflict`, `input_too_large`, and `request_too_large`. The 400/413
+validation body is bounded to 4096 bytes and contains only its code. Metadata
+and the `X-OCTG-Prepare-Metadata` header are bounded as well; do not increase
+these bounds as an incident workaround.
 
 ## Admin Policy Changes
 
@@ -196,6 +243,12 @@ only to avoid the migration can re-enable the Worker-local large-input BPE path
 and repeat the resource-limit incident. If a new migration or class registration
 cannot be deployed, repair forward with a new deployment; do not rewrite an
 already applied migration tag.
+
+For a prepare incident, first restore a known Worker version that predates
+prepare, or deploy the reviewed prepare-absent configuration. Restore the
+captured 100% version using the versioned rollback procedure, then verify
+`/health`, Chat Completions, Responses legacy routing, `/quota`, and Admin
+Access. Do not leave a one-sided prepare pair during rollback.
 
 After rollback:
 

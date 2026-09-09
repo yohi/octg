@@ -47,9 +47,12 @@ jobs:
       - name: Validate Production Deno tokenizer configuration
         run: node scripts/production-deno-config.mjs
         env:
+          MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
+          DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
+          DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
 
       - name: Validate Production Deno tokenizer authentication Secret
         env:
@@ -70,6 +73,16 @@ jobs:
       - name: Deploy Worker
         run: |
           set -euo pipefail
+          prepare_args=()
+          if { [[ -n "${DENO_PREPARE_ENDPOINT:-}" && -z "${DENO_PREPARE_THRESHOLD_BYTES:-}" ]] || \
+               [[ -z "${DENO_PREPARE_ENDPOINT:-}" && -n "${DENO_PREPARE_THRESHOLD_BYTES:-}" ]]; }; then
+            echo "::error::Production prepare variables must be supplied together"
+            exit 2
+          fi
+          if [[ -n "${DENO_PREPARE_ENDPOINT:-}" && -n "${DENO_PREPARE_THRESHOLD_BYTES:-}" ]]; then
+            prepare_args+=(--var "DENO_PREPARE_ENDPOINT:${DENO_PREPARE_ENDPOINT}")
+            prepare_args+=(--var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}")
+          fi
           secrets_file="$RUNNER_TEMP/production-worker-secrets.json"
           trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$secrets_file"' EXIT
           node - "$secrets_file" <<'NODE'
@@ -87,9 +100,11 @@ jobs:
             --config apps/gateway-worker/wrangler.jsonc \
             --keep-vars \
             --secrets-file "$secrets_file" \
+            --var "MAX_INPUT_BYTES:${MAX_INPUT_BYTES}" \
             --var "DENO_TOKENIZER_ENDPOINT:${DENO_TOKENIZER_ENDPOINT}" \
             --var "DENO_TOKENIZER_THRESHOLD_BYTES:${DENO_TOKENIZER_THRESHOLD_BYTES}" \
-            --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}"
+            --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}" \
+            "${prepare_args[@]}"
           version_id=$(jq -s -r '
             [.[] | select(.type == "version-upload") | .version_id // empty]
             | last // empty
@@ -108,6 +123,9 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/production-wrangler-output.ndjson
+          MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
+          DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
+          DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
