@@ -100,36 +100,26 @@ export async function readJsonBody(
 
   const bodyReadMs = elapsedSince(bodyReadStartedAt);
   const parseStartedAt = performance.now();
+  let rawText = "";
+  let body: unknown = undefined;
+  let parsed = true;
   try {
-    const rawText = Buffer.concat(chunks, length).toString("utf-8");
-    const body = JSON.parse(rawText);
-    return {
-      ok: true,
-      body,
-      rawText,
-      metrics: {
-        rawBodyBytes: length,
-        rawBodyBytesSource: "measured",
-        declaredContentLength,
-        measuredRawBodyBytes: length,
-        truncated: false,
-        bodyReadMs,
-        parseMs: elapsedSince(parseStartedAt),
-      },
-    };
+    rawText = Buffer.concat(chunks, length).toString("utf-8");
+    body = JSON.parse(rawText);
   } catch {
-    return {
-      ok: false,
-      reason: "invalid_json",
-      metrics: {
-        rawBodyBytes: length,
-        rawBodyBytesSource: "measured",
-        declaredContentLength,
-        measuredRawBodyBytes: length,
-        truncated: false,
-        bodyReadMs,
-        parseMs: elapsedSince(parseStartedAt),
-      },
-    };
+    parsed = false;
   }
+  const metrics: ReadJsonBodyMetrics = {
+    rawBodyBytes: length,
+    rawBodyBytesSource: "measured",
+    declaredContentLength,
+    measuredRawBodyBytes: length,
+    truncated: false,
+    bodyReadMs,
+    parseMs: elapsedSince(parseStartedAt),
+  };
+  if (!parsed) {
+    return { ok: false, reason: "invalid_json", metrics };
+  }
+  return { ok: true, body, rawText, metrics };
 }

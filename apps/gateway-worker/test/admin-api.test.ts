@@ -327,6 +327,29 @@ describe("admin API", () => {
     expect(response.status).toBe(200);
   });
 
+  it("parses valid JSON with a declared in-bound content length", async () => {
+    const body = JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 5, cache_enabled: false, tools_mode: "REJECT" });
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, {
+      method: "PUT",
+      headers: { "content-length": String(new TextEncoder().encode(body).byteLength) },
+      body,
+    }, "jwt");
+
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects invalid JSON with a declared in-bound content length", async () => {
+    const body = "{";
+    const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, {
+      method: "PUT",
+      headers: { "content-length": String(body.length) },
+      body,
+    }, "jwt");
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+  });
+
   it("rejects missing tools_mode in policy writes", async () => {
     const response = await admin(`/admin/clients/${TEST_CLIENT_ID}/policy`, { method: "PUT", body: JSON.stringify({ overflow_mode: "REJECT", output_limit_mode: "REJECT", max_paid_usd_day: 0, cache_enabled: false }) }, "jwt");
     expect(response.status).toBe(400);
