@@ -223,11 +223,11 @@ no_match_log="$(< "$TEMP_DIR/no-match-wrangler.log")"
 }
 
 setup_source="$(< "$SCRIPT_PATH")"
-[[ "$setup_source" == *"gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT"* ]] || {
+[[ "$setup_source" == *'gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo "$GITHUB_REPOSITORY" 2>/dev/null || true'* ]] || {
   print -u2 "setup-preview does not unset the stale prepare endpoint variable"
   exit 1
 }
-[[ "$setup_source" == *"gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
+[[ "$setup_source" == *'gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES --env preview --repo "$GITHUB_REPOSITORY" 2>/dev/null || true'* ]] || {
   print -u2 "setup-preview does not unset the stale prepare threshold variable"
   exit 1
 }
