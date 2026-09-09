@@ -131,55 +131,64 @@ export function replaceOutputMarker(
   let pending: Uint8Array = new Uint8Array(0);
   let replacements = 0;
 
+  const releaseReader = (activeReader: ReadableStreamDefaultReader<Uint8Array>): void => {
+    if (reader !== activeReader) return;
+    reader = undefined;
+    activeReader.releaseLock();
+  };
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
       reader = body.getReader();
     },
     async pull(controller) {
+      const activeReader = reader;
+      if (activeReader === undefined) {
+        controller.error(new Error("replaceOutputMarker: source reader is unavailable"));
+        return;
+      }
+
       try {
-        for (;;) {
-          const chunk = await reader!.read();
-          if (chunk.done) {
-            // Flush: check pending bytes for a complete marker match
-            if (pending.byteLength > 0) {
-              if (exactMatch(pending, 0, quotedMarker) && pending.byteLength === quotedMarker.byteLength) {
-                controller.enqueue(replacement);
-                replacements++;
-              } else {
-                // Pending bytes are not a complete marker — emit them
-                controller.enqueue(pending);
-              }
-              pending = new Uint8Array(0);
+        const chunk = await activeReader.read();
+        if (chunk.done) {
+          if (pending.byteLength > 0) {
+            if (exactMatch(pending, 0, quotedMarker) && pending.byteLength === quotedMarker.byteLength) {
+              controller.enqueue(replacement);
+              replacements++;
+            } else {
+              controller.enqueue(pending);
             }
-            if (replacements !== 1) {
-              controller.error(
-                new Error(
-                  `replaceOutputMarker: expected exactly 1 marker occurrence, found ${replacements}`,
-                ),
-              );
-              return;
-            }
-            controller.close();
+            pending = new Uint8Array(0);
+          }
+          releaseReader(activeReader);
+          if (replacements !== 1) {
+            controller.error(
+              new Error(
+                `replaceOutputMarker: expected exactly 1 marker occurrence, found ${replacements}`,
+              ),
+            );
             return;
           }
-
-          const combined = concatBytes(pending, chunk.value);
-          const result = replaceOneQuotedMarker(combined, quotedMarker, replacement);
-          pending = result.pending;
-          replacements += result.replacements;
-
-          if (result.emitted.byteLength > 0) {
-            controller.enqueue(result.emitted);
-          }
+          controller.close();
+          return;
         }
+
+        const combined = concatBytes(pending, chunk.value);
+        const result = replaceOneQuotedMarker(combined, quotedMarker, replacement);
+        pending = result.pending;
+        replacements += result.replacements;
+
+        controller.enqueue(result.emitted);
       } catch (error) {
+        releaseReader(activeReader);
         controller.error(error);
-      } finally {
-        reader?.releaseLock();
       }
     },
     async cancel() {
-      await reader?.cancel().catch(() => undefined);
+      const activeReader = reader;
+      if (activeReader === undefined) return;
+      await activeReader.cancel().catch(() => undefined);
+      releaseReader(activeReader);
     },
   });
 }

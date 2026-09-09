@@ -42,6 +42,18 @@ output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" zsh "$SCRIPT_PATH" --dry-r
 [[ "$output" == *"STANDARD=0"* && "$output" == *"MINI=100000"* ]] || { print -u2 "dry-run did not report quota limits"; exit 1; }
 [[ "$output" != *"test-token"* && "$output" != *"preview-upstream-token"* && "$output" != *"test-pepper"* && "$output" != *"octg_sk_test"* ]] || { print -u2 "dry-run leaked a secret value"; exit 1; }
 
+for invalid_endpoint in \
+  "http://octg-tokenizer-preview.deno.dev/prepare" \
+  "ftp://octg-tokenizer-preview.deno.dev/prepare" \
+  "https://user:password@octg-tokenizer-preview.deno.dev/prepare"; do
+  sed "s|^DENO_PREVIEW_PREPARE_ENDPOINT=.*|DENO_PREVIEW_PREPARE_ENDPOINT=$invalid_endpoint|" \
+    "$TEMP_DIR/valid.env" > "$TEMP_DIR/invalid-prepare-endpoint.env"
+  if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/invalid-prepare-endpoint.env" zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+    print -u2 "invalid prepare endpoint was accepted: $invalid_endpoint"
+    exit 1
+  fi
+done
+
 MARKER="$TEMP_DIR/command-substitution-ran"
 cat > "$TEMP_DIR/consolidated.env" <<EOF
 # Production values remain in the same file but must not be executed by zsh.
@@ -191,6 +203,16 @@ no_match_output="$(
 no_match_log="$(< "$TEMP_DIR/no-match-wrangler.log")"
 [[ "$no_match_log" == *"d1 create octg-gateway-preview-db --binding DB"* ]] || {
   print -u2 "missing Preview D1 did not invoke create"
+  exit 1
+}
+
+setup_source="$(< "$SCRIPT_PATH")"
+[[ "$setup_source" == *"gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT"* ]] || {
+  print -u2 "setup-preview does not unset the stale prepare endpoint variable"
+  exit 1
+}
+[[ "$setup_source" == *"gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
+  print -u2 "setup-preview does not unset the stale prepare threshold variable"
   exit 1
 }
 

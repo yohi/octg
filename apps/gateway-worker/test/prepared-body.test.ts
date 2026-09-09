@@ -113,4 +113,52 @@ describe("replaceOutputMarker", () => {
     const result = await drainStream(replaceOutputMarker(body, MARKER, 1));
     expect(new TextDecoder().decode(result)).toBe(prefix + "1");
   });
+
+  it("reads at most one additional source chunk while the sink applies backpressure", async () => {
+    const chunks = [
+      encode("first "),
+      encode("second "),
+      encode("third "),
+      encode("fourth "),
+      encode(QUOTED_MARKER),
+    ];
+    let sourceReads = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[sourceReads];
+        if (chunk === undefined) {
+          controller.close();
+          return;
+        }
+        sourceReads += 1;
+        controller.enqueue(chunk);
+        if (sourceReads === chunks.length) controller.close();
+      },
+    });
+    const transformed = replaceOutputMarker(body, MARKER, 1);
+    let writes = 0;
+    let releaseFirstWrite: (() => void) | undefined;
+    let firstWriteStartedResolve: (() => void) | undefined;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      firstWriteStartedResolve = resolve;
+    });
+    const sink = new WritableStream<Uint8Array>({
+      write() {
+        writes += 1;
+        if (writes !== 1) return;
+        firstWriteStartedResolve?.();
+        return new Promise<void>((resolve) => {
+          releaseFirstWrite = resolve;
+        });
+      },
+    });
+
+    const pipePromise = transformed.pipeTo(sink);
+    await firstWriteStarted;
+
+    expect(sourceReads).toBeLessThanOrEqual(2);
+    if (releaseFirstWrite === undefined) throw new Error("first sink write did not block");
+    releaseFirstWrite();
+    await pipePromise;
+  });
 });
