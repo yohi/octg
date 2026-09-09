@@ -63,55 +63,53 @@ function replaceOneQuotedMarker(
   const emittedParts: Uint8Array[] = [];
   let replacements = 0;
   let i = 0;
+  let batchStart = 0;
 
-  while (i <= combined.byteLength) {
+  while (i < combined.byteLength) {
     // Try to find the full quoted marker starting at position i
     if (exactMatch(combined, i, quotedMarker)) {
+      // Flush any batched non-matching bytes before the marker
+      if (i > batchStart) emittedParts.push(combined.subarray(batchStart, i));
       emittedParts.push(replacement);
       replacements++;
       i += quotedMarker.byteLength;
+      batchStart = i;
       continue;
     }
 
     // Check if a prefix of combined[i:] matches a prefix of quotedMarker.
     // If so, this position might be the start of the marker split across chunks.
-    if (i < combined.byteLength) {
-      const prefixLen = matchPrefix(combined.subarray(i), quotedMarker);
-      if (prefixLen > 0) {
-        // The bytes from i to i+prefixLen could be the start of the marker.
-        // Everything before i is safe to emit.
-        // The suffix from i is pending.
-        break;
-      }
+    const prefixLen = matchPrefix(combined.subarray(i), quotedMarker);
+    if (prefixLen > 0) {
+      // Flush any batched non-matching bytes before the pending suffix
+      if (i > batchStart) emittedParts.push(combined.subarray(batchStart, i));
+      // The suffix from i is pending
+      const pending = combined.subarray(i);
+      return { emitted: flattenParts(emittedParts), pending, replacements };
     }
 
-    // No match and no prefix match at position i — emit this byte and advance.
-    if (i < combined.byteLength) {
-      emittedParts.push(combined.subarray(i, i + 1));
-    }
+    // No match and no prefix match at position i — advance past this byte
     i++;
   }
 
-  // If we broke out of the loop due to a prefix match, the pending bytes are combined[i:].
-  // If we reached the end (i > combined.byteLength), pending is empty.
-  const pending = i < combined.byteLength ? combined.subarray(i) : new Uint8Array(0);
+  // Reached end of combined: flush any remaining batched bytes
+  if (i > batchStart) emittedParts.push(combined.subarray(batchStart, i));
 
-  let emitted: Uint8Array;
-  if (emittedParts.length === 0) {
-    emitted = new Uint8Array(0);
-  } else if (emittedParts.length === 1) {
-    emitted = emittedParts[0]!;
-  } else {
-    const totalLen = emittedParts.reduce((sum, p) => sum + p.byteLength, 0);
-    emitted = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const part of emittedParts) {
-      emitted.set(part, offset);
-      offset += part.byteLength;
-    }
+  return { emitted: flattenParts(emittedParts), pending: new Uint8Array(0), replacements };
+}
+
+/** Flatten an array of Uint8Array parts into a single Uint8Array. */
+function flattenParts(parts: Uint8Array[]): Uint8Array {
+  if (parts.length === 0) return new Uint8Array(0);
+  if (parts.length === 1) return parts[0]!;
+  const totalLen = parts.reduce((sum, p) => sum + p.byteLength, 0);
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
   }
-
-  return { emitted, pending, replacements };
+  return out;
 }
 
 /**
@@ -129,15 +127,18 @@ export function replaceOutputMarker(
   const quotedMarker = encoder.encode(JSON.stringify(marker));
   const replacement = encoder.encode(String(outputTokens));
 
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let pending: Uint8Array = new Uint8Array(0);
   let replacements = 0;
 
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      reader = body.getReader();
+    },
     async pull(controller) {
-      const reader = body.getReader();
       try {
         for (;;) {
-          const chunk = await reader.read();
+          const chunk = await reader!.read();
           if (chunk.done) {
             // Flush: check pending bytes for a complete marker match
             if (pending.byteLength > 0) {
@@ -174,11 +175,12 @@ export function replaceOutputMarker(
       } catch (error) {
         controller.error(error);
       } finally {
-        reader.releaseLock();
+        reader?.releaseLock();
       }
     },
-    cancel() {
-      body.cancel().catch(() => undefined);
+    async cancel() {
+      await reader?.cancel().catch(() => undefined);
     },
   });
 }
+

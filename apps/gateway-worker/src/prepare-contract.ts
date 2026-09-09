@@ -1,4 +1,4 @@
-import type { PrepareMetadata } from "@octg/shared";
+import type { PrepareErrorCode, PrepareMetadata } from "@octg/shared";
 
 export type PrepareOutcome =
   | {
@@ -7,7 +7,7 @@ export type PrepareOutcome =
       readonly body: ReadableStream<Uint8Array>;
       readonly cancel: () => Promise<void>;
     }
-  | { readonly kind: "rejected"; readonly code: import("@octg/shared").PrepareErrorCode }
+  | { readonly kind: "rejected"; readonly code: PrepareErrorCode }
   | {
       readonly kind: "unavailable";
       readonly failure: "timeout" | "network" | "upstream_status" | "malformed_response";
@@ -142,4 +142,4 @@ export function parsePrepareMetadata(
     isToolUse: record.isToolUse,
     outputMarker: record.outputMarker,
   };
-}
+};
