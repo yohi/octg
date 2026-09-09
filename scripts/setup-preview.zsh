@@ -82,11 +82,14 @@ import { readFileSync } from "node:fs";
 const [root, envFile, name] = process.argv.slice(2);
 const { parseSetupEnvFile } = await import(`${root}/scripts/setup-env.mjs`);
 const values = parseSetupEnvFile(readFileSync(envFile, "utf8"));
-  const value = values[name];
-  if (typeof value === "string") process.stdout.write(value);
+  if (Object.prototype.hasOwnProperty.call(values, name)) {
+    process.stdout.write(`__OCTG_PRESENT__${values[name]}`);
+  }
 NODE
 )"
-  if [[ -n "$value" ]]; then
+  if [[ "$value" == __OCTG_PRESENT__* ]]; then
+    typeset -g "$name=${value#__OCTG_PRESENT__}"
+  elif [[ -n "$value" ]]; then
     typeset -g "$name=$value"
   fi
   return 0
@@ -179,12 +182,12 @@ require_value OCTG_PREVIEW_CLIENT_KEY "${OCTG_PREVIEW_CLIENT_KEY:-}"
 [[ "${OCTG_PREVIEW_CLIENT_KEY}" == octg_sk_* ]] || die "OCTG_PREVIEW_CLIENT_KEY はoctg_sk_で始める必要があります"
 require_value OCTG_PREVIEW_KEY_PEPPER "${OCTG_PREVIEW_KEY_PEPPER:-}"
 
-if [[ -n "${DENO_PREVIEW_PREPARE_ENDPOINT:-}" || -n "${DENO_PREVIEW_PREPARE_THRESHOLD_BYTES:-}" ]]; then
+if [[ -v DENO_PREVIEW_PREPARE_ENDPOINT || -v DENO_PREVIEW_PREPARE_THRESHOLD_BYTES ]]; then
   if [[ -z "${DENO_PREVIEW_PREPARE_ENDPOINT:-}" || -z "${DENO_PREVIEW_PREPARE_THRESHOLD_BYTES:-}" ]]; then
     die "DENO_PREVIEW_PREPARE_ENDPOINT と DENO_PREVIEW_PREPARE_THRESHOLD_BYTES は同時に指定してください"
   fi
   require_https_url DENO_PREVIEW_PREPARE_ENDPOINT "$DENO_PREVIEW_PREPARE_ENDPOINT"
-  require_positive_integer DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
+  require_safe_positive_integer DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
   if (( DENO_PREVIEW_PREPARE_THRESHOLD_BYTES > OCTG_PREVIEW_MAX_INPUT_BYTES )); then
     die "DENO_PREVIEW_PREPARE_THRESHOLD_BYTES は OCTG_PREVIEW_MAX_INPUT_BYTES 以下である必要があります"
   fi

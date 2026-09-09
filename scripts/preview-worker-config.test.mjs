@@ -124,14 +124,19 @@ test("omits both generated prepare bindings when the pair is absent", () => {
   assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, undefined);
 });
 
-test("does not emit empty-string prepare placeholders", () => {
-  const config = buildPreviewWorkerConfig(baseConfig, {
-    ...validOptions,
-    prepare: { endpoint: "", thresholdBytes: "" },
-  });
-
-  assert.equal(config.vars.DENO_PREPARE_ENDPOINT, undefined);
-  assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, undefined);
+test("rejects empty-string prepare placeholders", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      deno: {
+        endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+        thresholdBytes: "1",
+        timeoutMs: "5000",
+      },
+      prepare: { endpoint: "", thresholdBytes: "" },
+    }),
+    /Deno Preview prepare/,
+  );
 });
 
 test("rejects a one-sided Preview prepare pair", () => {
@@ -141,6 +146,19 @@ test("rejects a one-sided Preview prepare pair", () => {
       prepare: { endpoint: "https://preview-deno.test/prepare" },
     }),
     /Deno Preview prepare/,
+  );
+});
+
+test("rejects a complete Preview prepare pair without a tokenizer group", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      prepare: {
+        endpoint: "https://preview-deno.test/prepare",
+        thresholdBytes: "700000",
+      },
+    }),
+    /tokenizer/i,
   );
 });
 

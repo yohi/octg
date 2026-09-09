@@ -162,10 +162,14 @@ for (const name of [
   "PREVIEW_MAX_INPUT_BYTES",
   "PREVIEW_DENO_PREPARE_ENDPOINT",
   "PREVIEW_DENO_PREPARE_THRESHOLD_BYTES",
+  "PREVIEW_DENO_PREPARE_CONFIGURED",
 ]) {
   if (!denoSmoke.includes(name)) {
     throw new Error(`Deno smoke must propagate ${name}`);
   }
+}
+if (!denoSmoke.includes("unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES")) {
+  throw new Error("Deno smoke must unset absent prepare variables before config validation/mapping");
 }
 if (!denoSmoke.includes("Preview prepare variables must be supplied together")) {
   throw new Error("Deno smoke must reject a one-sided prepare pair");

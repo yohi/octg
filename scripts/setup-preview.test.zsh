@@ -305,4 +305,21 @@ if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/partial-preview-prepare.env" \
   exit 1
 fi
 
+sed -e 's/^DENO_PREVIEW_PREPARE_ENDPOINT=.*/DENO_PREVIEW_PREPARE_ENDPOINT=/' \
+  -e 's/^DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=.*/DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=/' \
+  "$TEMP_DIR/valid.env" > "$TEMP_DIR/empty-preview-prepare.env"
+if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/empty-preview-prepare.env" \
+  zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup accepted empty prepare placeholders"
+  exit 1
+fi
+
+sed 's/^DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=.*/DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=9007199254740992/' \
+  "$TEMP_DIR/valid.env" > "$TEMP_DIR/unsafe-preview-prepare.env"
+if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/unsafe-preview-prepare.env" \
+  zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+  print -u2 "Preview setup accepted an unsafe prepare threshold"
+  exit 1
+fi
+
 print "setup-preview dry-run contract: ok"

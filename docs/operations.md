@@ -150,6 +150,12 @@ as a deployment failure, not as a reason to silently use the Durable Object.
 Prepare-only invalidity affects Responses; Chat Completions remains on its
 existing path.
 
+Production deployments use Wrangler `--keep-vars`. Omitting the prepare pair
+therefore disables prepare only for a fresh Worker version that has never had
+prepare bindings. After prepare bindings have been deployed, remove them by
+rolling back to a known pre-prepare Worker version rather than relying on an
+omitted variable.
+
 Monitor:
 
 - tokenization provider;

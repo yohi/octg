@@ -92,6 +92,7 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
   const workflow = readFileSync(workflowPath, "utf8");
 
   for (const variableName of [
+    "MAX_INPUT_BYTES",
     "DENO_TOKENIZER_ENDPOINT",
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
@@ -107,7 +108,9 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
     workflow,
     "Validate Production Deno tokenizer configuration",
   );
-  assert.equal(validationStep, "node scripts/production-deno-config.mjs");
+  assert.match(validationStep, /node scripts\/production-deno-config\.mjs/);
+  assert.match(workflow, /PRODUCTION_PREPARE_CONFIGURED: \$\{\{ vars\.DENO_PREPARE_ENDPOINT != '' \|\| vars\.DENO_PREPARE_THRESHOLD_BYTES != '' \}\}/);
+  assert.match(validationStep, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
 
   const validationIndex = workflow.indexOf(
     "- name: Validate Production Deno tokenizer configuration",
@@ -123,6 +126,7 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
   assert.ok(deployCommand, "Deploy Worker step must contain a run command");
   assert.match(deployCommand, /--keep-vars/);
   for (const variableName of [
+    "MAX_INPUT_BYTES",
     "DENO_TOKENIZER_ENDPOINT",
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
@@ -133,6 +137,18 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
       `Deploy Worker must pass ${variableName} explicitly to Wrangler`,
     );
   }
+
+  assert.match(deployCommand, /prepare_args=\(\)/);
+  assert.match(deployCommand, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
+  assert.match(deployCommand, /--var "MAX_INPUT_BYTES:\$\{MAX_INPUT_BYTES\}"/);
+  const prepareCheckIndex = deployCommand.indexOf("Production prepare variables must be supplied together");
+  const prepareAppendIndex = deployCommand.indexOf('prepare_args+=(--var "DENO_PREPARE_ENDPOINT');
+  assert.ok(prepareCheckIndex >= 0 && prepareCheckIndex < prepareAppendIndex);
+
+  const denoWorkflow = readFileSync(join(root, ".github/workflows/deploy-deno-tokenizer.yml"), "utf8");
+  assert.match(denoWorkflow, /MAX_INPUT_BYTES: \$\{\{ vars\.MAX_INPUT_BYTES \}\}/);
+  assert.match(denoWorkflow, /MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
+  assert.match(denoWorkflow, /OCTG_EXPECTED_MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
 
 });
 

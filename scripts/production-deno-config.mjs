@@ -46,7 +46,14 @@ export function validateProductionDenoConfig(environment) {
   const prepareThreshold = values.DENO_PREPARE_THRESHOLD_BYTES;
   const hasPrepareEndpoint = isPresent(prepareEndpoint);
   const hasPrepareThreshold = isPresent(prepareThreshold);
-  if (hasPrepareEndpoint !== hasPrepareThreshold) {
+  const hasPrepareValue = prepareEndpoint !== undefined || prepareThreshold !== undefined;
+  const emptyPrepareNames = [
+    isEmptyString(prepareEndpoint) ? "DENO_PREPARE_ENDPOINT" : undefined,
+    isEmptyString(prepareThreshold) ? "DENO_PREPARE_THRESHOLD_BYTES" : undefined,
+  ].filter((name) => name !== undefined);
+  if (emptyPrepareNames.length > 0) {
+    invalid.push(...emptyPrepareNames);
+  } else if (hasPrepareValue && hasPrepareEndpoint !== hasPrepareThreshold) {
     invalid.push(hasPrepareEndpoint
       ? "DENO_PREPARE_ENDPOINT"
       : "DENO_PREPARE_THRESHOLD_BYTES");
@@ -90,7 +97,11 @@ function isValidHttpsEndpoint(value) {
 }
 
 function isPresent(value) {
-  return value !== undefined && !(typeof value === "string" && value.trim() === "");
+  return value !== undefined && !isEmptyString(value);
+}
+
+function isEmptyString(value) {
+  return typeof value === "string" && value.trim() === "";
 }
 
 function isPositiveSafeInteger(value) {

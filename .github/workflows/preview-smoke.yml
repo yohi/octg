@@ -340,10 +340,14 @@ jobs:
           PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
           PREVIEW_DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT }}
           PREVIEW_DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES }}
+          PREVIEW_DENO_PREPARE_CONFIGURED: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT != '' || vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES != '' }}
           DENO_PREVIEW_DEPLOY_TOKEN: ${{ secrets.DENO_PREVIEW_DEPLOY_TOKEN }}
           DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
         run: |
           set -euo pipefail
+          if [[ "$PREVIEW_DENO_PREPARE_CONFIGURED" != "true" ]]; then
+            unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES
+          fi
           if [[ -z "$PREVIEW_DATABASE_ID" || -z "$PREVIEW_BASE_URL" || -z "$PREVIEW_UPSTREAM_BASE_URL" || -z "$PREVIEW_QUOTA_LIMIT_STANDARD" || -z "$PREVIEW_QUOTA_LIMIT_MINI" || -z "$PREVIEW_MAX_INPUT_BYTES" ]]; then
             echo "::error::Preview Worker variables are not configured"
             exit 2
@@ -389,8 +393,12 @@ jobs:
           PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
           PREVIEW_DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT }}
           PREVIEW_DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES }}
+          PREVIEW_DENO_PREPARE_CONFIGURED: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT != '' || vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES != '' }}
         run: |
           set -euo pipefail
+          if [[ "$PREVIEW_DENO_PREPARE_CONFIGURED" != "true" ]]; then
+            unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES
+          fi
           node scripts/preview-worker-config.mjs \
             apps/gateway-worker/wrangler.jsonc \
             "$PREVIEW_CONFIG_PATH" \

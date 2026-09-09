@@ -54,6 +54,16 @@ test("accepts an absent prepare pair and a complete prepare pair", () => {
   });
 });
 
+test("requires MAX_INPUT_BYTES even when the tokenizer group is complete", () => {
+  const { MAX_INPUT_BYTES: _ignored, ...withoutInputLimit } = completeProductionConfig;
+
+  assert.deepEqual(validateProductionDenoConfig(withoutInputLimit), {
+    valid: false,
+    missing: ["MAX_INPUT_BYTES"],
+    invalid: [],
+  });
+});
+
 test("rejects a one-sided prepare pair before deployment", () => {
   for (const [name, value] of [
     ["DENO_PREPARE_ENDPOINT", "https://prepare.example/prepare"],
@@ -64,6 +74,24 @@ test("rejects a one-sided prepare pair before deployment", () => {
       [name]: value,
     });
     assert.deepEqual(result, { valid: false, missing: [], invalid: [name] });
+  }
+});
+
+test("rejects empty prepare placeholders instead of disabling prepare", () => {
+  for (const [endpoint, threshold] of [
+    ["", ""],
+    ["", "700000"],
+    ["https://prepare.example/prepare", ""],
+  ]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      DENO_PREPARE_ENDPOINT: endpoint,
+      DENO_PREPARE_THRESHOLD_BYTES: threshold,
+    });
+
+    assert.equal(result.valid, false);
+    assert.ok(result.invalid.includes("DENO_PREPARE_ENDPOINT") || endpoint === "https://prepare.example/prepare");
+    assert.ok(result.invalid.includes("DENO_PREPARE_THRESHOLD_BYTES") || threshold === "700000");
   }
 });
 

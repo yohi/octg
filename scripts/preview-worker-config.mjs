@@ -53,6 +53,9 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
   const normalizedPrepare = normalizeOptionalPrepare(prepare);
+  if (normalizedPrepare !== undefined && deno === undefined) {
+    throw new TypeError("Deno Preview prepare configuration requires a tokenizer configuration");
+  }
 
   assertPreviewQuotaAllocation({
     production: {
@@ -106,10 +109,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
 
 function normalizeOptionalPrepare(prepare) {
   if (prepare === undefined) return undefined;
-  if (prepare === null || typeof prepare !== "object") return prepare;
-  const hasEndpoint = typeof prepare.endpoint === "string" && prepare.endpoint.trim().length > 0;
-  const hasThreshold = typeof prepare.thresholdBytes === "string" && prepare.thresholdBytes.trim().length > 0;
-  return hasEndpoint || hasThreshold ? prepare : undefined;
+  return prepare;
 }
 
 function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
@@ -215,8 +215,8 @@ if (isMainModule()) {
           }
         : undefined,
       prepare: mode === "deno" && (
-        (process.env.PREVIEW_DENO_PREPARE_ENDPOINT ?? "").trim() !== "" ||
-        (process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES ?? "").trim() !== ""
+        process.env.PREVIEW_DENO_PREPARE_ENDPOINT !== undefined ||
+        process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES !== undefined
       )
         ? {
             endpoint: process.env.PREVIEW_DENO_PREPARE_ENDPOINT,

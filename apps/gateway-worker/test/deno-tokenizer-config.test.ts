@@ -227,15 +227,15 @@ describe("resolveDenoRuntimeConfig", () => {
     expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
   });
 
-  it("treats empty-string prepare placeholder as absent (disabled)", () => {
-    const config = resolveDenoRuntimeConfig({
-      ...runtimeTokenizerComplete,
-      DENO_PREPARE_ENDPOINT: "",
-      DENO_PREPARE_THRESHOLD_BYTES: "",
-    });
+  it.each([
+    ["both values empty", { DENO_PREPARE_ENDPOINT: "", DENO_PREPARE_THRESHOLD_BYTES: "" }],
+    ["endpoint empty", { DENO_PREPARE_ENDPOINT: "", DENO_PREPARE_THRESHOLD_BYTES: "700000" }],
+    ["threshold empty", { DENO_PREPARE_ENDPOINT: "https://deno.test/prepare", DENO_PREPARE_THRESHOLD_BYTES: "" }],
+  ] as const)("returns prepare invalid for %s", (_description, prepare) => {
+    const config = resolveDenoRuntimeConfig({ ...runtimeTokenizerComplete, ...prepare });
 
     expect(config.tokenizer.kind).toBe("enabled");
-    expect(config.prepare).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
   });
 
   it("returns prepare invalid when endpoint is HTTP", () => {
