@@ -400,6 +400,7 @@ describe("proxy failure paths", () => {
   it("rejects a declared oversized body before tokenizer, quota, or upstream calls", async () => {
     const tokenizerGet = vi.spyOn(env.TOKENIZER_CONTROLLER, "get");
     const quotaGet = vi.spyOn(env.QUOTA_CONTROLLER, "get");
+    const bodyCancel = vi.spyOn(ReadableStream.prototype, "cancel");
     const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 }));
     vi.stubGlobal("fetch", upstreamFetch);
 
@@ -415,6 +416,7 @@ describe("proxy failure paths", () => {
 
     expect(response.status).toBe(413);
     expect(await response.json()).toMatchObject({ error: { code: "request_too_large" } });
+    expect(bodyCancel).toHaveBeenCalledOnce();
     expect(tokenizerGet).not.toHaveBeenCalled();
     expect(quotaGet).not.toHaveBeenCalled();
     expect(upstreamFetch).not.toHaveBeenCalled();
