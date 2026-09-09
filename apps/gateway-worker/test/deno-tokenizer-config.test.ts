@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveDenoTokenizerConfig } from "../src/deno-tokenizer-config";
+import { resolveDenoRuntimeConfig, resolveDenoTokenizerConfig } from "../src/deno-tokenizer-config";
 
 const complete = {
   MAX_INPUT_BYTES: "1024",
@@ -132,5 +132,214 @@ describe("resolveDenoTokenizerConfig", () => {
 
     // Then: the inclusive threshold boundary is enabled.
     expect(config).toMatchObject({ kind: "enabled", thresholdBytes: 1024, maxInputBytes: 1024 });
+  });
+});
+
+const runtimeTokenizerComplete = {
+  MAX_INPUT_BYTES: "1048576",
+  DENO_TOKENIZER_ENDPOINT: "https://deno.test/tokenize",
+  DENO_TOKENIZER_AUTH_TOKEN: "token",
+  DENO_TOKENIZER_THRESHOLD_BYTES: "700000",
+  DENO_TOKENIZER_TIMEOUT_MS: "25000",
+} as const;
+
+const runtimePrepareComplete = {
+  ...runtimeTokenizerComplete,
+  DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+  DENO_PREPARE_THRESHOLD_BYTES: "700000",
+} as const;
+
+describe("resolveDenoRuntimeConfig", () => {
+  it("returns legacy DO tokenizer + prepare disabled when all Deno values are absent", () => {
+    const config = resolveDenoRuntimeConfig({});
+
+    expect(config.tokenizer).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+    expect(config.prepare).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy Deno tokenizer + prepare disabled when tokenizer is enabled and prepare pair is absent", () => {
+    const config = resolveDenoRuntimeConfig(runtimeTokenizerComplete);
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy Deno tokenizer + prepare enabled when both groups are complete and valid", () => {
+    const config = resolveDenoRuntimeConfig(runtimePrepareComplete);
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toMatchObject({
+      kind: "enabled",
+      endpoint: "https://deno.test/prepare",
+      authToken: "token",
+      thresholdBytes: 700000,
+      timeoutMs: 25000,
+      maxInputBytes: 1_048_576,
+    });
+  });
+
+  it("returns existing tokenizer configuration error when tokenizer group is partial/invalid (prepare any)", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimePrepareComplete,
+      DENO_TOKENIZER_ENDPOINT: "http://deno.test/tokenize",
+    });
+
+    expect(config.tokenizer).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy DO tokenizer + prepare configuration error when tokenizer is disabled and prepare pair is complete", () => {
+    const config = resolveDenoRuntimeConfig({
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    });
+
+    expect(config.tokenizer).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy DO tokenizer + prepare configuration error when tokenizer is disabled and prepare pair is partial", () => {
+    const config = resolveDenoRuntimeConfig({
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+    });
+
+    expect(config.tokenizer).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy Deno tokenizer + prepare configuration error when tokenizer is enabled and prepare pair is partial", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns legacy Deno tokenizer + prepare configuration error when only DENO_PREPARE_THRESHOLD_BYTES is present (partial)", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("treats empty-string prepare placeholder as absent (disabled)", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "",
+      DENO_PREPARE_THRESHOLD_BYTES: "",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "disabled", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when endpoint is HTTP", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "http://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when endpoint contains credentials", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://user:pass@deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when threshold is zero", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "0",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when threshold exceeds maxInputBytes", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "1048577",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("allows prepare threshold at the resolved input limit", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "1048576",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toMatchObject({ kind: "enabled", thresholdBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when threshold is fractional", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "1.5",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("returns prepare invalid when threshold is unsafe integer", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "9007199254740992",
+    });
+
+    expect(config.tokenizer.kind).toBe("enabled");
+    expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
+  });
+
+  it("reuses DENO_TOKENIZER_AUTH_TOKEN and DENO_TOKENIZER_TIMEOUT_MS for prepare", () => {
+    const config = resolveDenoRuntimeConfig(runtimePrepareComplete);
+
+    if (config.prepare.kind !== "enabled") {
+      throw new Error("prepare must be enabled");
+    }
+    expect(config.prepare.authToken).toBe("token");
+    expect(config.prepare.timeoutMs).toBe(25000);
+    expect(config.prepare.endpoint).toBe("https://deno.test/prepare");
+  });
+
+  it("does not change the tokenizer configuration when prepare is invalid", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "http://deno.test/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    });
+
+    expect(config.tokenizer).toEqual({
+      kind: "enabled",
+      endpoint: "https://deno.test/tokenize",
+      authToken: "token",
+      thresholdBytes: 700000,
+      timeoutMs: 25000,
+      maxInputBytes: 1_048_576,
+    });
   });
 });
