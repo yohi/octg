@@ -397,6 +397,29 @@ describe("proxy failure paths", () => {
     }
   });
 
+  it("rejects a declared oversized body before tokenizer, quota, or upstream calls", async () => {
+    const tokenizerGet = vi.spyOn(env.TOKENIZER_CONTROLLER, "get");
+    const quotaGet = vi.spyOn(env.QUOTA_CONTROLLER, "get");
+    const upstreamFetch = vi.fn(async () => new Response(JSON.stringify({ usage: { total_tokens: 1 } }), { status: 200 }));
+    vi.stubGlobal("fetch", upstreamFetch);
+
+    const response = await SELF.fetch("https://octg.test/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": "1048577",
+        authorization: `Bearer ${TEST_CLIENT_KEY}`,
+      },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ error: { code: "request_too_large" } });
+    expect(tokenizerGet).not.toHaveBeenCalled();
+    expect(quotaGet).not.toHaveBeenCalled();
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["Chat", "/v1/chat/completions", { model: "gpt-5", messages: [{ role: "user", content: "あ" }] }],
     ["Responses", "/v1/responses", { model: "gpt-5", input: "あ" }],
