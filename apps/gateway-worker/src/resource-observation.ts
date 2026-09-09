@@ -3,6 +3,7 @@ export type ResourceStage =
   | "parse"
   | "normalize"
   | "tokenize"
+  | "prepare"
   | "quota_get_state"
   | "quota_reserve"
   | "upstream";
