@@ -73,12 +73,7 @@ export async function readJsonBody(
 
   if (declaredContentLength !== null) {
     const bodyReadStartedAt = performance.now();
-    let rawText: string;
-    try {
-      rawText = await request.text();
-    } catch (error) {
-      throw error;
-    }
+    const rawText = await request.text();
     const bodyReadMs = elapsedSince(bodyReadStartedAt);
     const parseStartedAt = performance.now();
     try {

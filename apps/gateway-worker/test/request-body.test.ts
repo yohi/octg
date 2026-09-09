@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readJsonBody } from "../src/request-body";
 
 const encoder = new TextEncoder();
@@ -53,6 +53,100 @@ describe("readJsonBody", () => {
       expect(result.metrics.rawBodyBytes).toBe(8);
     }
     expect(readerCalled).toBe(false);
+  });
+
+  it("returns invalid_json for invalid native text", async () => {
+    const result = await readJsonBody({
+      headers: new Headers({ "content-length": "1" }),
+      body: new ReadableStream(),
+      text: async () => "{",
+    }, 32);
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "invalid_json",
+      metrics: {
+        rawBodyBytes: 1,
+        rawBodyBytesSource: "declared_content_length",
+        declaredContentLength: 1,
+        measuredRawBodyBytes: null,
+        truncated: false,
+      },
+    });
+  });
+
+  it("propagates native text rejection without reading the body", async () => {
+    let readerCalled = false;
+    const error = new Error("text failed");
+    const result = readJsonBody({
+      headers: new Headers({ "content-length": "8" }),
+      body: {
+        getReader() {
+          readerCalled = true;
+          throw new Error("reader should not run");
+        },
+      } as unknown as ReadableStream,
+      text: async () => Promise.reject(error),
+    }, 32);
+
+    await expect(result).rejects.toBe(error);
+    expect(readerCalled).toBe(false);
+  });
+
+  it("uses the bounded reader fallback for malformed content length", async () => {
+    let readerCalled = false;
+    const body = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) {
+        controller.enqueue(encoded("{}"));
+        controller.close();
+      },
+    });
+    const request = {
+      headers: new Headers({ "content-length": "abc" }),
+      body: {
+        getReader() {
+          readerCalled = true;
+          return body.getReader();
+        },
+      },
+      text: async () => "should not run",
+    } as unknown as Pick<Request, "headers" | "body" | "text">;
+
+    const result = await readJsonBody(request, 32);
+
+    expect(result).toMatchObject({
+      ok: true,
+      body: {},
+      metrics: {
+        rawBodyBytes: 2,
+        rawBodyBytesSource: "measured",
+        declaredContentLength: null,
+        measuredRawBodyBytes: 2,
+      },
+    });
+    expect(readerCalled).toBe(true);
+  });
+
+  it("separates native body-read and parse timings", async () => {
+    const now = vi.spyOn(performance, "now")
+      .mockReturnValueOnce(100)
+      .mockReturnValueOnce(130)
+      .mockReturnValueOnce(200)
+      .mockReturnValueOnce(207);
+    try {
+      const result = await readJsonBody({
+        headers: new Headers({ "content-length": "2" }),
+        body: new ReadableStream(),
+        text: async () => "{}",
+      }, 32);
+
+      expect(result).toMatchObject({
+        ok: true,
+        metrics: { bodyReadMs: 30, parseMs: 7 },
+      });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("returns exact UTF-8 metrics for a valid JSON body", async () => {
