@@ -83,6 +83,24 @@ function preparedResponse(body = JSON.stringify({ max_output_tokens: metadata.ou
   });
 }
 
+function preparedStreamResponse(
+  preparedMetadata: PrepareMetadata,
+  body: ReadableStream<Uint8Array>,
+): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      "x-octg-prepare-metadata": encodeBase64url(JSON.stringify(preparedMetadata)),
+    },
+  });
+}
+
+function standardQuota() {
+  const day = new Date().toISOString().slice(0, 10);
+  return env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
+}
+
 beforeEach(async () => {
   await seedClient();
   configurePrepare();
@@ -147,6 +165,7 @@ describe("prepare routing", () => {
 
   it("maps a rejected prepare response without reserving or contacting upstream", async () => {
     // Given: Deno rejects the raw Responses body as non-text.
+    const resourceInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       expect(String(input)).toBe("https://deno.test/prepare");
       return new Response(JSON.stringify({ code: "non_text" }), {
@@ -165,6 +184,11 @@ describe("prepare routing", () => {
       error: { code: "invalid_request", message: "Non-text input is not supported in the MVP." },
     });
     expect(fetchImpl).toHaveBeenCalledOnce();
+    const prepareFinishes = resourceInfo.mock.calls
+      .map(([event]) => event)
+      .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null)
+      .filter((event) => event.stage === "prepare" && event.phase === "finish");
+    expect(prepareFinishes).toEqual([expect.objectContaining({ outcome: "rejected" })]);
   });
 
   it("fails closed before dispatch when the Responses prepare configuration is incomplete", async () => {
@@ -194,6 +218,7 @@ describe("prepare routing", () => {
 
   it("maps an unavailable prepare response to the internal error without upstream fallback", async () => {
     // Given: Deno cannot prepare the request.
+    const resourceInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       expect(String(input)).toBe("https://deno.test/prepare");
       return new Response(null, { status: 500 });
@@ -207,6 +232,153 @@ describe("prepare routing", () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
     expect(fetchImpl).toHaveBeenCalledOnce();
+    const prepareFinishes = resourceInfo.mock.calls
+      .map(([event]) => event)
+      .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null)
+      .filter((event) => event.stage === "prepare" && event.phase === "finish");
+    expect(prepareFinishes).toEqual([expect.objectContaining({ outcome: "exception" })]);
+  });
+
+  it("cancels a resolved body before returning a model rejection", async () => {
+    let cancelCount = 0;
+    const preparedBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCount += 1;
+      },
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("https://deno.test/prepare");
+      return preparedStreamResponse({ ...metadata, model: "paid-only-model" }, preparedBody);
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const response = await responsesRequest();
+
+    expect(response.status).toBe(403);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(cancelCount).toBe(1);
+  });
+
+  it("cancels a resolved body after tool-policy rejection without upstream contact", async () => {
+    let cancelCount = 0;
+    const preparedBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCount += 1;
+      },
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("https://deno.test/prepare");
+      return preparedStreamResponse({ ...metadata, isToolUse: true }, preparedBody);
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const response = await responsesRequest();
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "model_not_allowed" } });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(cancelCount).toBe(1);
+  });
+
+  it("releases the resolved reservation when upstream configuration fails before transport", async () => {
+    const originalToken = Object.getOwnPropertyDescriptor(env, "OCTG_UPSTREAM_API_TOKEN");
+    let cancelCount = 0;
+    const preparedBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCount += 1;
+      },
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("https://deno.test/prepare");
+      return preparedStreamResponse(metadata, preparedBody);
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    Object.defineProperty(env, "OCTG_UPSTREAM_API_TOKEN", { value: "", configurable: true });
+    const quota = standardQuota();
+    const before = await quota.getState();
+
+    try {
+      const response = await responsesRequest();
+
+      expect(response.status).toBe(500);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(cancelCount).toBe(1);
+      const after = await quota.getState();
+      expect(after.reservedTokens).toBe(before.reservedTokens);
+      expect(after.uncertainTokens).toBe(before.uncertainTokens);
+    } finally {
+      if (originalToken === undefined) Reflect.deleteProperty(env, "OCTG_UPSTREAM_API_TOKEN");
+      else Object.defineProperty(env, "OCTG_UPSTREAM_API_TOKEN", originalToken);
+    }
+  });
+
+  it("marks the reservation uncertain when the resolved body is missing its marker", async () => {
+    const quota = standardQuota();
+    const before = await quota.getState();
+    const calls: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === "https://deno.test/prepare") {
+        calls.push("prepare");
+        return preparedResponse(JSON.stringify({ max_output_tokens: 64 }));
+      }
+      calls.push("upstream");
+      await new Response(init?.body).text();
+      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const response = await responsesRequest();
+
+    expect(response.status).toBe(500);
+    expect(calls).toEqual(["prepare", "upstream"]);
+    const after = await quota.getState();
+    expect(after.reservedTokens).toBe(before.reservedTokens);
+    expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
+  });
+
+  it("marks the reservation uncertain when the resolved body repeats its marker", async () => {
+    const quota = standardQuota();
+    const before = await quota.getState();
+    const calls: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === "https://deno.test/prepare") {
+        calls.push("prepare");
+        return preparedResponse(JSON.stringify({
+          max_output_tokens: metadata.outputMarker,
+          duplicate: metadata.outputMarker,
+        }));
+      }
+      calls.push("upstream");
+      await new Response(init?.body).text();
+      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const response = await responsesRequest();
+
+    expect(response.status).toBe(500);
+    expect(calls).toEqual(["prepare", "upstream"]);
+    const after = await quota.getState();
+    expect(after.reservedTokens).toBe(before.reservedTokens);
+    expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
+  });
+
+  it("marks the reservation uncertain when transport throws after it starts", async () => {
+    const quota = standardQuota();
+    const before = await quota.getState();
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "https://deno.test/prepare") return preparedResponse();
+      throw new TypeError("upstream transport failed");
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const response = await responsesRequest();
+
+    expect(response.status).toBe(500);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const after = await quota.getState();
+    expect(after.reservedTokens).toBe(before.reservedTokens);
+    expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
   });
 
   it("uses the legacy Responses path below the prepare threshold", async () => {

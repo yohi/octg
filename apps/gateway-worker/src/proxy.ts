@@ -731,6 +731,7 @@ export async function handleProxy(
         finishResourceStage(env, requestId, "quota_reserve", reserveStartedAt, reserved.ok ? "success" : "rejected", {
           route: reserved.ok ? "free_shared" : routeForReserveFailure(reserved.reason),
           quotaReserved: reserved.ok,
+          upstreamReached: false,
         });
       }
       reserveStageStartedAt = undefined;
@@ -839,6 +840,25 @@ export async function handleProxy(
         reservationState = "none";
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errWorkerConcurrencyExceeded(snapshot, requestId));
+      }
+
+      if (prepareTimedOut) {
+        await cancelPreparedBeforeUpstream("exception", {
+          route: "error:pre_upstream",
+          quotaReserved: preparedQuotaReserved,
+          upstreamReached: false,
+        });
+        if (inFlightAcquired && inFlightLease !== undefined) {
+          await releaseInFlightBestEffort(stub, inFlightLease);
+          inFlightAcquired = false;
+          inFlightLease = undefined;
+        }
+        if (reservationState === "resolved") {
+          await stub.release(requestId).catch(() => undefined);
+          reservationState = "none";
+        }
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errInternal(requestId));
       }
 
       // Build marker transform + observer, then call upstream

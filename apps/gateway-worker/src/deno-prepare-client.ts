@@ -118,6 +118,7 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
         cancelled = true;
         clearTimeout_();
         controller.abort();
+        await wrappedBody.cancel().catch(() => undefined);
         await cancelResponseBody();
       };
 
