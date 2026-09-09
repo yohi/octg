@@ -34,7 +34,7 @@ function declaredContentLengthOf(request: Pick<Request, "headers" | "body">): nu
 }
 
 export async function readJsonBody(
-  request: Pick<Request, "headers" | "body">,
+  request: Pick<Request, "headers" | "body" | "text">,
   maxBytes: number,
 ): Promise<ReadJsonBodyResult> {
   const declaredContentLength = declaredContentLengthOf(request);
@@ -69,6 +69,49 @@ export async function readJsonBody(
         parseMs: 0,
       },
     };
+  }
+
+  if (declaredContentLength !== null) {
+    const bodyReadStartedAt = performance.now();
+    let rawText: string;
+    try {
+      rawText = await request.text();
+    } catch (error) {
+      throw error;
+    }
+    const bodyReadMs = elapsedSince(bodyReadStartedAt);
+    const parseStartedAt = performance.now();
+    try {
+      const body = JSON.parse(rawText);
+      return {
+        ok: true,
+        body,
+        rawText,
+        metrics: {
+          rawBodyBytes: declaredContentLength,
+          rawBodyBytesSource: "declared_content_length",
+          declaredContentLength,
+          measuredRawBodyBytes: null,
+          truncated: false,
+          bodyReadMs,
+          parseMs: elapsedSince(parseStartedAt),
+        },
+      };
+    } catch {
+      return {
+        ok: false,
+        reason: "invalid_json",
+        metrics: {
+          rawBodyBytes: declaredContentLength,
+          rawBodyBytesSource: "declared_content_length",
+          declaredContentLength,
+          measuredRawBodyBytes: null,
+          truncated: false,
+          bodyReadMs,
+          parseMs: elapsedSince(parseStartedAt),
+        },
+      };
+    }
   }
 
   const bodyReadStartedAt = performance.now();

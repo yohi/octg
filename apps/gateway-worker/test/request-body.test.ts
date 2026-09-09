@@ -15,7 +15,7 @@ function jsonWithByteLength(byteLength: number): string {
   return JSON.stringify("a".repeat(byteLength - 2));
 }
 
-function requestWithBody(body: string, contentLength?: number): Pick<Request, "body" | "headers"> {
+function requestWithBody(body: string, contentLength?: number): Pick<Request, "body" | "headers" | "text"> {
   const headers = new Headers();
   if (contentLength !== undefined) headers.set("content-length", String(contentLength));
   return {
@@ -26,10 +26,35 @@ function requestWithBody(body: string, contentLength?: number): Pick<Request, "b
         controller.close();
       },
     }),
+    text: async () => body,
   };
 }
 
 describe("readJsonBody", () => {
+  it("uses native text for an in-bound declared body", async () => {
+    let readerCalled = false;
+    const request = {
+      headers: new Headers({ "content-length": "8" }),
+      body: {
+        getReader() {
+          readerCalled = true;
+          throw new Error("bounded reader should not run");
+        },
+      },
+      text: async () => "{\"ok\":1}",
+    } as unknown as Pick<Request, "headers" | "body" | "text">;
+
+    const result = await readJsonBody(request, 1_048_576);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.body).toEqual({ ok: 1 });
+      expect(result.metrics.rawBodyBytesSource).toBe("declared_content_length");
+      expect(result.metrics.rawBodyBytes).toBe(8);
+    }
+    expect(readerCalled).toBe(false);
+  });
+
   it("returns exact UTF-8 metrics for a valid JSON body", async () => {
     const body = JSON.stringify({ message: "あ" });
     const result = await readJsonBody(requestWithBody(body), encoder.encode(body).byteLength);
@@ -63,9 +88,9 @@ describe("readJsonBody", () => {
     expect(result.ok).toBe(true);
     expect(result.metrics).toMatchObject({
       rawBodyBytes: limit,
-      rawBodyBytesSource: "measured",
+      rawBodyBytesSource: hasContentLength ? "declared_content_length" : "measured",
       declaredContentLength: hasContentLength ? limit : null,
-      measuredRawBodyBytes: limit,
+      measuredRawBodyBytes: hasContentLength ? null : limit,
       truncated: false,
     });
   });
@@ -80,7 +105,9 @@ describe("readJsonBody", () => {
 
     expect(result.ok).toBe(true);
     expect(result.metrics.rawBodyBytes).toBe(limit - 1);
-    expect(result.metrics.rawBodyBytesSource).toBe("measured");
+    expect(result.metrics.rawBodyBytesSource).toBe(
+      hasContentLength ? "declared_content_length" : "measured",
+    );
     expect(result.metrics.truncated).toBe(false);
   });
 
@@ -97,7 +124,7 @@ describe("readJsonBody", () => {
         return Promise.resolve();
       },
     } as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
-    const result = await readJsonBody({ headers: new Headers({ "content-length": "33" }), body }, 32);
+    const result = await readJsonBody({ headers: new Headers({ "content-length": "33" }), body, text: async () => "" }, 32);
 
     expect(result).toEqual({
       ok: false,
@@ -124,7 +151,7 @@ describe("readJsonBody", () => {
         canceled = true;
       },
     });
-    const result = await readJsonBody({ headers: new Headers(), body }, 32);
+    const result = await readJsonBody({ headers: new Headers(), body, text: async () => "" }, 32);
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected streamed overflow");
@@ -149,7 +176,7 @@ describe("readJsonBody", () => {
       },
     });
 
-    const result = await readJsonBody({ headers: new Headers(), body }, 32);
+    const result = await readJsonBody({ headers: new Headers(), body, text: async () => "" }, 32);
 
     expect(result).toMatchObject({
       ok: false,
