@@ -142,4 +142,4 @@ export function parsePrepareMetadata(
     isToolUse: record.isToolUse,
     outputMarker: record.outputMarker,
   };
-};
+}
