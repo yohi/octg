@@ -30,6 +30,8 @@
 - `DENO_PREPARE_THRESHOLD_BYTES` must be a positive safe integer no greater than the resolved `MAX_INPUT_BYTES`.
 - The protocol error codes are exactly `invalid_body`, `non_text`, `max_tokens_conflict`, `input_too_large`, and `request_too_large`.
 - The prepare metadata header is base64url JSON of at most 4096 ASCII bytes. Long model strings produce an internal prepare failure rather than a new public model-length rule.
+- The prepare validation error body limit is `4096` UTF-8 bytes. The Worker reads candidate validation bodies with a bounded reader and classifies a read failure, malformed body, or measured oversize as `unavailable`; an oversize response body is canceled exactly once.
+- `MAX_INPUT_BYTES` is resolved once by the deployment configuration and propagated as the same decimal value to the Worker binding and Deno runtime. Deno startup validates it against the generated, Deno-only `OCTG_EXPECTED_MAX_INPUT_BYTES` assertion from the same source; that assertion is not an independently configurable limit, and missing, invalid, or mismatched values fail closed before serving.
 - Deno serializes the normalized upstream body once and puts a single request-specific quoted output marker in `max_output_tokens`. The Worker replaces that quoted marker with the final decimal output-token budget without parsing or re-stringifying the large body.
 
 ## TDD Sequence
@@ -364,9 +366,9 @@ Each code step below includes the test assertion, command, expected RED result, 
 
 **Interfaces:**
 
-- Consumes: authenticated `POST /prepare` with `application/json` raw Responses body, the existing `DenoTokenizerServiceConfig` auth and input-size settings, and no Deno-side timeout setting. The Worker client reuses `DENO_TOKENIZER_TIMEOUT_MS` as its request/body deadline in Task 5.
+- Consumes: authenticated `POST /prepare` with `application/json` raw Responses body, the existing `DenoTokenizerServiceConfig` auth and input-size settings, one deployment-resolved `MAX_INPUT_BYTES` value propagated to both runtimes, and no Deno-side timeout setting. The Worker client reuses `DENO_TOKENIZER_TIMEOUT_MS` as its request/body deadline in Task 5.
 - Produces: `200 application/json`, a normalized upstream JSON body, and `X-OCTG-Prepare-Metadata` containing base64url-encoded `PrepareMetadata`; validation responses contain only the shared allowlisted codes, while internal failures are status-only `500` responses with no validation envelope.
-- The `/prepare` raw-body bound is `config.maxInputBytes`, the resolved `MAX_INPUT_BYTES`. The existing `/tokenize` raw-body bound `config.maxRawBodyBytes`, fatal UTF-8 decoder, and response contract remain unchanged.
+- The `/prepare` raw-body bound is `config.maxInputBytes`, the resolved shared `MAX_INPUT_BYTES`. The deployment setup writes that exact value to the Worker binding and Deno runtime, and writes `OCTG_EXPECTED_MAX_INPUT_BYTES` from the same source for Deno startup to compare before `Deno.serve`; the assertion is not independently configurable, and missing, invalid, or mismatched values fail closed. The existing `/tokenize` raw-body bound `config.maxRawBodyBytes`, fatal UTF-8 decoder, and response contract remain unchanged.
 - The successful metadata uses `rawBodyBytes` from bytes actually read, `inputBytes = inputTextBytes + opaqueInputBytes`, exact `estimatedInputTokensOf` accounting, positive `maxOutputTokens`, and an `octg_prepare_` plus 32 lowercase hexadecimal marker.
 - The response body contains exactly one quoted marker in `max_output_tokens`. Deno regenerates the marker for up to 16 attempts if the candidate appears elsewhere in the serialized body.
 
@@ -411,11 +413,16 @@ function prepareError(status: 400 | 413, code: PrepareErrorCode): Response;
 
 `readBoundedRawBody` returns `too_large` for declared or measured raw-body
 oversize and `read_failure` when `getReader()` or `reader.read()` rejects; it
-retains no request content. `read_failure` is an internal helper result and is
-never passed as `PrepareErrorCode`. A body that reaches normal end-of-stream
-returns `ok: true`, including an empty body. `prepareError` emits the exact
-bounded envelope for the validation status/code matrix and has no other side
-effect. Add this local helper for the status-only internal contract:
+retains no request content. For declared oversize, no reader is acquired, so a
+present request body stream is canceled exactly once before returning
+`too_large`. For measured oversize, the active reader's `cancel()` is called
+exactly once before returning `too_large`; cleanup must not cancel it again in a
+`finally` block. `read_failure` is an internal helper result and is never
+passed as `PrepareErrorCode`. A body that reaches normal end-of-stream returns
+`ok: true`, including an empty body, without cancellation. `prepareError`
+emits the exact bounded envelope for the validation status/code matrix and has
+no other side effect. Add this local helper for the status-only internal
+contract:
 
 ```ts
 function prepareInternalFailure(): Response {
@@ -425,7 +432,7 @@ function prepareInternalFailure(): Response {
 
 - [ ] **RED: add failing `/prepare` endpoint tests**
 
-  Test method/path/auth/content type, declared and measured raw-body oversize, replacement-style UTF-8 decoding, invalid JSON, all shared normalization errors, exact metadata values, non-ASCII `rawBodyBytes`, generic `text` normalization for user/system/developer/assistant and `function_call_output`, exactly one quoted marker in the returned body, marker regeneration on collision, and no request-derived error detail. Add separate cases for a request-body reader rejection returning HTTP `500` with no `code`, invalid JSON after a complete body read returning `400` with `invalid_body`, normalization `invalid_body` returning `400` with `invalid_body`, and declared/measured oversize returning `413` with `request_too_large`. Test the complete status/body matrix above, including valid `400` and `413` envelopes, wrong status/code combinations, `500` plus `invalid_body`, `500` with no body, `401` plus an allowlisted code, and `415` plus an allowlisted code.
+  Test method/path/auth/content type, declared and measured raw-body oversize, replacement-style UTF-8 decoding, invalid JSON, all shared normalization errors, exact metadata values, non-ASCII `rawBodyBytes`, generic `text` normalization for user/system/developer/assistant and `function_call_output`, exactly one quoted marker in the returned body, marker regeneration on collision, and no request-derived error detail. Add separate cases for declared oversize with exactly one request-body stream cancellation, measured oversize with exactly one active-reader cancellation, `getReader()` and `reader.read()` rejection returning `read_failure`/HTTP `500` with no `code`, and normal end-of-stream including an empty body without cancellation. Add separate cases for invalid JSON after a complete body read returning `400` with `invalid_body`, normalization `invalid_body` returning `400` with `invalid_body`, and declared/measured oversize returning `413` with `request_too_large`. Test the complete status/body matrix above, including valid `400` and `413` envelopes, wrong status/code combinations, `500` plus `invalid_body`, `500` with no body, `401` plus an allowlisted code, and `415` plus an allowlisted code. Include a shared-limit integration case that uses one resolved `MAX_INPUT_BYTES` value for both raw-body rejection and the `normalizeResponses` input-size boundary.
 
   ```ts
   const requestBody = JSON.stringify({
@@ -464,7 +471,7 @@ function prepareInternalFailure(): Response {
 
 - [ ] **GREEN: add the prepare service without changing `/tokenize`**
 
-  Reuse the configured auth token and resolved input limit; the Deno service has no new timeout setting. Authorize and validate the request before reading it. Read the raw body with a bounded byte reader using `config.maxInputBytes`; return `request_too_large` for declared or measured raw oversize; return status-only `500` from `prepareInternalFailure()` for `getReader()` or `reader.read()` rejection; decode UTF-8 with replacement semantics only after a complete read; parse JSON; call the shared normalizer; and map its errors without including request-derived detail. Return `400` for `invalid_body`, `non_text`, and `max_tokens_conflict`, and `413` for `input_too_large` and `request_too_large`, exactly as shown in the status/body matrix. A raw-body read failure must never be passed to `prepareError` or represented by `PrepareErrorCode.invalid_body`.
+  Reuse the configured auth token and resolved input limit; the Deno service has no new timeout setting. Authorize and validate the request before reading it. Read the raw body with a bounded byte reader using `config.maxInputBytes`; return `request_too_large` for declared or measured raw oversize, cancel the present request stream exactly once for declared oversize, and cancel the active reader exactly once for measured oversize before returning; return status-only `500` from `prepareInternalFailure()` for `getReader()` or `reader.read()` rejection; decode UTF-8 with replacement semantics only after a complete read; parse JSON; call the shared normalizer; and map its errors without including request-derived detail. Return `400` for `invalid_body`, `non_text`, and `max_tokens_conflict`, and `413` for `input_too_large` and `request_too_large`, exactly as shown in the status/body matrix. A raw-body read failure must never be passed to `prepareError` or represented by `PrepareErrorCode.invalid_body`.
 
   ```ts
   const rawBody = await readBoundedRawBody(request, config.maxInputBytes);
@@ -553,7 +560,7 @@ function prepareInternalFailure(): Response {
 
 - A complete prepare pair reuses `DENO_TOKENIZER_AUTH_TOKEN` and `DENO_TOKENIZER_TIMEOUT_MS`; it does not create parallel auth or timeout settings. Validate HTTPS without URL credentials, a positive safe threshold no greater than `maxInputBytes`, and the same positive safe timeout rule as the tokenizer group.
 - Produces `prepareWithDeno(args: { endpoint: string; authToken: string; timeoutMs: number; maxInputBytes: number; request: Request; fetchImpl?: typeof fetch; onTimeout?: () => void }): Promise<PrepareOutcome>`. It forwards the original body stream without calling `request.text()`, `request.json()`, or `readJsonBody()`. `onTimeout` is a local lifecycle callback for the proxy and is not serialized or added to the shared protocol.
-- `PrepareOutcome` has `resolved`, `rejected`, and `unavailable` variants. `resolved` carries validated metadata, the response body, and an idempotent `cancel`; `rejected` carries one shared `PrepareErrorCode`; `unavailable` carries only `timeout`, `network`, `upstream_status`, or `malformed_response`. A Deno `500` body-read failure is classified by status as `unavailable: upstream_status`; it is never parsed as a validation code. `malformed_response` is limited to status, success media type, metadata, and null-body failures observed before resolution; it does not describe a failure discovered while consuming a resolved body.
+- `PrepareOutcome` has `resolved`, `rejected`, and `unavailable` variants. `resolved` carries validated metadata, the response body, and an idempotent `cancel`; `rejected` carries one shared `PrepareErrorCode`; `unavailable` carries only `timeout`, `network`, `upstream_status`, or `malformed_response`. A Deno `500` body-read failure is classified by status as `unavailable: upstream_status`; it is never parsed as a validation code. `malformed_response` includes a malformed, oversized, or failed bounded validation-body read for a candidate `400`/`413` response, as well as status, success media type, metadata, and null-body failures observed before resolution; it does not describe a failure discovered while consuming a resolved body.
 
 The client classifies HTTP status before inspecting an error body, using this
 exact matrix:
@@ -568,8 +575,15 @@ exact matrix:
 | Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
 The first two rows require a bounded `application/json` object with exactly
-one `code` field, and the code must match the status row. The successful `200`
-row requires the expected `application/json` media type, a bounded valid
+one `code` field, and the code must match the status row. The Worker classifies
+the status before reading a body. For `400` and `413`, it uses a bounded reader
+with the fixed `4096` UTF-8-byte limit before parsing JSON; a reader rejection,
+invalid JSON, wrong/unknown code, wrong content type, or measured oversize is
+`unavailable: malformed_response`, and measured oversize cancels the active
+response reader exactly once. For `500` and every other non-`200` status, the
+Worker does not parse an allowlisted-looking body and returns
+`unavailable: upstream_status` after best-effort body cleanup. The successful
+`200` row requires the expected `application/json` media type, a bounded valid
 metadata header, and a non-null response body, but does not consume that body.
 A `2xx` status other than `200` is unavailable even when its body resembles a
 valid envelope. A body-stream failure after a resolved outcome is handled by
@@ -577,7 +591,7 @@ Task 6's lifecycle rather than returned as `unavailable` from this client.
 
 - [ ] **RED: write configuration and client tests**
 
-  Test the complete truth table, both prepare settings absent, one missing, empty-string placeholders, invalid HTTPS URL, credentials in URL, invalid/too-large threshold, invalid timeout, and unchanged tokenizer configuration cases. Test body forwarding without a preliminary read, auth/content-type headers, response-body cancellation, timeout through body close/cancel, a resolved-body timeout invoking `onTimeout` exactly once, network failure, and successful metadata/body return. Test the complete status/body matrix above: valid `400` and `413` envelopes, `400`/`413` with unknown codes, every other wrong status/code combination, `500` plus `invalid_body`, `500` plus `request_too_large`, `500` with no body from a Deno body-read failure, `401` plus an allowlisted code, `415` plus an allowlisted code, missing/wrong success `Content-Type`, missing/invalid metadata, oversized metadata headers, null response body, and a successful `200` whose body is returned without being read. Do not test missing/duplicate markers or body read failures as phase-1 malformed responses; those are resolved-body lifecycle cases in Task 6. Assert that the body-read failure is `unavailable` and never `rejected`.
+  Test the complete truth table, both prepare settings absent, one missing, empty-string placeholders, invalid HTTPS URL, credentials in URL, invalid/too-large threshold, invalid timeout, unchanged tokenizer configuration cases, and startup rejection of a missing or mismatched propagated `MAX_INPUT_BYTES`. Test body forwarding without a preliminary read, auth/content-type headers, response-body cancellation, timeout through body close/cancel, a resolved-body timeout invoking `onTimeout` exactly once, network failure, and successful metadata/body return. Test the complete status/body matrix above: valid `400` and `413` envelopes, `400`/`413` with unknown codes, every other wrong status/code combination, `500` plus `invalid_body`, `500` plus `request_too_large`, `500` with no body from a Deno body-read failure, `401` plus an allowlisted code, `415` plus an allowlisted code, missing/wrong success `Content-Type`, missing/invalid metadata, oversized metadata headers, null response body, and a successful `200` whose body is returned without being read. Add error-body boundary cases at exactly `4096` bytes and above it; the above-limit case must cancel the response reader exactly once and return `unavailable: malformed_response`. Do not test missing/duplicate markers or body read failures as phase-1 malformed responses; those are resolved-body lifecycle cases in Task 6. Assert that the body-read failure is `unavailable` and never `rejected`.
 
   ```ts
   const config = resolveDenoRuntimeConfig({
@@ -609,7 +623,7 @@ Task 6's lifecycle rather than returned as `unavailable` from this client.
 
 - [ ] **GREEN: implement the resolver and bounded client**
 
-  Keep `resolveDenoTokenizerConfig` unchanged, add the prepare pair resolver, and compose the six-row truth table in `resolveDenoRuntimeConfig`. The client must validate the successful response status and `application/json` media type, bound the metadata header before decoding, require a non-null body, parse only the bounded error envelope, cancel rejected response bodies, and keep the timeout active until a resolved body closes or `cancel()` runs. It must return `resolved` without reading or buffering a successful body; only resolution-time status/header/metadata/null-body failures become `unavailable: malformed_response`.
+  Keep `resolveDenoTokenizerConfig` unchanged, add the prepare pair resolver, and compose the six-row truth table in `resolveDenoRuntimeConfig`. The client must validate the successful response status and `application/json` media type, bound the metadata header before decoding, require a non-null body, parse only a `4096`-byte bounded error envelope for `400`/`413`, cancel an oversized error body through its active reader exactly once, cancel rejected response bodies, and keep the timeout active until a resolved body closes or `cancel()` runs. It must return `resolved` without reading or buffering a successful body; only resolution-time status/header/metadata/null-body failures and malformed/oversized candidate error bodies become `unavailable: malformed_response`. Non-`200` statuses are classified before any body parse and do not become `rejected` from an allowlisted-looking body.
 
   ```ts
   const controller = new AbortController();
@@ -779,15 +793,21 @@ function observePreparedBody(
     terminalSeen = true;
     onTerminal(terminal);
   };
-  const cancel = (): Promise<void> => {
-    if (terminalSeen) return Promise.resolve();
+  const cancelResources = (): Promise<void> => {
     cancelPromise ??= (async () => {
-      notify("cancel");
       await cancelSource().catch(() => undefined);
       await reader.cancel().catch(() => undefined);
-      releaseReader();
     })();
     return cancelPromise;
+  };
+  const cancel = async (): Promise<void> => {
+    if (terminalSeen) {
+      if (cancelPromise !== undefined) await cancelPromise;
+      return;
+    }
+    notify("cancel");
+    await cancelResources();
+    releaseReader();
   };
   return {
     body: new ReadableStream<Uint8Array>({
@@ -802,6 +822,7 @@ function observePreparedBody(
           }
           controller.enqueue(chunk.value);
         } catch {
+          await cancelResources();
           notify("error");
           releaseReader();
           controller.error(new Error("Prepared body read failed."));
@@ -839,7 +860,10 @@ stream or lifecycle framework. `finishPrepareOnce` is the closure returned by
 finish event for a request. The first terminal callback wins and every later
 callback is a no-op. `observePreparedBody` forwards each chunk once without
 buffering or parsing, reports `close`, `error`, and `cancel`, and composes an
-idempotent cancellation path with the Deno client's `cancel`. The observer is
+idempotent cancellation path with the Deno client's `cancel`. A reader error
+invokes that same cancellation path before `notify("error")`, reader release,
+or `controller.error()`, so a later stream cancellation is not required for
+cleanup and cannot cancel the source twice. The observer is
 wrapped around the marker-replacement stream immediately before
 `callUpstream`, so a marker-transform failure is an error terminal rather than
 a false successful close. `mapPrepareError` is pure and maps
@@ -899,6 +923,10 @@ a false successful close. `mapPrepareError` is pure and maps
     -> exactly one finish, outcome exception, pre-upstream cleanup
   resolved + response-body setup/read failure before transport wrapper runs
     -> upstreamAttempted remains false, known reservation release, no markUncertain
+  resolved + reader.read() rejection
+    -> cancelSource and the active reader are each invoked exactly once before
+       `notify("error")`, reader release, and `controller.error()`; a later
+       stream cancel does not invoke either cancellation again
   valid metadata + missing marker after resolution
     -> prepare was initially resolved, stream fails at EOF, post-attempt cleanup
        uses markUncertain and never releases the reservation when transport ran
@@ -1395,15 +1423,16 @@ immediately before the actual fetch:
 - Modify: `scripts/preview-worker-config.test.mjs`
 - Modify: `scripts/preview-workflow.test.sh` only for prepare mapping coverage
 - Modify: `scripts/setup-preview.zsh` and `scripts/setup-preview.test.zsh` only for prepare variables
-- Verify only: `apps/gateway-worker/wrangler.jsonc`, `deno.json`, `.github/workflows/deploy-deno-tokenizer.yml`
+- Modify: `.github/workflows/deploy-deno-tokenizer.yml` for the propagated input-limit runtime value and startup assertion
+- Verify only: `apps/gateway-worker/wrangler.jsonc`, `deno.json`
 
 **Interfaces:**
-- Consumes: implemented prepare configuration names and `/prepare` contract.
+- Consumes: implemented prepare configuration names and `/prepare` contract, plus one canonical production/Preview input-limit value for both runtime control planes.
 - Produces: documented disabled-by-default configuration, rollout, rollback, security, and acceptance procedures.
 
 - [ ] **RED: add configuration propagation tests**
 
-  Extend production validation to require the existing tokenizer group as before while accepting the optional complete prepare pair. For Preview, keep the three layers distinct: `.env` and GitHub Environment variables are `DENO_PREVIEW_PREPARE_ENDPOINT` and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES`; workflow/process environment names are `PREVIEW_DENO_PREPARE_ENDPOINT` and `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES`; generated Worker bindings are `DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES`. Add tests proving the first layer maps through the second layer to the Worker bindings. Add shell/workflow assertions that both absent values produce no `--var` arguments and that exactly one present value is rejected rather than silently disabling prepare.
+  Extend production validation to require the existing tokenizer group as before while accepting the optional complete prepare pair. Validate one canonical positive safe-integer `MAX_INPUT_BYTES` value and use it for both the Worker binding and the Deno Deploy runtime. Generate the Deno-only `OCTG_EXPECTED_MAX_INPUT_BYTES` assertion from that same value and reject any independently supplied assertion. For Preview, use a separate `OCTG_PREVIEW_MAX_INPUT_BYTES` source so the control planes cannot share mutable configuration. Keep the three prepare layers distinct: `.env` and GitHub Environment variables are `DENO_PREVIEW_PREPARE_ENDPOINT` and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES`; workflow/process environment names are `PREVIEW_DENO_PREPARE_ENDPOINT` and `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES`; generated Worker bindings are `DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES`. Add tests proving the input-limit source maps to both the generated Worker `MAX_INPUT_BYTES` binding and the Deno runtime environment, and that `OCTG_EXPECTED_MAX_INPUT_BYTES` is generated identically. Add shell/workflow assertions that both absent prepare values produce no `--var` arguments and that exactly one present value is rejected rather than silently disabling prepare.
 
   ```js
   const config = buildPreviewWorkerConfig(baseConfig, {
@@ -1439,7 +1468,7 @@ immediately before the actual fetch:
 
 - [ ] **GREEN: implement propagation and human-readable documentation**
 
-  Add the prepare pair to production validation as an optional all-or-nothing group and reject one-sided or invalid values. In Preview, read `DENO_PREVIEW_PREPARE_ENDPOINT` and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` from `.env`/the GitHub Environment, pass them into the workflow as `PREVIEW_DENO_PREPARE_ENDPOINT` and `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES`, and map them explicitly to Worker `DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES`. Build deployment arguments only for a complete valid pair, while rejecting a one-sided pair before argument construction:
+  Add the prepare pair to production validation as an optional all-or-nothing group and reject one-sided or invalid values. Resolve production `MAX_INPUT_BYTES` once, pass the exact decimal value to the Worker upload and Deno Deploy environment load, and pass `OCTG_EXPECTED_MAX_INPUT_BYTES` generated from that same value to Deno startup. In Preview, read `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` from `.env`/the GitHub Environment, pass the limit and prepare values into the workflow as `PREVIEW_MAX_INPUT_BYTES`, `PREVIEW_DENO_PREPARE_ENDPOINT`, and `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES`, and map the limit to both the generated Worker `MAX_INPUT_BYTES` binding and the isolated Deno runtime environment plus its generated `OCTG_EXPECTED_MAX_INPUT_BYTES` assertion. Deno startup must reject a missing, invalid, or mismatched limit before `Deno.serve`; the Worker configuration path must likewise fail closed rather than silently falling back. Build deployment arguments only for a complete valid prepare pair, while rejecting a one-sided pair before argument construction:
 
   ```sh
   prepare_args=()
@@ -1454,7 +1483,7 @@ immediately before the actual fetch:
   fi
   ```
 
-  Document that prepare is disabled by absence of both Worker variables, both variables are required together, `MAX_INPUT_BYTES` remains `1048576`, and prepare-only invalidity affects Responses without changing Chat Completions. Document the five protocol errors, metadata/header bounds, marker replacement, no-DO-fallback rule, quota-before-upstream order, no payload/secret logging, Stage 1 deployment with prepare absent, Deno `/prepare` health/auth verification, sanitized approximately 74k-token canaries at concurrency 1 and 2, resource-stage acceptance, and rollback to a known Worker version that predates prepare. Keep `/tokenize` documentation intact.
+  Document that prepare is disabled by absence of both Worker variables, both variables are required together, `MAX_INPUT_BYTES` remains `1048576` unless the one canonical deployment value is deliberately changed, and prepare-only invalidity affects Responses without changing Chat Completions. Document the five protocol errors, the `4096`-byte bounded validation error body, metadata/header bounds, marker replacement, shared-limit propagation and startup mismatch failure, no-DO-fallback rule, quota-before-upstream order, no payload/secret logging, Stage 1 deployment with prepare absent, Deno `/prepare` health/auth verification, sanitized approximately 74k-token canaries at concurrency 1 and 2, resource-stage acceptance, and rollback to a known Worker version that predates prepare. Keep `/tokenize` documentation intact.
 
 - [ ] **GREEN check: run configuration and documentation checks**
 
@@ -1470,7 +1499,7 @@ immediately before the actual fetch:
 
 - [ ] **REFACTOR: verify read-only deployment references and scope**
 
-  Confirm `apps/gateway-worker/wrangler.jsonc`, `deno.json`, and `.github/workflows/deploy-deno-tokenizer.yml` remain unchanged unless an implementation test proves a concrete existing binding/staging change is required. Rerun the configuration tests and `git diff --check`.
+  Confirm `apps/gateway-worker/wrangler.jsonc` and `deno.json` remain unchanged unless an implementation test proves a concrete existing binding/staging change is required. Confirm the Deno deployment workflow injects the same canonical limit and generated expected-value assertion into the staged runtime without logging either value as request data. Rerun the configuration tests and `git diff --check`.
 
 ### Task 8: Execute full verification and CPU regression canary
 

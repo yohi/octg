@@ -51,6 +51,14 @@ corresponding tokenization or upstream completion.
   upstream handling remain unchanged.
 - `MAX_INPUT_BYTES` applies to both the gateway raw body and normalized input
   bytes.
+- `MAX_INPUT_BYTES` is resolved once by the deployment configuration and
+  propagated as the same decimal value to the Worker binding and Deno runtime.
+  Deno startup compares its resolved value with the generated, Deno-only
+  `OCTG_EXPECTED_MAX_INPUT_BYTES` assertion from the same source and fails
+  closed before serving when either value is missing, invalid, or mismatched.
+- Prepare validation error bodies are at most `4096` UTF-8 bytes. The Worker
+  reads candidate validation bodies with a bounded reader and cancels an
+  oversized response body exactly once before classifying it as unavailable.
 - The final prepared `estimatedInputTokens` uses the same
   `estimatedInputTokensOf` formula as the legacy route.
 - The Worker never reconstructs the large normalized `inputText` on the
@@ -93,15 +101,27 @@ selection uses the raw request `Content-Length`, not normalized text bytes:
 - A valid `Content-Length` above the resolved `MAX_INPUT_BYTES` is rejected by
   the Worker before forwarding, and the incoming request body is canceled.
 
-Deno bounds the `/prepare` raw body at the resolved gateway maximum. It decodes
-the raw JSON with the same replacement-style UTF-8 behavior as the legacy
-Worker body reader, parses the JSON, calls the shared `normalizeResponses`
-implementation, computes the exact `o200k_base` count, applies the existing
-final token-accounting formula, calls `normalizeResponsesUpstreamBody`, and
-serializes the normalized upstream request once. The existing `/tokenize`
-raw-body bound, fatal UTF-8 decoder, and contract remain unchanged. Deno returns
-the serialized request as the response body, without asking the Worker to parse
-the large response.
+Deno receives the canonical `MAX_INPUT_BYTES` value and the generated
+`OCTG_EXPECTED_MAX_INPUT_BYTES` assertion through the Deno Deploy runtime
+environment. Its startup configuration compares the two before `Deno.serve`; a
+missing, invalid, or mismatched value prevents startup. The assertion is not an
+independently configurable limit. The `/prepare` raw body is bounded at the
+same resolved maximum. It decodes the raw JSON with the same replacement-style
+UTF-8 behavior as the legacy Worker body reader, parses the JSON, calls the
+shared `normalizeResponses` implementation with that same maximum, computes
+the exact `o200k_base` count, applies the existing final token-accounting
+formula, calls `normalizeResponsesUpstreamBody`, and serializes the normalized
+upstream request once. The existing `/tokenize` raw-body bound, fatal UTF-8
+decoder, and contract remain unchanged. Deno returns the serialized request as
+the response body, without asking the Worker to parse the large response.
+
+The `/prepare` raw-body reader cancels a present request body stream exactly
+once when a declared length exceeds the limit. When oversize is discovered
+while reading, it cancels the active reader exactly once before returning
+`request_too_large`; reader cleanup must not repeat that cancellation. A
+`getReader()` or `reader.read()` rejection remains an internal status-only
+failure, while normal end-of-stream, including an empty body, remains a
+completed read without oversize cancellation.
 
 The shared helper call is defined as:
 
@@ -165,6 +185,17 @@ threshold; it never changes Chat configuration semantics.
 
 The prepare endpoint must be HTTPS and must not contain URL credentials. The
 shared Deno authentication value remains a secret on both runtime sides.
+
+`MAX_INPUT_BYTES` is not independently selected by the Worker and Deno
+services. Production deployment resolves one positive safe-integer value and
+writes it to the Worker `MAX_INPUT_BYTES` binding and the Deno runtime
+environment. Preview uses its isolated `OCTG_PREVIEW_MAX_INPUT_BYTES` source
+and applies the same mapping only within the Preview control plane. The Deno
+deployment writes `OCTG_EXPECTED_MAX_INPUT_BYTES` from that same source and
+does not expose it as an independent operator setting. `resolveServiceConfig`
+fails closed before `Deno.serve` if the runtime value and assertion do not
+resolve to the same value. The assertion is configuration metadata, never
+request data or telemetry.
 
 ### Prepare Response Contract
 
@@ -326,12 +357,20 @@ status/code matrix is:
 | `500` | Internal prepare failure with no validation envelope | `unavailable` |
 | Any other status, including `401`, `415`, and all other `5xx` | Any body, including an allowlisted-looking code | `unavailable` |
 
-Only the first two rows are validation responses. The `400` and `413` bodies
-must be bounded JSON objects with exactly one `code` field, and the code must
-match the status row. A `2xx` status other than `200`, an unknown code, a
-malformed error body, or an oversized error body is unavailable. Error bodies
-never contain input-derived text. Raw-body `request_too_large` continues to
-use Deno HTTP `413`; normalized `input_too_large` also uses `413` so the
+Only the first two rows are validation responses. The Worker classifies the
+status before inspecting a body. For `400` and `413`, the body must have the
+expected `application/json` media type and be read through a bounded reader
+with a fixed `4096` UTF-8-byte limit. It must parse as a JSON object with
+exactly one `code` field, and the code must match the status row. A reader
+rejection, invalid JSON, wrong/unknown code, wrong content type, or measured
+oversize is `unavailable: malformed_response`; measured oversize invokes the
+active response reader's `cancel()` exactly once before returning. For `500`
+and every other non-`200` status, the Worker does not parse an
+allowlisted-looking body and classifies the result as `unavailable` by status
+after best-effort body cleanup. A `2xx` status other than `200`, an unknown
+code, malformed error body, or an oversized error body is unavailable. Error
+bodies never contain input-derived text. Raw-body `request_too_large` continues
+to use Deno HTTP `413`; normalized `input_too_large` also uses `413` so the
 status/code combination is fixed rather than implementation-defined. A `200`
 error envelope is not a valid Deno success response, but the Worker does not
 parse a resolved body to discover one; the normal Deno implementation never
@@ -429,10 +468,11 @@ The two failure phases are explicit:
 ## Error Handling
 
 Validation failures from the Deno endpoint return a small JSON error body with
-one allowed `code` and no input-derived text. Internal and raw-body transport
-failures are status-only and do not carry a `PrepareErrorBody`. The Worker
-only accepts the following validation error codes. Resolution-time malformed
-responses mean invalid status, success media type, metadata, or null-body
+one allowed `code` and no input-derived text. The serialized UTF-8 body must
+not exceed `4096` bytes. Internal and raw-body transport failures are
+status-only and do not carry a `PrepareErrorBody`. The Worker only accepts the
+following validation error codes. Resolution-time malformed responses mean
+invalid status, success media type, metadata, null-body, or bounded error-body
 conditions; a body-stream failure after resolution is not mapped through this
 table:
 
@@ -493,8 +533,14 @@ Errors remain status-only or use the bounded allowlisted error code.
 - JSON content type and bounded raw body.
 - A request-body reader rejection returns HTTP `500` with no validation code;
   it is distinct from a complete body followed by invalid JSON.
+- Declared raw-body oversize cancels the request body stream exactly once, and
+  measured raw-body oversize cancels the active reader exactly once; normal
+  end-of-stream, including an empty body, does not take the oversize path.
 - Replacement-style UTF-8 decode parity with the legacy Worker reader.
 - Responses normalization parity with the shared implementation.
+- One resolved `MAX_INPUT_BYTES` value bounds both `/prepare` raw-body reads and
+  the `normalizeResponses` input-size check; startup rejects a missing,
+  invalid, or mismatched Worker/Deno value before serving.
 - Exact BPE count and final estimated input token metadata using
   `estimatedInputTokensOf`.
 - All five allowlisted protocol error-code mappings, including
@@ -512,7 +558,10 @@ Errors remain status-only or use the bounded allowlisted error code.
 ### Worker prepare client and stream
 
 - Metadata version and field validation.
-- Bounded error response parsing.
+- Bounded error response parsing with a fixed `4096`-byte limit.
+- Error-body reader rejection, malformed JSON/shape/code, wrong media type, and
+  measured oversize classify as `unavailable: malformed_response`; measured
+  oversize cancels the active response reader exactly once.
 - HTTP status/body precedence matrix, including `500` plus an allowlisted code,
   `500` with no body from a Deno body-read failure, `401` plus an allowlisted
   code, `415` plus an allowlisted code, valid `400` and `413` validation
@@ -525,6 +574,10 @@ Errors remain status-only or use the bounded allowlisted error code.
 - Timeout deadline through body close/cancel, network, non-2xx, malformed
   metadata, oversized metadata header, and resolution-time malformed response
   handling.
+- A resolved-body `reader.read()` rejection invokes `cancelSource()` and the
+  active reader's `cancel()` exactly once before `notify("error")`, reader
+  release, and `controller.error()`; a later stream cancellation does not
+  repeat either operation.
 - Marker replacement across chunk boundaries.
 - Missing and duplicate marker rejection after resolution, including EOF-only
   missing-marker detection and body read failure during consumption.
@@ -581,9 +634,13 @@ prepare before rollback. After the version rollback, verify that:
   `DENO_TOKENIZER_THRESHOLD_BYTES` setting and is not assumed to be the DO;
 - quota reservation and upstream settlement remain correct.
 
-Production and Preview mappings are explicit. Production deployment sources
-`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` map directly to the
-same Worker bindings. Preview uses three distinct layers:
+Production and Preview mappings are explicit. Production deployment resolves
+one canonical `MAX_INPUT_BYTES` value and maps it to both the Worker binding
+and the Deno runtime environment; it also passes generated
+`OCTG_EXPECTED_MAX_INPUT_BYTES` to Deno startup. Production
+`DENO_PREPARE_ENDPOINT` and
+`DENO_PREPARE_THRESHOLD_BYTES` map directly to the same Worker bindings.
+Preview uses isolated input-limit and prepare values in three distinct layers:
 
 | Layer | Prepare endpoint | Prepare threshold |
 | --- | --- | --- |
@@ -591,10 +648,23 @@ same Worker bindings. Preview uses three distinct layers:
 | Workflow / process environment | `PREVIEW_DENO_PREPARE_ENDPOINT` | `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES` |
 | Generated Worker binding | `DENO_PREPARE_ENDPOINT` | `DENO_PREPARE_THRESHOLD_BYTES` |
 
-`setup-preview.zsh` reads and publishes the first-layer `DENO_PREVIEW_*`
+| Layer | Shared input limit |
+| --- | --- |
+| Preview `.env` / GitHub Environment variable | `OCTG_PREVIEW_MAX_INPUT_BYTES` |
+| Preview workflow / process environment | `PREVIEW_MAX_INPUT_BYTES` |
+| Preview generated Worker binding and isolated Deno runtime | `MAX_INPUT_BYTES` |
+
+The deployment tests must prove that the generated Worker binding, Deno
+runtime value, and `OCTG_EXPECTED_MAX_INPUT_BYTES` are identical within each
+control plane. A mismatch fails before the runtime serves traffic.
+
+`setup-preview.zsh` reads and publishes the first-layer
+`OCTG_PREVIEW_MAX_INPUT_BYTES` and `DENO_PREVIEW_*`
 names. `preview-smoke.yml` maps those values into the second-layer
-`PREVIEW_DENO_*` names, and `preview-worker-config.mjs` writes the final
-Worker-binding names. These names are not interchangeable.
+`PREVIEW_MAX_INPUT_BYTES` and `PREVIEW_DENO_*` names, and
+`preview-worker-config.mjs` writes the final Worker binding while the Deno
+Deploy setup receives the same limit plus generated
+`OCTG_EXPECTED_MAX_INPUT_BYTES`. These names are not interchangeable.
 
 The checked-in `apps/gateway-worker/wrangler.jsonc` remains without optional
 prepare variables. Disabled-by-default is represented by variable absence, not
@@ -606,6 +676,9 @@ dependency.
 Acceptance requires all of the following:
 
 - `MAX_INPUT_BYTES` remains 1 MiB.
+- Production and Preview deployment checks propagate one control-plane-local
+  input-limit value to both Worker and Deno, and Deno startup fails closed on a
+  missing, invalid, or mismatched value.
 - Large Responses requests no longer fail at Worker CPU limits under the
   operator-defined representative load.
 - Small and legacy requests pass existing regression tests.
@@ -632,6 +705,8 @@ does not modify any of them.
 - `apps/gateway-worker/src/index.ts` for the explicit prepare environment
   bindings
 - `.github/workflows/deploy-production.yml`
+- `.github/workflows/deploy-deno-tokenizer.yml` for shared input-limit injection
+  and startup assertion wiring
 - `scripts/production-deno-config.mjs`
 - `scripts/production-deno-config.test.mjs`
 - `scripts/preview-worker-config.mjs`
@@ -646,7 +721,7 @@ does not modify any of them.
 - `docs/operations.md`
 - `SPEC.md`
 
-`apps/gateway-worker/wrangler.jsonc`, `deno.json`, and
-`.github/workflows/deploy-deno-tokenizer.yml` are read-only verification
-references unless an implementation change demonstrates a concrete need to
-alter their existing binding or staging behavior.
+`apps/gateway-worker/wrangler.jsonc` and `deno.json` are read-only verification
+references. `.github/workflows/deploy-deno-tokenizer.yml` is an implementation
+target for propagating the shared input limit and generated startup assertion;
+its existing source staging and secret isolation must remain unchanged.
