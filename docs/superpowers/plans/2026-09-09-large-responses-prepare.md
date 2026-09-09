@@ -965,9 +965,9 @@ a false successful close. `mapPrepareError` is pure and maps
 
   | Timeout-race case | Required assertions |
   | --- | --- |
-  | Reservation pending, then resolved success | `reservationState` is recorded as `resolved` and `preparedQuotaReserved` is true before cleanup; reservation release occurs exactly once; no `markReserveOutcomeUnknown`; `errInternal` |
-  | Reservation pending, then `unknown` | `reservationState` is recorded as `unknown`; `markReserveOutcomeUnknown` occurs exactly once; reservation release never occurs; `errInternal` |
-  | Reservation pending, then rejected | No resolved reservation is recorded or released; the normal quota-rejection response is not returned; `errInternal` |
+  | Reservation pending, then resolved success | `reservationState` is recorded as `resolved` and `preparedQuotaReserved` is true before cleanup; `quota_reserve` finishes exactly once with `success` and `quotaReserved: true`; reservation release occurs exactly once; no `markReserveOutcomeUnknown`; exactly one prepared-body cancel; `errInternal` |
+  | Reservation pending, then `unknown` | `reservationState` is recorded as `unknown` before cleanup; `quota_reserve` finishes exactly once with `exception` and `quotaReserved: false`; `markReserveOutcomeUnknown` occurs exactly once; reservation release never occurs; exactly one prepared-body cancel; `errInternal` |
+  | Reservation pending, then rejected | No resolved reservation is recorded or released; `quota_reserve` finishes exactly once with `rejected`, `quotaReserved: false`, and the existing reserve-failure route; the normal quota-rejection response is not returned; exactly one prepared-body cancel; `errInternal` |
   | In-flight admission pending, then successful lease | Lease and its generation are recorded before cleanup; `releaseInFlight` uses that generation exactly once; the resolved reservation is released exactly once; `errInternal` |
   | In-flight admission pending, then rejected | No in-flight lease release occurs; the resolved reservation is released exactly once; the normal concurrency-rejection response is not returned; `errInternal` |
 
@@ -1077,6 +1077,38 @@ a false successful close. `mapPrepareError` is pure and maps
     reservationState = "none";
   }
 
+  // Finish quota telemetry from the completed mutation result before applying
+  // prepare-timeout precedence to cleanup and the public response.
+  if (reserveOutcome.kind === "unknown") {
+    finishResourceStage(
+      env,
+      requestId,
+      "quota_reserve",
+      reserveStartedAt,
+      "exception",
+      {
+        route: "error:pre_upstream",
+        quotaReserved: false,
+        upstreamReached: false,
+      },
+    );
+  } else {
+    const reserved = reserveOutcome.result;
+    finishResourceStage(
+      env,
+      requestId,
+      "quota_reserve",
+      reserveStartedAt,
+      reserved.ok ? "success" : "rejected",
+      {
+        route: reserved.ok ? "free_shared" : routeForReserveFailure(reserved.reason),
+        quotaReserved: reserved.ok,
+        upstreamReached: false,
+      },
+    );
+  }
+  reserveStageStartedAt = undefined;
+
   if (prepareTimedOut) {
     await cancelPreparedBeforeUpstream("exception", {
       route: "error:pre_upstream",
@@ -1099,15 +1131,23 @@ a false successful close. `mapPrepareError` is pure and maps
   ```
 
   The timeout branch must take precedence over the ordinary public quota
-  rejection branch. An unknown result is marked unknown and is never released
-  as known-unused; a resolved result is released; a rejected result has no
-  reservation to release. Reuse the existing cleanup and audit construction;
-  close the started `quota_reserve` resource stage with outcome `exception`,
-  route `error:pre_upstream`, and `upstreamReached: false` before the direct
-  return; set `quotaReserved: true` only for a resolved reservation and leave
-  it false for `unknown` or rejected results. Clear `reserveStageStartedAt` and
-  do not let this timeout branch rely on the outer catch for stage
-  finalization. Do not add a generic quota state machine.
+  rejection branch, but it must not overwrite the completed quota operation's
+  resource-stage outcome. The `quota_reserve` finish event is emitted exactly
+  once from the returned `ReserveOutcome` before timeout cleanup:
+
+  | Reservation result after timeout | `quota_reserve` outcome | Cleanup | Public result |
+  | --- | --- | --- | --- |
+  | resolved success | `success`, `quotaReserved: true` | Cancel the prepared body and release the reservation exactly once | `errInternal` |
+  | `unknown` | `exception`, `quotaReserved: false` | Cancel the prepared body and call `markReserveOutcomeUnknown`; never release as known-unused | `errInternal` |
+  | resolved rejection | `rejected`, `quotaReserved: false`, existing reserve-failure route | Cancel the prepared body; no reservation release | `errInternal` |
+
+  An unknown result is marked unknown and is never released as known-unused; a
+  resolved result is released; a rejected result has no reservation to
+  release. `prepareTimedOut` controls cleanup and public response precedence,
+  not the quota resource-operation outcome. Clear `reserveStageStartedAt`
+  immediately after the single `quota_reserve` finish and do not let this
+  timeout branch rely on the outer catch for stage finalization. Do not add a
+  generic quota state machine.
 
   For in-flight admission, record a successful lease and its generation before
   the timeout guard, then release that exact generation in the timeout branch:
@@ -1196,9 +1236,9 @@ remain unchanged.
 | `loadPolicy` throws (`375`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing quota cleanup | No reservation; existing internal error and audit cleanup |
 | Tool-policy rejection after `getState` succeeds (`377-383`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the quota snapshot and `errModelNotAllowed` |
 | Tool-policy or main quota `getState` throws (`383-407`) | Outer catch calls `cancelPreparedBeforeUpstream("exception", ...)` before existing quota cleanup | No known reservation; existing internal error and audit cleanup |
-| Timeout during reservation, then resolved success | First record `reservationState = "resolved"` and `preparedQuotaReserved = true`; then cancel the prepared body, release the reservation, and return `errInternal` | No upstream; timeout/internal failure takes precedence over normal continuation |
-| Timeout during reservation, then `unknown` | First record `reservationState = "unknown"`; then cancel the prepared body and call `markReserveOutcomeUnknown`; never release as known-unused | No upstream; preserve fail-closed unknown semantics and return `errInternal` |
-| Timeout during reservation, then rejected result | First record that no reservation exists; then cancel the prepared body and return `errInternal` | No upstream; do not return the normal quota-rejection response |
+| Timeout during reservation, then resolved success | First record `reservationState = "resolved"` and `preparedQuotaReserved = true`; finish `quota_reserve` exactly once as `success` with `quotaReserved: true`; then cancel the prepared body, release the reservation, and return `errInternal` | No upstream; timeout/internal failure takes precedence over normal continuation while quota telemetry preserves the successful reservation result |
+| Timeout during reservation, then `unknown` | First record `reservationState = "unknown"`; finish `quota_reserve` exactly once as `exception` with `quotaReserved: false`; then cancel the prepared body and call `markReserveOutcomeUnknown`; never release as known-unused | No upstream; preserve fail-closed unknown semantics and return `errInternal` |
+| Timeout during reservation, then rejected result | First record that no reservation exists; finish `quota_reserve` exactly once as `rejected` with `quotaReserved: false` and the existing reserve-failure route; then cancel the prepared body and return `errInternal` | No upstream; do not return the normal quota-rejection response, and do not relabel the rejected operation as an exception |
 | `resolveTokenBudget` returns `arithmetic_error` (`476-489`) | Call `cancelPreparedBeforeUpstream("exception", ...)` before the existing return | No reservation; preserve the existing internal response and tokenize finish |
 | `resolveTokenBudget` returns `request_too_large` (`490-493`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the existing request-too-large response |
 | `resolveTokenBudget` returns `quota_exceeded` (`494-497`) | Call `cancelPreparedBeforeUpstream("rejected", ...)` before the existing return | No reservation; preserve the existing quota-exceeded response |
@@ -1225,7 +1265,7 @@ catch must not run this pre-upstream cancellation path.
 
 - [ ] **GREEN: preserve quota lifecycle and transfer stream ownership at upstream transport**
 
-  Read quota state and call `resolveTokenBudget` exactly once with `metadata.estimatedInputTokens` and `metadata.maxOutputTokens`. Track `preparedQuotaReserved` separately from later cleanup mutations; set it to `true` immediately after a reservation is accepted and leave it available to the prepare finalizer even when later cleanup releases the reservation. `reservationState` remains the reservation cleanup authority. After `reserveFailClosed` returns, record `unknown`, `resolved`, or no-reservation state and set the historical `preparedQuotaReserved` fact before any `prepareTimedOut` branch. After `acquireInFlight` returns, record `inFlightAcquired` and the returned `inFlightLease` generation before any timeout branch. A timeout after either operation has completed must reconcile the recorded state, cancel the prepared body, perform only the applicable release or unknown marking, complete the existing failed audit, and return `errInternal`; it must not continue to a normal quota/concurrency rejection or start upstream work. Apply model/policy failures and reservation/in-flight rejections before upstream ownership transfer through a local `cancelPreparedBeforeUpstream(outcome, fields)` wrapper that awaits the idempotent Deno cancellation and then calls `finishPrepareOnce`; the wrapper is the only direct caller of `prepared.cancel()`. After successful reservation and in-flight admission, build the marker transform, wrap that transformed stream with `observePreparedBody`, and pass the observed stream to `callUpstream`. The terminal callback must use the following mapping:
+  Read quota state and call `resolveTokenBudget` exactly once with `metadata.estimatedInputTokens` and `metadata.maxOutputTokens`. Track `preparedQuotaReserved` separately from later cleanup mutations; set it to `true` immediately after a reservation is accepted and leave it available to the prepare finalizer even when later cleanup releases the reservation. `reservationState` remains the reservation cleanup authority. After `reserveFailClosed` returns, record `unknown`, `resolved`, or no-reservation state and set the historical `preparedQuotaReserved` fact before any `prepareTimedOut` branch. Finish `quota_reserve` exactly once from that actual returned `ReserveOutcome`: `unknown` is `exception`, a resolved successful reservation is `success`, and a resolved rejection is `rejected` with `routeForReserveFailure`. Clear `reserveStageStartedAt` before timeout cleanup so neither the timeout branch nor the outer catch can finish the stage again. A timeout changes the public result and cleanup precedence, not the already-completed quota operation's resource-stage outcome. After `acquireInFlight` returns, record `inFlightAcquired` and the returned `inFlightLease` generation before any timeout branch. A timeout after either operation has completed must reconcile the recorded state, cancel the prepared body, perform only the applicable release or unknown marking, complete the existing failed audit, and return `errInternal`; it must not continue to a normal quota/concurrency rejection or start upstream work. Apply model/policy failures and reservation/in-flight rejections before upstream ownership transfer through a local `cancelPreparedBeforeUpstream(outcome, fields)` wrapper that awaits the idempotent Deno cancellation and then calls `finishPrepareOnce`; the wrapper is the only direct caller of `prepared.cancel()`. After successful reservation and in-flight admission, build the marker transform, wrap that transformed stream with `observePreparedBody`, and pass the observed stream to `callUpstream`. The terminal callback must use the following mapping:
 
 ```ts
 const finishPreparedTerminal = (terminal: PreparedBodyTerminal): void => {
@@ -1328,6 +1368,11 @@ immediately before the actual fetch:
   - `reservationState === "unknown"` never reaches a known-unused release path.
   - A timeout that has fired cannot start a new upstream attempt.
   - Every Durable Object operation that began before timeout has its completed result reconciled before the request returns.
+  - The `quota_reserve` finish event is emitted exactly once from the actual `ReserveOutcome`: success, rejected, or unknown/exception.
+  - A prepare timeout never relabels a successful or rejected quota reservation operation as `exception`.
+  - `prepare` remains `exception` for the timeout while the public result remains `errInternal`.
+  - A resolved reservation is released, an unknown reservation is marked unknown without release, and a rejected reservation has no release path.
+  - The prepared body is canceled exactly once in every reservation timeout-race row.
   - The complete F-014 pre-transfer cleanup matrix remains covered, including every cancellation-before-cleanup ordering.
   - The F-012 single `upstreamAttempted` authority remains unchanged.
   - `finishPrepareOnce` retains its exactly-once contract across timeout, explicit cancel, and stream-terminal races.
@@ -1525,13 +1570,14 @@ steps that must provide executable evidence.
 | Resolved body integrity is a stream-lifecycle concern | `Prepare Response Contract`, `Worker Data Flow`, `Observability`, `Testing` | Tasks 3 and 6: marker/EOF/read failures after resolution, with phase-aware cleanup and no `response.text()`/`response.json()` success path |
 | Resolved prepare resource stage stays open through ownership | `Observability`, `Worker Data Flow` | Task 6: observer, timeout callback, cancellation wrapper, and one-shot finish |
 | Normal resolved body close finishes successfully with metadata | `Observability`, `Testing` | Task 6: upstream fixture consumes the body to EOF; exactly one success finish with validated counts |
-| Resolved body error or timeout finishes in the correct phase | `Worker Data Flow`, `Observability`, `Testing` | Tasks 5 and 6: pre-upstream exception cleanup, stateful-await timeout races, post-attempt uncertain cleanup, exactly once |
+| Resolved body error or timeout finishes in the correct phase | `Worker Data Flow`, `Observability`, `Testing` | Tasks 5 and 6: prepare timeout remains `exception` with public `errInternal`; quota operation outcome remains independent; pre-upstream exception cleanup, stateful-await timeout races, post-attempt uncertain cleanup, exactly once |
 | Existing `upstreamAttempted` is the only attempt authority | `Invariants`, `Worker Data Flow`, `Error Handling` | Task 6: legacy assignment preserved, prepared transport sets the same flag before fetch, post-attempt release is forbidden, and no parallel attempt flag exists |
 | `ResourceStage` includes the prepare stage | `Observability`, `Testing` | Task 6: add `"prepare"` to the existing union and run the Worker typecheck over all prepare stage calls |
 | Every resolved prepared-body terminal path before transport transfer cancels the body | `Worker Data Flow` steps 6-10, `Error Handling` | Task 6: exhaustive matrix for registry/model/policy/quota/budget/reserve/in-flight/setup/outer-catch paths; each controlled return and thrown exception has a cancel-once assertion |
 | Pre-upstream explicit cancel is idempotent and observable | `Worker Data Flow`, `Observability`, `Testing` | Task 6: request-local `cancelPreparedBeforeUpstream`, outer-catch ordering before existing quota cleanup, and cancel/terminal race test |
 | Prepare timeout guards cover every long await | `Worker Data Flow` steps 6-10, `Observability` | Task 6: read-only guards after registry load, policy load, and quota state; reservation and in-flight results are recorded before their timeout guards; thrown-await cancellation is covered separately |
-| A completed reservation result is not discarded by timeout | `Worker Data Flow`, `Error Handling`, `Observability` | Task 6: record `reservationState` and `preparedQuotaReserved` before timeout cleanup; release resolved reservations, mark unknown outcomes, and never release unknown as known-unused |
+| A completed reservation result is not discarded or misclassified by timeout | `Worker Data Flow`, `Error Handling`, `Observability` | Task 6: record `reservationState` and `preparedQuotaReserved` before timeout cleanup; finish `quota_reserve` exactly once from the actual `ReserveOutcome`; release resolved reservations, mark unknown outcomes, and never release unknown as known-unused |
+| Quota resource-stage telemetry preserves the completed operation outcome | `Observability`, `Worker Data Flow`, `Testing` | Task 6: resolved success finishes `quota_reserve` as `success`, resolved rejection as `rejected` with the existing route, and unknown as `exception`; timeout still returns public `errInternal` |
 | An acquired in-flight lease remains releasable after timeout | `Worker Data Flow`, `Error Handling` | Task 6: record `inFlightAcquired` and the returned generation before timeout cleanup; release that exact generation before returning `errInternal` |
 | Timeout takes precedence over normal quota/concurrency rejection | `Worker Data Flow`, `Error Handling`, `Testing` | Task 6: deferred race tests for reservation rejected and in-flight rejected outcomes return `errInternal`, cancel once, and never attempt upstream |
 | Exact token accounting is preserved | `Stage 2: Deno Prepare`, `Prepare Response Contract` | Tasks 4 and 6: exact BPE metadata and one `resolveTokenBudget` call with no double overhead |
