@@ -34,7 +34,7 @@ function declaredContentLengthOf(request: Pick<Request, "headers" | "body">): nu
 }
 
 export async function readJsonBody(
-  request: Pick<Request, "headers" | "body" | "text">,
+  request: Pick<Request, "headers" | "body">,
   maxBytes: number,
 ): Promise<ReadJsonBodyResult> {
   const declaredContentLength = declaredContentLengthOf(request);
@@ -71,44 +71,6 @@ export async function readJsonBody(
     };
   }
 
-  if (declaredContentLength !== null) {
-    const bodyReadStartedAt = performance.now();
-    const rawText = await request.text();
-    const bodyReadMs = elapsedSince(bodyReadStartedAt);
-    const parseStartedAt = performance.now();
-    try {
-      const body = JSON.parse(rawText);
-      return {
-        ok: true,
-        body,
-        rawText,
-        metrics: {
-          rawBodyBytes: declaredContentLength,
-          rawBodyBytesSource: "declared_content_length",
-          declaredContentLength,
-          measuredRawBodyBytes: null,
-          truncated: false,
-          bodyReadMs,
-          parseMs: elapsedSince(parseStartedAt),
-        },
-      };
-    } catch {
-      return {
-        ok: false,
-        reason: "invalid_json",
-        metrics: {
-          rawBodyBytes: declaredContentLength,
-          rawBodyBytesSource: "declared_content_length",
-          declaredContentLength,
-          measuredRawBodyBytes: null,
-          truncated: false,
-          bodyReadMs,
-          parseMs: elapsedSince(parseStartedAt),
-        },
-      };
-    }
-  }
-
   const bodyReadStartedAt = performance.now();
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -138,36 +100,26 @@ export async function readJsonBody(
 
   const bodyReadMs = elapsedSince(bodyReadStartedAt);
   const parseStartedAt = performance.now();
+  let rawText = "";
+  let body: unknown = undefined;
+  let parsed = true;
   try {
-    const rawText = Buffer.concat(chunks, length).toString("utf-8");
-    const body = JSON.parse(rawText);
-    return {
-      ok: true,
-      body,
-      rawText,
-      metrics: {
-        rawBodyBytes: length,
-        rawBodyBytesSource: "measured",
-        declaredContentLength,
-        measuredRawBodyBytes: length,
-        truncated: false,
-        bodyReadMs,
-        parseMs: elapsedSince(parseStartedAt),
-      },
-    };
+    rawText = Buffer.concat(chunks, length).toString("utf-8");
+    body = JSON.parse(rawText);
   } catch {
-    return {
-      ok: false,
-      reason: "invalid_json",
-      metrics: {
-        rawBodyBytes: length,
-        rawBodyBytesSource: "measured",
-        declaredContentLength,
-        measuredRawBodyBytes: length,
-        truncated: false,
-        bodyReadMs,
-        parseMs: elapsedSince(parseStartedAt),
-      },
-    };
+    parsed = false;
   }
+  const metrics: ReadJsonBodyMetrics = {
+    rawBodyBytes: length,
+    rawBodyBytesSource: "measured",
+    declaredContentLength,
+    measuredRawBodyBytes: length,
+    truncated: false,
+    bodyReadMs,
+    parseMs: elapsedSince(parseStartedAt),
+  };
+  if (!parsed) {
+    return { ok: false, reason: "invalid_json", metrics };
+  }
+  return { ok: true, body, rawText, metrics };
 }

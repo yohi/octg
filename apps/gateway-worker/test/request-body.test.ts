@@ -31,66 +31,45 @@ function requestWithBody(body: string, contentLength?: number): Pick<Request, "b
 }
 
 describe("readJsonBody", () => {
-  it("uses native text for an in-bound declared body", async () => {
-    let readerCalled = false;
-    const request = {
-      headers: new Headers({ "content-length": "8" }),
-      body: {
-        getReader() {
-          readerCalled = true;
-          throw new Error("bounded reader should not run");
-        },
+  it("bounds a body when content-length underreports its size", async () => {
+    const body = jsonWithByteLength(33);
+    let textCalled = false;
+    const request = requestWithBody(body, 1);
+    request.text = async () => {
+      textCalled = true;
+      return body;
+    };
+
+    const result = await readJsonBody(request, 32);
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "too_large",
+      metrics: {
+        rawBodyBytes: 33,
+        rawBodyBytesSource: "measured_partial",
+        declaredContentLength: 1,
+        measuredRawBodyBytes: 33,
+        truncated: true,
       },
-      text: async () => "{\"ok\":1}",
-    } as unknown as Pick<Request, "headers" | "body" | "text">;
-
-    const result = await readJsonBody(request, 1_048_576);
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.body).toEqual({ ok: 1 });
-      expect(result.metrics.rawBodyBytesSource).toBe("declared_content_length");
-      expect(result.metrics.rawBodyBytes).toBe(8);
-    }
-    expect(readerCalled).toBe(false);
+    });
+    expect(textCalled).toBe(false);
   });
 
-  it("returns invalid_json for invalid native text", async () => {
-    const result = await readJsonBody({
-      headers: new Headers({ "content-length": "1" }),
-      body: new ReadableStream(),
-      text: async () => "{",
-    }, 32);
+  it("returns invalid_json for invalid JSON with content-length present", async () => {
+    const result = await readJsonBody(requestWithBody("{", 1), 32);
 
     expect(result).toMatchObject({
       ok: false,
       reason: "invalid_json",
       metrics: {
         rawBodyBytes: 1,
-        rawBodyBytesSource: "declared_content_length",
+        rawBodyBytesSource: "measured",
         declaredContentLength: 1,
-        measuredRawBodyBytes: null,
+        measuredRawBodyBytes: 1,
         truncated: false,
       },
     });
-  });
-
-  it("propagates native text rejection without reading the body", async () => {
-    let readerCalled = false;
-    const error = new Error("text failed");
-    const result = readJsonBody({
-      headers: new Headers({ "content-length": "8" }),
-      body: {
-        getReader() {
-          readerCalled = true;
-          throw new Error("reader should not run");
-        },
-      } as unknown as ReadableStream,
-      text: async () => Promise.reject(error),
-    }, 32);
-
-    await expect(result).rejects.toBe(error);
-    expect(readerCalled).toBe(false);
   });
 
   it("uses the bounded reader fallback for malformed content length", async () => {
@@ -109,8 +88,7 @@ describe("readJsonBody", () => {
           return body.getReader();
         },
       },
-      text: async () => "should not run",
-    } as unknown as Pick<Request, "headers" | "body" | "text">;
+    } as unknown as Pick<Request, "headers" | "body">;
 
     const result = await readJsonBody(request, 32);
 
@@ -127,18 +105,14 @@ describe("readJsonBody", () => {
     expect(readerCalled).toBe(true);
   });
 
-  it("separates native body-read and parse timings", async () => {
+  it("separates body-read and parse timings", async () => {
     const now = vi.spyOn(performance, "now")
       .mockReturnValueOnce(100)
       .mockReturnValueOnce(130)
       .mockReturnValueOnce(200)
       .mockReturnValueOnce(207);
     try {
-      const result = await readJsonBody({
-        headers: new Headers({ "content-length": "2" }),
-        body: new ReadableStream(),
-        text: async () => "{}",
-      }, 32);
+      const result = await readJsonBody(requestWithBody("{}", 2), 32);
 
       expect(result).toMatchObject({
         ok: true,
@@ -182,9 +156,9 @@ describe("readJsonBody", () => {
     expect(result.ok).toBe(true);
     expect(result.metrics).toMatchObject({
       rawBodyBytes: limit,
-      rawBodyBytesSource: hasContentLength ? "declared_content_length" : "measured",
+      rawBodyBytesSource: "measured",
       declaredContentLength: hasContentLength ? limit : null,
-      measuredRawBodyBytes: hasContentLength ? null : limit,
+      measuredRawBodyBytes: limit,
       truncated: false,
     });
   });
@@ -199,9 +173,8 @@ describe("readJsonBody", () => {
 
     expect(result.ok).toBe(true);
     expect(result.metrics.rawBodyBytes).toBe(limit - 1);
-    expect(result.metrics.rawBodyBytesSource).toBe(
-      hasContentLength ? "declared_content_length" : "measured",
-    );
+    expect(result.metrics.rawBodyBytesSource).toBe("measured");
+    expect(result.metrics.measuredRawBodyBytes).toBe(limit - 1);
     expect(result.metrics.truncated).toBe(false);
   });
 
@@ -218,7 +191,7 @@ describe("readJsonBody", () => {
         return Promise.resolve();
       },
     } as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
-    const result = await readJsonBody({ headers: new Headers({ "content-length": "33" }), body, text: async () => "" }, 32);
+    const result = await readJsonBody({ headers: new Headers({ "content-length": "33" }), body }, 32);
 
     expect(result).toEqual({
       ok: false,
@@ -245,7 +218,7 @@ describe("readJsonBody", () => {
         canceled = true;
       },
     });
-    const result = await readJsonBody({ headers: new Headers(), body, text: async () => "" }, 32);
+    const result = await readJsonBody({ headers: new Headers(), body }, 32);
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected streamed overflow");
@@ -270,7 +243,7 @@ describe("readJsonBody", () => {
       },
     });
 
-    const result = await readJsonBody({ headers: new Headers(), body, text: async () => "" }, 32);
+    const result = await readJsonBody({ headers: new Headers(), body }, 32);
 
     expect(result).toMatchObject({
       ok: false,
