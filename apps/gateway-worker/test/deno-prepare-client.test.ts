@@ -346,9 +346,7 @@ describe("prepareWithDeno — error body 4096-byte boundary", () => {
 
     const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
     expect(outcome).toEqual({ kind: "unavailable", failure: "malformed_response" });
-    // The reader should be cancelled exactly once.
-    // Give the cancel a tick to propagate.
-    await new Promise((r) => setTimeout(r, 10));
+    // The reader is cancelled exactly once (reader.cancel() is awaited in the implementation).
     expect(cancelCount).toBe(1);
   });
 });
@@ -424,7 +422,7 @@ describe("prepareWithDeno — 500 and other statuses → unavailable", () => {
   it("returns unavailable for a 2xx status other than 200", async () => {
     const request = makeSimpleRequest(bodyText);
     const fetchImpl = vi.fn(async () =>
-      new Response('{"ok":true}', {
+      new Response(null, {
         status: 204,
         headers: {
           "content-type": "application/json",
@@ -435,6 +433,8 @@ describe("prepareWithDeno — 500 and other statuses → unavailable", () => {
 
     const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
     expect(outcome.kind).toBe("unavailable");
+    if (outcome.kind !== "unavailable") return;
+    expect(outcome.failure).toBe("upstream_status");
   });
 });
 
@@ -693,11 +693,7 @@ describe("prepareWithDeno — cancel idempotency", () => {
 
     const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
     expect(outcome.kind).toBe("rejected");
-    // Rejected outcomes should have consumed or cancelled the body.
-    // Give a tick for any async cleanup.
-    await new Promise((r) => setTimeout(r, 10));
-    // The body was fully read (consumed) for the error envelope, so cancel may not fire.
-    // But the key invariant is: no leak. The body was consumed.
+    // The body was fully read (consumed) for the error envelope; no leak.
   });
 });
 
