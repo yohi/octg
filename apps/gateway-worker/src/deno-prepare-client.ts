@@ -111,13 +111,7 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
       // resolution keeps the resolved body in its terminal-failure path.
       resolved = true;
 
-      const originalBody = response.body;
-      if (originalBody === null) {
-        clearTimeout_();
-        return { kind: "unavailable", failure: "malformed_response" };
-      }
-
-      const wrappedBody = wrapResolvedBody(originalBody, () => clearTimeout_());
+      const wrappedBody = wrapResolvedBody(response.body as ReadableStream<Uint8Array>, () => clearTimeout_());
 
       const cancel = async (): Promise<void> => {
         if (cancelled) return;

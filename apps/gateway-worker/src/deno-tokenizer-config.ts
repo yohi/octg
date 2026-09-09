@@ -109,23 +109,13 @@ export function resolveDenoRuntimeConfig(env: {
     return { tokenizer, prepare: { kind: "disabled", maxInputBytes } };
   }
 
-  // If the tokenizer group is partial/invalid, its error is authoritative for both routes.
-  // But the brief says: if tokenizer group is partial/invalid, the existing tokenizer
-  // configuration error remains authoritative for both routes. So prepare is invalid too.
+  // Tokenizer-group invalidity is authoritative for both routes.
   if (tokenizer.kind === "invalid") {
     return { tokenizer, prepare: { kind: "invalid", maxInputBytes } };
   }
 
-  // At this point tokenizer is either disabled or enabled.
-  // Prepare pair is complete or partial/invalid.
-  // A complete pair requires both endpoint and threshold present and valid.
-  // If tokenizer is disabled but prepare pair is present (complete or partial), it's
-  // a prepare configuration error (invalid) — Chat Completions stays on legacy DO tokenizer.
-  // If tokenizer is enabled and prepare pair is complete+valid, prepare is enabled.
-  // If tokenizer is enabled and prepare pair is partial or invalid, prepare is invalid
-  // (Responses-only error, Chat Completions unchanged).
-
-  // Partial pair (one present, one absent) → invalid.
+  // Prepare pair: both absent → disabled; partial → invalid;
+  // complete+valid with enabled tokenizer → enabled (reuses tokenizer auth/timeout).
   if (hasEndpoint !== hasThreshold) {
     return { tokenizer, prepare: { kind: "invalid", maxInputBytes } };
   }
