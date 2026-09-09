@@ -589,6 +589,24 @@ Deno.test("prepare: returns 413 with request_too_large for declared oversize wit
   assertEquals(fixture.calls(), 0);
 });
 
+Deno.test("prepare: declared oversize stays 413 when body cancellation fails", async () => {
+  const fixture = createFixture(10);
+  const body = new ReadableStream<Uint8Array>({
+    pull() {
+    },
+    cancel() {
+      throw new Error("declared cancellation failed");
+    },
+  });
+  const request = prepareStreamingRequest({ body, contentLength: 11 });
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 413);
+  assertEquals(await response.json(), { code: "request_too_large" });
+  assertEquals(fixture.calls(), 0);
+});
+
 Deno.test("prepare: returns 413 with request_too_large for measured oversize with exactly one reader cancellation", async () => {
   const fixture = createFixture(10);
   let cancellations = 0;
@@ -605,6 +623,38 @@ Deno.test("prepare: returns 413 with request_too_large for measured oversize wit
   assertEquals(responseBody.code, "request_too_large");
   assertEquals(cancellations, 1);
   assertEquals(fixture.calls(), 0);
+});
+
+Deno.test("prepare: measured oversize stays 413 when reader cancellation fails", async () => {
+  const fixture = createFixture(10);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(11));
+    },
+    cancel() {
+      throw new Error("measured cancellation failed");
+    },
+  });
+  const request = prepareStreamingRequest({ body });
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 413);
+  assertEquals(await response.json(), { code: "request_too_large" });
+  assertEquals(fixture.calls(), 0);
+});
+
+Deno.test("prepare: returns 500 when the encoded metadata header exceeds 4096 bytes", async () => {
+  const fixture = createFixture(10_000);
+  const request = prepareRequest({
+    body: responsesBody({ model: "x".repeat(3000) }),
+  });
+
+  const response = await fixture.handler(request);
+
+  assertEquals(response.status, 500);
+  assertEquals(await response.text(), "");
+  assertEquals(fixture.calls(), 1);
 });
 
 // --- Read failure ---

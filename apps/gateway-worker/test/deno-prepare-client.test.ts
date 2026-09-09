@@ -584,6 +584,46 @@ describe("prepareWithDeno — timeout", () => {
     expect(aborted).toBe(true);
   });
 
+  it("returns timeout when the timeout fires before fetch resolves", async () => {
+    const request = makeSimpleRequest(bodyText);
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    let responseBodyCancelCount = 0;
+    const responseBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        responseBodyCancelCount += 1;
+      },
+    });
+    const fetchImpl = vi.fn(() => fetchPromise);
+
+    const outcomePromise = prepareWithDeno({
+      ...baseArgs,
+      timeoutMs: 0,
+      request,
+      fetchImpl,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    if (resolveFetch === undefined) throw new Error("fetch resolver was not initialized");
+    resolveFetch(
+      new Response(responseBody, {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-octg-prepare-metadata": metadataHeader,
+        },
+      }),
+    );
+
+    await expect(outcomePromise).resolves.toEqual({
+      kind: "unavailable",
+      failure: "timeout",
+    });
+    expect(responseBodyCancelCount).toBe(1);
+  });
+
   it("invokes onTimeout exactly once when a resolved body times out", async () => {
     const request = makeSimpleRequest(bodyText);
     const onTimeout = vi.fn();

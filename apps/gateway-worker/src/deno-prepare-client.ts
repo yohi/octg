@@ -90,6 +90,12 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
     return { kind: "unavailable", failure: "network" };
   }
 
+  if (timeoutFired) {
+    clearTimeout_();
+    await cancelResponseBody();
+    return { kind: "unavailable", failure: "timeout" };
+  }
+
   // The response arrived. Now classify by HTTP status.
   const status = response.status;
 

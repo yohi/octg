@@ -14,6 +14,7 @@ export type PrepareOutcome =
     };
 
 const MARKER_PATTERN = /^octg_prepare_[0-9a-f]{32}$/;
+const MAX_METADATA_HEADER_BYTES = 4096;
 
 const EXPECTED_KEYS = [
   "version",
@@ -33,6 +34,8 @@ const EXPECTED_KEYS = [
 
 /** Decode base64url to bytes, bounded by maxBytes. Returns undefined on decode failure or overflow. */
 function decodeBase64urlBounded(value: string, maxBytes: number): Uint8Array | undefined {
+  if (new TextEncoder().encode(value).byteLength > maxBytes) return undefined;
+
   // base64url → base64
   let base64 = value.replace(/-/g, "+").replace(/_/g, "/");
   // Pad to a multiple of 4
@@ -72,8 +75,8 @@ export function parsePrepareMetadata(
 ): PrepareMetadata | undefined {
   if (value === null || value === "") return undefined;
 
-  const decoded = decodeBase64urlBounded(value, maxInputBytes);
-  if (decoded === undefined) return undefined;
+  const decoded = decodeBase64urlBounded(value, MAX_METADATA_HEADER_BYTES);
+  if (decoded === undefined || decoded.byteLength > maxInputBytes) return undefined;
 
   let parsed: unknown;
   try {
