@@ -52,6 +52,9 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
+  const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
+    ? normalizeEndpoint(config.vars.DENO_PREPARE_ENDPOINT)
+    : undefined;
   const normalizedPrepare = normalizeOptionalPrepare(prepare);
   if (normalizedPrepare !== undefined && deno === undefined) {
     throw new TypeError("Deno Preview prepare configuration requires a tokenizer configuration");
@@ -99,7 +102,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }
 
   if (normalizedPrepare !== undefined) {
-    validatePreviewPrepareConfig(normalizedPrepare, maxInputBytes);
+    validatePreviewPrepareConfig(normalizedPrepare, maxInputBytes, normalizedProductionPrepareEndpoint);
     config.vars.DENO_PREPARE_ENDPOINT = normalizedPrepare.endpoint.trim();
     config.vars.DENO_PREPARE_THRESHOLD_BYTES = normalizedPrepare.thresholdBytes.trim();
   }
@@ -133,13 +136,17 @@ function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
   }
 }
 
-function validatePreviewPrepareConfig(prepare, maxInputBytes) {
+function validatePreviewPrepareConfig(prepare, maxInputBytes, normalizedProductionEndpoint) {
   if (prepare === null || typeof prepare !== "object") {
     throw new TypeError("Deno Preview prepare configuration must be an object");
   }
 
   const { endpoint, thresholdBytes } = prepare;
   requireHttpsEndpoint("Deno Preview prepare endpoint", endpoint);
+  if (normalizedProductionEndpoint !== undefined &&
+      new URL(endpoint.trim()).href === normalizedProductionEndpoint) {
+    throw new Error("Production Deno prepare endpoint must not be used in Preview configuration");
+  }
   requirePositiveSafeInteger("Deno Preview prepare threshold", thresholdBytes);
   if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
     throw new TypeError("Deno Preview prepare threshold must not exceed Preview input limit");

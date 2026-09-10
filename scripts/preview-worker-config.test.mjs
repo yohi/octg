@@ -230,6 +230,39 @@ test("rejects Preview endpoints equivalent to the Production endpoint", () => {
   }
 });
 
+test("rejects Preview prepare endpoints equivalent to the Production endpoint", () => {
+  for (const [productionEndpoint, previewEndpoint] of [
+    [
+      "https://production-tokenizer.example/prepare",
+      "HTTPS://PRODUCTION-TOKENIZER.EXAMPLE/prepare",
+    ],
+    [
+      "https://production-tokenizer.example:443/prepare",
+      "https://production-tokenizer.example/prepare",
+    ],
+  ]) {
+    const config = {
+      ...baseConfig,
+      vars: { ...baseConfig.vars, DENO_PREPARE_ENDPOINT: productionEndpoint },
+    };
+    assert.throws(
+      () => buildPreviewWorkerConfig(config, {
+        ...validOptions,
+        deno: {
+          endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+          thresholdBytes: "1",
+          timeoutMs: "5000",
+        },
+        prepare: {
+          endpoint: previewEndpoint,
+          thresholdBytes: "700000",
+        },
+      }),
+      /Production Deno prepare endpoint/,
+    );
+  }
+});
+
 test("preserves Preview endpoint validation for non-string Production endpoints", () => {
   for (const productionEndpoint of [undefined, null, 123]) {
     const config = {
