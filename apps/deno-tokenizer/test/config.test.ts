@@ -23,70 +23,56 @@ Deno.test("derives the raw envelope ceiling from resolved input bytes", () => {
   });
 });
 
-Deno.test("fails closed when OCTG_EXPECTED_MAX_INPUT_BYTES is missing", () => {
-  const values = new Map([
-    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
-    ["MAX_INPUT_BYTES", "2"],
-  ]);
+const invalidConfigCases: ReadonlyArray<{
+  readonly name: string;
+  readonly values: ReadonlyMap<string, string>;
+}> = [
+  {
+    name: "when OCTG_EXPECTED_MAX_INPUT_BYTES is missing",
+    values: new Map([
+      ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
+      ["MAX_INPUT_BYTES", "2"],
+    ]),
+  },
+  {
+    name: "when OCTG_EXPECTED_MAX_INPUT_BYTES is non-numeric",
+    values: new Map([
+      ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
+      ["MAX_INPUT_BYTES", "2"],
+      ["OCTG_EXPECTED_MAX_INPUT_BYTES", "not-a-number"],
+    ]),
+  },
+  {
+    name: "when OCTG_EXPECTED_MAX_INPUT_BYTES does not match MAX_INPUT_BYTES",
+    values: new Map([
+      ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
+      ["MAX_INPUT_BYTES", "2"],
+      ["OCTG_EXPECTED_MAX_INPUT_BYTES", "3"],
+    ]),
+  },
+  {
+    name: "when MAX_INPUT_BYTES is missing",
+    values: new Map([
+      ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
+      ["OCTG_EXPECTED_MAX_INPUT_BYTES", "1048576"],
+    ]),
+  },
+  {
+    name: "when MAX_INPUT_BYTES is invalid",
+    values: new Map([
+      ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
+      ["MAX_INPUT_BYTES", "9007199254740992"],
+      ["OCTG_EXPECTED_MAX_INPUT_BYTES", "9007199254740992"],
+    ]),
+  },
+];
 
-  assertThrows(
-    () => resolveServiceConfig((name: string) => values.get(name)),
-    TypeError,
-    "Invalid Deno tokenizer configuration.",
-  );
-});
-
-Deno.test("fails closed when OCTG_EXPECTED_MAX_INPUT_BYTES is non-numeric", () => {
-  const values = new Map([
-    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
-    ["MAX_INPUT_BYTES", "2"],
-    ["OCTG_EXPECTED_MAX_INPUT_BYTES", "not-a-number"],
-  ]);
-
-  assertThrows(
-    () => resolveServiceConfig((name: string) => values.get(name)),
-    TypeError,
-    "Invalid Deno tokenizer configuration.",
-  );
-});
-
-Deno.test("fails closed when OCTG_EXPECTED_MAX_INPUT_BYTES does not match MAX_INPUT_BYTES", () => {
-  const values = new Map([
-    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
-    ["MAX_INPUT_BYTES", "2"],
-    ["OCTG_EXPECTED_MAX_INPUT_BYTES", "3"],
-  ]);
-
-  assertThrows(
-    () => resolveServiceConfig((name: string) => values.get(name)),
-    TypeError,
-    "Invalid Deno tokenizer configuration.",
-  );
-});
-
-Deno.test("fails closed when MAX_INPUT_BYTES is missing", () => {
-  const values = new Map([
-    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
-    ["OCTG_EXPECTED_MAX_INPUT_BYTES", "1048576"],
-  ]);
-
-  assertThrows(
-    () => resolveServiceConfig((name: string) => values.get(name)),
-    TypeError,
-    "Invalid Deno tokenizer configuration.",
-  );
-});
-
-Deno.test("fails closed when MAX_INPUT_BYTES is invalid", () => {
-  const values = new Map([
-    ["OCTG_TOKENIZER_AUTH_TOKEN", "test-secret"],
-    ["MAX_INPUT_BYTES", "9007199254740992"],
-    ["OCTG_EXPECTED_MAX_INPUT_BYTES", "9007199254740992"],
-  ]);
-
-  assertThrows(
-    () => resolveServiceConfig((name: string) => values.get(name)),
-    TypeError,
-    "Invalid Deno tokenizer configuration.",
-  );
-});
+for (const testCase of invalidConfigCases) {
+  Deno.test(`fails closed ${testCase.name}`, () => {
+    assertThrows(
+      () => resolveServiceConfig((name: string) => testCase.values.get(name)),
+      TypeError,
+      "Invalid Deno tokenizer configuration.",
+    );
+  });
+}
