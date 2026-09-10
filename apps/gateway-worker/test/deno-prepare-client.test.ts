@@ -354,41 +354,28 @@ describe("prepareWithDeno — error body 4096-byte boundary", () => {
 /* ---------- 500 and other statuses → unavailable ---------- */
 
 describe("prepareWithDeno — 500 and other statuses → unavailable", () => {
-  it("returns unavailable upstream_status for 500 with no body (Deno body-read failure)", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(null, { status: 500 }),
-    );
+  const serverErrorCases = [
+    { name: "with no body", code: undefined },
+    { name: "with an invalid_body code body", code: "invalid_body" },
+    { name: "with a request_too_large code body", code: "request_too_large" },
+  ] as const;
 
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
+  it.each(serverErrorCases)(
+    "returns unavailable upstream_status for 500 $name",
+    async ({ code }) => {
+      const request = makeSimpleRequest(bodyText);
+      const fetchImpl = vi.fn(async () => {
+        const init: ResponseInit = { status: 500 };
+        if (code !== undefined) {
+          init.headers = { "content-type": "application/json" };
+        }
+        return new Response(code === undefined ? null : makeErrorBody(code), init);
+      });
 
-  it("returns unavailable upstream_status for 500 even with an allowlisted-looking code body", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(makeErrorBody("invalid_body"), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
-
-  it("returns unavailable upstream_status for 500 with request_too_large code body", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(makeErrorBody("request_too_large"), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
+      const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
+      expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
+    },
+  );
 
   it.each([
     [401, "invalid_body"],
@@ -623,13 +610,13 @@ describe("prepareWithDeno — timeout", () => {
     });
     expect(responseBodyCancelCount).toBe(1);
   });
-
   it("invokes onTimeout exactly once when a resolved body times out", async () => {
     const request = makeSimpleRequest(bodyText);
     const onTimeout = vi.fn();
 
     // The fetch resolves with a body that never closes. The timeout fires after resolution.
     let aborted = false;
+    let bodyCancelCount = 0;
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       return new Promise<Response>((resolve) => {
         const signal = init!.signal as AbortSignal;
@@ -642,7 +629,7 @@ describe("prepareWithDeno — timeout", () => {
             // Never enqueue, never close — body hangs.
           },
           cancel() {
-            // Cancel called by timeout handler.
+            bodyCancelCount++;
           },
         });
         resolve(
@@ -671,6 +658,7 @@ describe("prepareWithDeno — timeout", () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(onTimeout).toHaveBeenCalledTimes(1);
     expect(aborted).toBe(true);
+    expect(bodyCancelCount).toBe(1);
   });
 });
 
@@ -683,7 +671,6 @@ describe("prepareWithDeno — cancel idempotency", () => {
     const responseBody = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('{"ok":true}'));
-        controller.close();
       },
       cancel() {
         cancelCount++;
@@ -707,8 +694,7 @@ describe("prepareWithDeno — cancel idempotency", () => {
     await outcome.cancel();
     await outcome.cancel();
 
-    // Body cancel should be called at most once (idempotent).
-    expect(cancelCount).toBeLessThanOrEqual(1);
+    expect(cancelCount).toBe(1);
   });
 
   it("cancel aborts the Deno request and cancels the response body for a rejected outcome", async () => {

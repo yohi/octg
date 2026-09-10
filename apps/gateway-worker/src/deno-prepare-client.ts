@@ -39,6 +39,7 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
   let cancelled = false;
   let timeoutFired = false;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let cancelResolvedBody: (() => Promise<void>) | undefined;
 
   const cancelResponseBody = async (): Promise<void> => {
     const body = response?.body;
@@ -58,10 +59,11 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
   timeoutHandle = setTimeout(() => {
     timeoutFired = true;
     controller.abort();
-    void cancelResponseBody();
     if (!resolved) {
+      void cancelResponseBody();
       // Pre-resolution timeout — outcome is handled in the catch block.
     } else {
+      void cancelResolvedBody?.();
       // Post-resolution timeout — invoke local lifecycle callback.
       args.onTimeout?.();
     }
@@ -115,23 +117,22 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
     if (outcome.kind === "resolved") {
       // Wrap the body so normal close clears the timer, while timeout after
       // resolution keeps the resolved body in its terminal-failure path.
+      const wrapped = wrapResolvedBody(response.body as ReadableStream<Uint8Array>, () => clearTimeout_());
+      cancelResolvedBody = wrapped.cancel;
       resolved = true;
-
-      const wrappedBody = wrapResolvedBody(response.body as ReadableStream<Uint8Array>, () => clearTimeout_());
 
       const cancel = async (): Promise<void> => {
         if (cancelled) return;
         cancelled = true;
         clearTimeout_();
         controller.abort();
-        await wrappedBody.cancel().catch(() => undefined);
-        await cancelResponseBody();
+        await wrapped.cancel();
       };
 
       return {
         kind: "resolved",
         metadata: outcome.metadata,
-        body: wrappedBody,
+        body: wrapped.body,
         cancel,
       };
     }
@@ -149,18 +150,13 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
 
 /* ---------- helpers ---------- */
 
-/**
- * Wrap a resolved body stream so that normal close (end-of-stream or cancel)
- * clears the timeout. A timeout after resolution keeps the resolved body in
- * its terminal-failure path — the timer was already cleared or will be by the
- * timeout handler's cancelResponseBody.
- */
 function wrapResolvedBody(
   original: ReadableStream<Uint8Array>,
   onClose: () => void,
-): ReadableStream<Uint8Array> {
+): { readonly body: ReadableStream<Uint8Array>; readonly cancel: () => Promise<void> } {
   const reader = original.getReader();
   let closed = false;
+  let cancelPromise: Promise<void> | undefined;
 
   const cleanup = (): void => {
     if (closed) return;
@@ -168,7 +164,23 @@ function wrapResolvedBody(
     onClose();
   };
 
-  return new ReadableStream<Uint8Array>({
+  const cancel = (): Promise<void> => {
+    if (cancelPromise !== undefined) return cancelPromise;
+    cleanup();
+    cancelPromise = Promise.resolve()
+      .then(() => reader.cancel())
+      .catch(() => undefined)
+      .finally(() => {
+        try {
+          reader.releaseLock();
+        } catch {
+          // already released
+        }
+      });
+    return cancelPromise;
+  };
+
+  const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
@@ -185,17 +197,10 @@ function wrapResolvedBody(
         controller.error(error);
       }
     },
-    cancel() {
-      cleanup();
-      // reader.cancel is best-effort; releaseLock if possible.
-      reader.cancel().catch(() => undefined);
-      try {
-        reader.releaseLock();
-      } catch {
-        // already released
-      }
-    },
+    cancel,
   });
+
+  return { body, cancel };
 }
 
 /**
@@ -241,9 +246,7 @@ async function classifyErrorEnvelope(
   response: Response,
   allowedCodes: readonly PrepareErrorCode[],
 ): Promise<PrepareOutcome> {
-  // Check content type first.
-  const contentType = response.headers.get("content-type");
-  if (!isApplicationJson(contentType)) {
+  if (!isApplicationJson(response.headers.get("content-type"))) {
     return { kind: "unavailable", failure: "malformed_response" };
   }
 
@@ -252,7 +255,20 @@ async function classifyErrorEnvelope(
     return { kind: "unavailable", failure: "malformed_response" };
   }
 
-  // Bounded read with the fixed 4096 UTF-8-byte limit.
+  const bytes = await readBoundedErrorBody(body);
+  if (bytes === undefined) {
+    return { kind: "unavailable", failure: "malformed_response" };
+  }
+
+  const code = parseAllowedErrorCode(bytes, allowedCodes);
+  if (code === undefined) {
+    return { kind: "unavailable", failure: "malformed_response" };
+  }
+
+  return { kind: "rejected", code };
+}
+
+async function readBoundedErrorBody(body: ReadableStream<Uint8Array>): Promise<Uint8Array | undefined> {
   const reader = body.getReader();
   let totalBytes = 0;
   const chunks: Uint8Array[] = [];
@@ -264,15 +280,13 @@ async function classifyErrorEnvelope(
       if (value === undefined) continue;
       totalBytes += value.byteLength;
       if (totalBytes > ERROR_BODY_MAX_BYTES) {
-        // Measured oversize → cancel the active reader exactly once.
         await reader.cancel().catch(() => undefined);
-        return { kind: "unavailable", failure: "malformed_response" };
+        return undefined;
       }
       chunks.push(value);
     }
   } catch {
-    // Reader rejection → malformed_response.
-    return { kind: "unavailable", failure: "malformed_response" };
+    return undefined;
   } finally {
     try {
       reader.releaseLock();
@@ -281,43 +295,35 @@ async function classifyErrorEnvelope(
     }
   }
 
-  // Decode and parse JSON.
-  const combined = concatUint8Arrays(chunks);
-  let text: string;
-  try {
-    text = new TextDecoder().decode(combined);
-  } catch {
-    return { kind: "unavailable", failure: "malformed_response" };
-  }
+  return concatUint8Arrays(chunks);
+}
 
+function parseAllowedErrorCode(
+  bytes: Uint8Array,
+  allowedCodes: readonly PrepareErrorCode[],
+): PrepareErrorCode | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
-    return { kind: "unavailable", failure: "malformed_response" };
+    return undefined;
   }
 
-  // Must be an object with exactly one `code` field.
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { kind: "unavailable", failure: "malformed_response" };
+    return undefined;
   }
 
   const record = parsed as Record<string, unknown>;
   const keys = Object.keys(record);
   if (keys.length !== 1 || keys[0] !== "code") {
-    return { kind: "unavailable", failure: "malformed_response" };
+    return undefined;
   }
 
   const code = record.code;
-  if (typeof code !== "string") {
-    return { kind: "unavailable", failure: "malformed_response" };
+  if (typeof code !== "string" || !allowedCodes.includes(code as PrepareErrorCode)) {
+    return undefined;
   }
-
-  if (!allowedCodes.includes(code as PrepareErrorCode)) {
-    return { kind: "unavailable", failure: "malformed_response" };
-  }
-
-  return { kind: "rejected", code: code as PrepareErrorCode };
+  return code as PrepareErrorCode;
 }
 
 /** Check if a content-type is `application/json` with optional `charset` parameter. */
@@ -326,9 +332,8 @@ function isApplicationJson(contentType: string | null): boolean {
   const parts = contentType.split(";").map((p) => p.trim().toLowerCase());
   if (parts[0] !== "application/json") return false;
   // Allow optional charset=utf-8 only.
-  for (let i = 1; i < parts.length; i++) {
-    const part = parts[i];
-    if (part === undefined || !part.startsWith("charset=")) return false;
+  for (const part of parts.slice(1)) {
+    if (!part?.startsWith("charset=")) return false;
   }
   return true;
 }
