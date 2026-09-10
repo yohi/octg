@@ -155,10 +155,11 @@ jobs:
           DENO_DEPLOY_ORG: ${{ vars.DENO_DEPLOY_ORG }}
           DENO_DEPLOY_APP: ${{ vars.DENO_DEPLOY_APP }}
           PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
+          MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
         run: |
           set -euo pipefail
-          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN" ]]; then
-            echo "::error::Deno Deploy identity and tokenizer authentication Secret must be configured"
+          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN" || -z "$MAX_INPUT_BYTES" ]]; then
+            echo "::error::Deno Deploy identity, tokenizer authentication Secret, and input limit must be configured"
             exit 2
           fi
           env_file="$RUNNER_TEMP/deno-tokenizer-runtime.env"
@@ -166,10 +167,14 @@ jobs:
           node - "$env_file" <<'NODE'
           const fs = require("node:fs");
           const token = process.env.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN;
+          const maxInputBytes = process.env.MAX_INPUT_BYTES;
           if (!token) throw new Error("Production tokenizer authentication Secret is not configured");
+          if (!/^[1-9][0-9]*$/.test(maxInputBytes) || !Number.isSafeInteger(Number(maxInputBytes))) {
+            throw new Error("MAX_INPUT_BYTES must be a positive safe integer");
+          }
           fs.writeFileSync(
             process.argv[2],
-            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\n`,
+            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\nMAX_INPUT_BYTES=${maxInputBytes}\nOCTG_EXPECTED_MAX_INPUT_BYTES=${maxInputBytes}\n`,
             { mode: 0o600 },
           );
           NODE

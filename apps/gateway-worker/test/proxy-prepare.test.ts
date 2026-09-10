@@ -137,7 +137,6 @@ function stubLegacyResponses(): {
   vi.stubGlobal("fetch", fetchImpl);
   return { calls, fetchImpl };
 }
-
 function standardQuota() {
   const day = new Date().toISOString().slice(0, 10);
   return env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));

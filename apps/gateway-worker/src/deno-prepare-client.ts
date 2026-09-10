@@ -127,6 +127,7 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
         clearTimeout_();
         controller.abort();
         await wrapped.cancel();
+        await cancelResponseBody();
       };
 
       return {
@@ -150,6 +151,12 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
 
 /* ---------- helpers ---------- */
 
+/**
+ * Wrap a resolved body stream so that normal close (end-of-stream or cancel)
+ * clears the timeout. A timeout after resolution keeps the resolved body in
+ * its terminal-failure path — the timer was already cleared or will be by the
+ * timeout handler's cancelResponseBody.
+ */
 function wrapResolvedBody(
   original: ReadableStream<Uint8Array>,
   onClose: () => void,
@@ -333,7 +340,7 @@ function isApplicationJson(contentType: string | null): boolean {
   if (parts[0] !== "application/json") return false;
   // Allow optional charset=utf-8 only.
   for (const part of parts.slice(1)) {
-    if (!part?.startsWith("charset=")) return false;
+    if (!part.startsWith("charset=")) return false;
   }
   return true;
 }

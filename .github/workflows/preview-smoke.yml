@@ -78,16 +78,21 @@ jobs:
           PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
           PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
           PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
+          PREVIEW_MAX_INPUT_BYTES: ${{ vars.OCTG_PREVIEW_MAX_INPUT_BYTES }}
           PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           PREVIEW_CONFIG_PATH: ${{ runner.temp }}/wrangler-preview.jsonc
         run: |
           set -euo pipefail
-          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ] || [ -z "$PREVIEW_QUOTA_LIMIT_STANDARD" ] || [ -z "$PREVIEW_QUOTA_LIMIT_MINI" ]; then
-            echo "::error::Preview database, Worker URL, upstream, and quota-limit variables must be configured"
+          if [ -z "$PREVIEW_DATABASE_ID" ] || [ -z "$PREVIEW_BASE_URL" ] || [ -z "$PREVIEW_UPSTREAM_BASE_URL" ] || [ -z "$PREVIEW_QUOTA_LIMIT_STANDARD" ] || [ -z "$PREVIEW_QUOTA_LIMIT_MINI" ] || [ -z "$PREVIEW_MAX_INPUT_BYTES" ]; then
+            echo "::error::Preview database, Worker URL, upstream, quota-limit, and input-limit variables must be configured"
             exit 2
           fi
           if [[ ! "$PREVIEW_QUOTA_LIMIT_STANDARD" =~ ^(0|[1-9][0-9]*)$ ]] || [[ ! "$PREVIEW_QUOTA_LIMIT_MINI" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Preview STANDARD quota must be a non-negative integer and MINI quota must be a positive integer"
+            exit 2
+          fi
+          if ! node -e 'const value = process.argv[1]; if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) process.exit(1)' "$PREVIEW_MAX_INPUT_BYTES"; then
+            echo "::error::Preview MAX_INPUT_BYTES must be a positive safe integer"
             exit 2
           fi
           node --input-type=module <<'NODE'
@@ -131,11 +136,14 @@ jobs:
           }];
           config.vars.QUOTA_LIMIT_STANDARD = process.env.PREVIEW_QUOTA_LIMIT_STANDARD;
           config.vars.QUOTA_LIMIT_MINI = process.env.PREVIEW_QUOTA_LIMIT_MINI;
+          config.vars.MAX_INPUT_BYTES = process.env.PREVIEW_MAX_INPUT_BYTES;
           config.vars.OCTG_UPSTREAM_BASE_URL = process.env.PREVIEW_UPSTREAM_BASE_URL;
           // Preview has no Deno Deploy control plane; use its isolated DO tokenizer.
           delete config.vars.DENO_TOKENIZER_ENDPOINT;
           delete config.vars.DENO_TOKENIZER_THRESHOLD_BYTES;
           delete config.vars.DENO_TOKENIZER_TIMEOUT_MS;
+          delete config.vars.DENO_PREPARE_ENDPOINT;
+          delete config.vars.DENO_PREPARE_THRESHOLD_BYTES;
           // Preview does not run reconciliation cron
           delete config.triggers;
           await writeFile(process.env.PREVIEW_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -323,18 +331,26 @@ jobs:
           PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
           PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
           PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
+          PREVIEW_MAX_INPUT_BYTES: ${{ vars.OCTG_PREVIEW_MAX_INPUT_BYTES }}
           PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           PREVIEW_DENO_DEPLOY_ORG: ${{ vars.DENO_PREVIEW_DEPLOY_ORG }}
           PREVIEW_DENO_DEPLOY_APP: ${{ vars.DENO_PREVIEW_DEPLOY_APP }}
           PREVIEW_DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_PREVIEW_TOKENIZER_ENDPOINT }}
           PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES }}
           PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
+          PREVIEW_DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT }}
+          PREVIEW_DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES }}
+          PREVIEW_DENO_PREPARE_CONFIGURED: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT != '' || vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES != '' }}
           DENO_PREVIEW_DEPLOY_TOKEN: ${{ secrets.DENO_PREVIEW_DEPLOY_TOKEN }}
           DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "$PREVIEW_DATABASE_ID" || -z "$PREVIEW_BASE_URL" || -z "$PREVIEW_UPSTREAM_BASE_URL" || -z "$PREVIEW_QUOTA_LIMIT_STANDARD" || -z "$PREVIEW_QUOTA_LIMIT_MINI" ]]; then
+          if [[ -z "$PREVIEW_DATABASE_ID" || -z "$PREVIEW_BASE_URL" || -z "$PREVIEW_UPSTREAM_BASE_URL" || -z "$PREVIEW_QUOTA_LIMIT_STANDARD" || -z "$PREVIEW_QUOTA_LIMIT_MINI" || -z "$PREVIEW_MAX_INPUT_BYTES" ]]; then
             echo "::error::Preview Worker variables are not configured"
+            exit 2
+          fi
+          if ! node -e 'const value = process.argv[1]; if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) process.exit(1)' "$PREVIEW_MAX_INPUT_BYTES"; then
+            echo "::error::Preview MAX_INPUT_BYTES must be a positive safe integer"
             exit 2
           fi
           if [[ -z "$PREVIEW_DENO_DEPLOY_ORG" || -z "$PREVIEW_DENO_DEPLOY_APP" || -z "$PREVIEW_DENO_TOKENIZER_ENDPOINT" || -z "$PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES" || -z "$PREVIEW_DENO_TOKENIZER_TIMEOUT_MS" ]]; then
@@ -345,8 +361,16 @@ jobs:
             echo "::error::Preview Deno Secrets are not configured"
             exit 2
           fi
+          if [[ -n "$PREVIEW_DENO_PREPARE_ENDPOINT" && -z "$PREVIEW_DENO_PREPARE_THRESHOLD_BYTES" ]] || [[ -z "$PREVIEW_DENO_PREPARE_ENDPOINT" && -n "$PREVIEW_DENO_PREPARE_THRESHOLD_BYTES" ]]; then
+            echo "::error::Preview prepare variables must be supplied together"
+            exit 2
+          fi
           if [[ ! "$PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES" =~ ^[1-9][0-9]*$ ]] || [[ ! "$PREVIEW_DENO_TOKENIZER_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Preview Deno threshold and timeout must be positive decimal integers"
+            exit 2
+          fi
+          if [[ -n "$PREVIEW_DENO_PREPARE_ENDPOINT" ]] && [[ ! "$PREVIEW_DENO_PREPARE_THRESHOLD_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Preview Deno prepare threshold must be a positive decimal integer"
             exit 2
           fi
 
@@ -359,12 +383,19 @@ jobs:
           PREVIEW_UPSTREAM_BASE_URL: ${{ vars.OCTG_PREVIEW_UPSTREAM_BASE_URL }}
           PREVIEW_QUOTA_LIMIT_STANDARD: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_STANDARD }}
           PREVIEW_QUOTA_LIMIT_MINI: ${{ vars.OCTG_PREVIEW_QUOTA_LIMIT_MINI }}
+          PREVIEW_MAX_INPUT_BYTES: ${{ vars.OCTG_PREVIEW_MAX_INPUT_BYTES }}
           PREVIEW_WORKER_NAME: ${{ vars.OCTG_PREVIEW_WORKER_NAME || 'octg-gateway-preview' }}
           PREVIEW_DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_PREVIEW_TOKENIZER_ENDPOINT }}
           PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES }}
           PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_PREVIEW_TOKENIZER_TIMEOUT_MS }}
+          PREVIEW_DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT }}
+          PREVIEW_DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES }}
+          PREVIEW_DENO_PREPARE_CONFIGURED: ${{ vars.DENO_PREVIEW_PREPARE_ENDPOINT != '' || vars.DENO_PREVIEW_PREPARE_THRESHOLD_BYTES != '' }}
         run: |
           set -euo pipefail
+          if [[ "$PREVIEW_DENO_PREPARE_CONFIGURED" != "true" ]]; then
+            unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES
+          fi
           node scripts/preview-worker-config.mjs \
             apps/gateway-worker/wrangler.jsonc \
             "$PREVIEW_CONFIG_PATH" \
@@ -450,10 +481,11 @@ jobs:
           DENO_DEPLOY_ORG: ${{ vars.DENO_PREVIEW_DEPLOY_ORG }}
           DENO_DEPLOY_APP: ${{ vars.DENO_PREVIEW_DEPLOY_APP }}
           DENO_PREVIEW_TOKENIZER_AUTH_TOKEN: ${{ secrets.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN }}
+          PREVIEW_MAX_INPUT_BYTES: ${{ vars.OCTG_PREVIEW_MAX_INPUT_BYTES }}
         run: |
           set -euo pipefail
-          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN" ]]; then
-            echo "::error::Preview Deno Deploy identity and tokenizer Secret must be configured"
+          if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN" || -z "$PREVIEW_MAX_INPUT_BYTES" ]]; then
+            echo "::error::Preview Deno Deploy identity, tokenizer Secret, and input limit must be configured"
             exit 2
           fi
           env_file="$RUNNER_TEMP/preview-deno-runtime.env"
@@ -461,10 +493,14 @@ jobs:
           node - "$env_file" <<'NODE'
           const fs = require("node:fs");
           const token = process.env.DENO_PREVIEW_TOKENIZER_AUTH_TOKEN;
+          const maxInputBytes = process.env.PREVIEW_MAX_INPUT_BYTES;
           if (!token) throw new Error("Preview Deno tokenizer Secret is not configured");
+          if (!/^[1-9][0-9]*$/.test(maxInputBytes) || !Number.isSafeInteger(Number(maxInputBytes))) {
+            throw new Error("Preview MAX_INPUT_BYTES must be a positive safe integer");
+          }
           fs.writeFileSync(
             process.argv[2],
-            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\n`,
+            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\nMAX_INPUT_BYTES=${maxInputBytes}\nOCTG_EXPECTED_MAX_INPUT_BYTES=${maxInputBytes}\n`,
             { mode: 0o600 },
           );
           NODE

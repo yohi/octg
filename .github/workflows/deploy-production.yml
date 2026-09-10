@@ -45,13 +45,20 @@ jobs:
         run: npm run test:ci-smoke
 
       - name: Validate Production Deno tokenizer configuration
-        run: node scripts/production-deno-config.mjs
+        run: |
+          set -euo pipefail
+          if [[ "$PRODUCTION_PREPARE_CONFIGURED" != "true" ]]; then
+            unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES
+          fi
+          node scripts/production-deno-config.mjs
         env:
+          MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
           DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
           DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
+          PRODUCTION_PREPARE_CONFIGURED: ${{ vars.DENO_PREPARE_ENDPOINT != '' || vars.DENO_PREPARE_THRESHOLD_BYTES != '' }}
 
       - name: Validate Production Deno tokenizer authentication Secret
         env:
@@ -72,6 +79,9 @@ jobs:
       - name: Deploy Worker
         run: |
           set -euo pipefail
+          if [[ "$PRODUCTION_PREPARE_CONFIGURED" != "true" ]]; then
+            unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES
+          fi
           prepare_args=()
           if { [[ -n "${DENO_PREPARE_ENDPOINT:-}" && -z "${DENO_PREPARE_THRESHOLD_BYTES:-}" ]] || \
                [[ -z "${DENO_PREPARE_ENDPOINT:-}" && -n "${DENO_PREPARE_THRESHOLD_BYTES:-}" ]]; }; then
@@ -99,6 +109,7 @@ jobs:
             --config apps/gateway-worker/wrangler.jsonc \
             --keep-vars \
             --secrets-file "$secrets_file" \
+            --var "MAX_INPUT_BYTES:${MAX_INPUT_BYTES}" \
             --var "DENO_TOKENIZER_ENDPOINT:${DENO_TOKENIZER_ENDPOINT}" \
             --var "DENO_TOKENIZER_THRESHOLD_BYTES:${DENO_TOKENIZER_THRESHOLD_BYTES}" \
             --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}" \
@@ -121,8 +132,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/production-wrangler-output.ndjson
+          MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
           DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
           DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
+          PRODUCTION_PREPARE_CONFIGURED: ${{ vars.DENO_PREPARE_ENDPOINT != '' || vars.DENO_PREPARE_THRESHOLD_BYTES != '' }}

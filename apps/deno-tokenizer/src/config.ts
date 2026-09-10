@@ -14,7 +14,17 @@ export function resolveServiceConfig(
     throw new TypeError("Invalid Deno tokenizer configuration.");
   }
 
-  const maxInputBytes = resolveMaxInputBytes(readEnv("MAX_INPUT_BYTES"));
+  const maxInputBytesRaw = readEnv("MAX_INPUT_BYTES");
+  const normalizedMaxInputBytes = maxInputBytesRaw?.trim();
+  if (
+    normalizedMaxInputBytes === undefined ||
+    !/^\d+$/.test(normalizedMaxInputBytes) ||
+    !Number.isSafeInteger(Number(normalizedMaxInputBytes)) ||
+    Number(normalizedMaxInputBytes) <= 0
+  ) {
+    throw new TypeError("Invalid Deno tokenizer configuration.");
+  }
+  const maxInputBytes = resolveMaxInputBytes(maxInputBytesRaw);
 
   const expectedMaxInputBytesRaw = readEnv("OCTG_EXPECTED_MAX_INPUT_BYTES");
   if (expectedMaxInputBytesRaw === undefined) {

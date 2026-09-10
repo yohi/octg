@@ -89,11 +89,9 @@ export function resolveDenoRuntimeConfig(env: {
   const tokenizer = resolveDenoTokenizerConfig(env);
   const maxInputBytes = tokenizer.maxInputBytes;
 
-  const prepareEndpoint = env.DENO_PREPARE_ENDPOINT?.trim() || undefined;
-  const prepareThreshold = env.DENO_PREPARE_THRESHOLD_BYTES?.trim() || undefined;
+  const prepareEndpoint = env.DENO_PREPARE_ENDPOINT?.trim();
+  const prepareThreshold = env.DENO_PREPARE_THRESHOLD_BYTES?.trim();
 
-  // Normalize empty-string placeholders to absent.
-  // Both prepare settings absent → disabled.
   if (prepareEndpoint === undefined && prepareThreshold === undefined) {
     return { tokenizer, prepare: { kind: "disabled", maxInputBytes } };
   }
@@ -103,8 +101,6 @@ export function resolveDenoRuntimeConfig(env: {
     return { tokenizer, prepare: { kind: "invalid", maxInputBytes } };
   }
 
-  // Prepare pair: both absent → disabled; partial → invalid;
-  // complete+valid with enabled tokenizer → enabled (reuses tokenizer auth/timeout).
   if (prepareEndpoint === undefined || prepareThreshold === undefined) {
     return { tokenizer, prepare: { kind: "invalid", maxInputBytes } };
   }

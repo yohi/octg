@@ -12,6 +12,8 @@ export const PREVIEW_DENO_VARIABLE_NAMES = Object.freeze([
 const DENO_CONFIG_NAMES = Object.freeze([
   ...PREVIEW_DENO_VARIABLE_NAMES,
   "DENO_TOKENIZER_AUTH_TOKEN",
+  "DENO_PREPARE_ENDPOINT",
+  "DENO_PREPARE_THRESHOLD_BYTES",
 ]);
 
 export function buildPreviewWorkerConfig(baseConfig, options) {
@@ -28,7 +30,9 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     upstreamBaseUrl,
     standardLimit,
     miniLimit,
+    maxInputBytes,
     deno,
+    prepare,
   } = options ?? {};
 
   requireNonEmpty("Preview database ID", databaseId);
@@ -38,6 +42,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   requireNonEmpty("Preview STANDARD quota", standardLimit);
   requireNonEmpty("Preview MINI quota", miniLimit);
   requireNonEmpty("Preview project root", projectRoot);
+  requirePositiveSafeInteger("Preview input limit", maxInputBytes);
 
   const productionDatabase = Array.isArray(config.d1_databases)
     ? config.d1_databases.find((entry) => entry?.binding === "DB")
@@ -47,6 +52,13 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
+  const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
+    ? normalizeEndpoint(config.vars.DENO_PREPARE_ENDPOINT)
+    : undefined;
+  const normalizedPrepare = normalizeOptionalPrepare(prepare);
+  if (normalizedPrepare !== undefined && deno === undefined) {
+    throw new TypeError("Deno Preview prepare configuration requires a tokenizer configuration");
+  }
 
   assertPreviewQuotaAllocation({
     production: {
@@ -66,6 +78,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     ...config.vars,
     QUOTA_LIMIT_STANDARD: standardLimit,
     QUOTA_LIMIT_MINI: miniLimit,
+    MAX_INPUT_BYTES: maxInputBytes.trim(),
     OCTG_UPSTREAM_BASE_URL: upstreamBaseUrl,
   };
   for (const name of DENO_CONFIG_NAMES) {
@@ -82,16 +95,27 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }];
 
   if (deno !== undefined) {
-    validatePreviewDenoConfig(deno, productionEndpoint);
+    validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes);
     config.vars.DENO_TOKENIZER_ENDPOINT = deno.endpoint.trim();
     config.vars.DENO_TOKENIZER_THRESHOLD_BYTES = deno.thresholdBytes.trim();
     config.vars.DENO_TOKENIZER_TIMEOUT_MS = deno.timeoutMs.trim();
   }
 
+  if (normalizedPrepare !== undefined) {
+    validatePreviewPrepareConfig(normalizedPrepare, maxInputBytes, normalizedProductionPrepareEndpoint);
+    config.vars.DENO_PREPARE_ENDPOINT = normalizedPrepare.endpoint.trim();
+    config.vars.DENO_PREPARE_THRESHOLD_BYTES = normalizedPrepare.thresholdBytes.trim();
+  }
+
   return config;
 }
 
-function validatePreviewDenoConfig(deno, productionEndpoint) {
+function normalizeOptionalPrepare(prepare) {
+  if (prepare === undefined) return undefined;
+  return prepare;
+}
+
+function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
   if (deno === null || typeof deno !== "object") {
     throw new TypeError("Deno Preview configuration must be an object");
   }
@@ -107,6 +131,26 @@ function validatePreviewDenoConfig(deno, productionEndpoint) {
   }
   requirePositiveSafeInteger("Deno Preview threshold", thresholdBytes);
   requirePositiveSafeInteger("Deno Preview timeout", timeoutMs);
+  if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
+    throw new TypeError("Deno Preview threshold must not exceed Preview input limit");
+  }
+}
+
+function validatePreviewPrepareConfig(prepare, maxInputBytes, normalizedProductionEndpoint) {
+  if (prepare === null || typeof prepare !== "object") {
+    throw new TypeError("Deno Preview prepare configuration must be an object");
+  }
+
+  const { endpoint, thresholdBytes } = prepare;
+  requireHttpsEndpoint("Deno Preview prepare endpoint", endpoint);
+  if (normalizedProductionEndpoint !== undefined &&
+      new URL(endpoint.trim()).href === normalizedProductionEndpoint) {
+    throw new Error("Production Deno prepare endpoint must not be used in Preview configuration");
+  }
+  requirePositiveSafeInteger("Deno Preview prepare threshold", thresholdBytes);
+  if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
+    throw new TypeError("Deno Preview prepare threshold must not exceed Preview input limit");
+  }
 }
 
 function normalizeEndpoint(value) {
@@ -169,11 +213,21 @@ if (isMainModule()) {
       upstreamBaseUrl: process.env.PREVIEW_UPSTREAM_BASE_URL,
       standardLimit: process.env.PREVIEW_QUOTA_LIMIT_STANDARD,
       miniLimit: process.env.PREVIEW_QUOTA_LIMIT_MINI,
+      maxInputBytes: process.env.PREVIEW_MAX_INPUT_BYTES,
       deno: mode === "deno"
         ? {
             endpoint: process.env.PREVIEW_DENO_TOKENIZER_ENDPOINT,
             thresholdBytes: process.env.PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES,
             timeoutMs: process.env.PREVIEW_DENO_TOKENIZER_TIMEOUT_MS,
+          }
+        : undefined,
+      prepare: mode === "deno" && (
+        process.env.PREVIEW_DENO_PREPARE_ENDPOINT !== undefined ||
+        process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES !== undefined
+      )
+        ? {
+            endpoint: process.env.PREVIEW_DENO_PREPARE_ENDPOINT,
+            thresholdBytes: process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES,
           }
         : undefined,
     });

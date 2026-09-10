@@ -73,6 +73,18 @@ Checked-in defaults live in `apps/gateway-worker/wrangler.jsonc`.
 
 The shared-code fallback pool allowances are 1,000,000 STANDARD and 10,000,000 MINI. A lower runtime value is an intentional operational ceiling, not a contradiction.
 
+`MAX_INPUT_BYTES` is one canonical positive safe-integer deployment value. The
+Production Worker upload and the Production Deno runtime receive the same
+decimal value; the Deno workflow also generates
+`OCTG_EXPECTED_MAX_INPUT_BYTES` from it. The expected value is an assertion,
+not an independently configurable limit. Deno startup fails closed when the
+assertion is missing, invalid, or does not match `MAX_INPUT_BYTES`.
+
+Keep `MAX_INPUT_BYTES` at `1048576` unless an operator deliberately changes the
+canonical value and validates the corresponding resource and acceptance
+results. Preview must use the separate `OCTG_PREVIEW_MAX_INPUT_BYTES` source;
+it must never inherit the Production input-limit variable.
+
 Do not copy instance-specific account IDs, D1 IDs, Access audiences, or upstream URLs from the template repository into another deployment.
 
 ## Deno Tokenizer
@@ -90,6 +102,19 @@ If all four settings are absent, the Deno tokenizer is disabled and tokenization
 
 If only some settings are present, or a value is invalid, the gateway fails closed. It does not silently fall back.
 
+Responses prepare is a separate optional pair:
+
+| Setting | Kind | Purpose |
+| --- | --- | --- |
+| `DENO_PREPARE_ENDPOINT` | variable | HTTPS `/prepare` endpoint |
+| `DENO_PREPARE_THRESHOLD_BYTES` | variable | Responses raw-body threshold for `/prepare` |
+
+Both prepare variables absent means prepare is disabled. The pair is
+all-or-nothing: a one-sided or invalid pair is rejected before request
+dispatch. Prepare-only invalidity affects Responses requests; Chat Completions
+continues to use its existing tokenizer path. A prepare failure never falls
+back to `TokenizerController`.
+
 GitHub/Deno deployment inputs from `.env.example`:
 
 | Variable | Scope |
@@ -105,13 +130,16 @@ See [deno-tokenizer.md](./deno-tokenizer.md).
 
 ### Deno ownership and rollout
 
-For Production GitHub Actions, `DENO_TOKENIZER_ENDPOINT`,
-`DENO_TOKENIZER_THRESHOLD_BYTES`, and `DENO_TOKENIZER_TIMEOUT_MS` are
-Repository Variables. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` is the protected
+For Production GitHub Actions, `MAX_INPUT_BYTES`,
+`DENO_TOKENIZER_ENDPOINT`, `DENO_TOKENIZER_THRESHOLD_BYTES`, and
+`DENO_TOKENIZER_TIMEOUT_MS` are Repository Variables. The optional
+`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are also a pair of
+Production Variables. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` is the protected
 shared-auth source in the `deno-production` Environment. The Production Worker
-workflow validates all four Deno settings before the remote D1 migration, then
-uploads a version with `--keep-vars`, the three explicit Variables, and the
-Worker-side `DENO_TOKENIZER_AUTH_TOKEN` Secret together.
+workflow validates the required tokenizer group and canonical input limit
+before the remote D1 migration, then uploads the exact input limit and only
+adds the two prepare `--var` arguments when both prepare values are present.
+It never uploads empty-string prepare placeholders.
 
 The Deno Deploy workflow uses `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, and the
 separate `DENO_DEPLOY_TOKEN` management Secret. The Deno runtime receives the
@@ -131,8 +159,9 @@ and does not preserve stale Deno variables; do not treat the Production
 workflow as that baseline procedure.
 
 After the Deno-disabled baseline has been verified, deploy the Deno application
-and runtime Secret, configure the complete Worker Deno group, verify the
-tokenizer input ceiling, and run the Deno route canary.
+and runtime Secret, configure the complete Worker Deno group, verify the shared
+tokenizer input ceiling, and run the Deno route canary. Configure the prepare
+pair only after the prepare-disabled baseline has passed its acceptance checks.
 
 Changing a Worker runtime Secret must produce an active version containing both
 the Secret and its required Variables. A Secret-only update is not a complete
@@ -154,6 +183,7 @@ The setup template contains:
 - `OCTG_PREVIEW_BASE_URL`
 - `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD`
 - `OCTG_PREVIEW_QUOTA_LIMIT_MINI`
+- `OCTG_PREVIEW_MAX_INPUT_BYTES`
 - `OCTG_PREVIEW_CLIENT_ID`
 - `OCTG_PREVIEW_CLIENT_NAME`
 - `OCTG_PREVIEW_CLIENT_KEY`
@@ -170,6 +200,19 @@ Preview Deno settings are likewise separated:
 - `DENO_PREVIEW_TOKENIZER_AUTH_TOKEN`
 - `DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES`
 - `DENO_PREVIEW_TOKENIZER_TIMEOUT_MS`
+- `DENO_PREVIEW_PREPARE_ENDPOINT`
+- `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES`
+
+Preview prepare names have three deliberately distinct layers:
+
+| Layer | Endpoint | Threshold |
+| --- | --- | --- |
+| `.env` and GitHub Environment `preview` variables | `DENO_PREVIEW_PREPARE_ENDPOINT` | `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` |
+| Workflow/process environment | `PREVIEW_DENO_PREPARE_ENDPOINT` | `PREVIEW_DENO_PREPARE_THRESHOLD_BYTES` |
+| Generated Worker bindings | `DENO_PREPARE_ENDPOINT` | `DENO_PREPARE_THRESHOLD_BYTES` |
+
+The first layer is optional only when both values are absent. A complete pair
+is copied to the generated Worker config without empty placeholders.
 
 Do not reuse Production client keys, peppers, D1 state, or Deno shared-auth values in Preview.
 

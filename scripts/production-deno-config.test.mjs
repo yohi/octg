@@ -9,18 +9,24 @@ import {
 
 const validatorPath = fileURLToPath(new URL("./production-deno-config.mjs", import.meta.url));
 
+const completeProductionConfig = {
+  MAX_INPUT_BYTES: "1048576",
+  DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
+  DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
+  DENO_TOKENIZER_TIMEOUT_MS: "5000",
+};
+
 test("accepts an HTTPS endpoint and positive integer settings", () => {
-  assert.deepEqual(validateProductionDenoConfig({
-    DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
-    DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
-    DENO_TOKENIZER_TIMEOUT_MS: "5000",
-    DENO_PREPARE_ENDPOINT: "https://tokenizer.example/prepare",
-    DENO_PREPARE_THRESHOLD_BYTES: "4096",
-  }), { valid: true, missing: [], invalid: [] });
+  assert.deepEqual(validateProductionDenoConfig(completeProductionConfig), {
+    valid: true,
+    missing: [],
+    invalid: [],
+  });
 });
 
 test("allows the optional prepare pair to be disabled when both values are absent", () => {
   assert.deepEqual(validateProductionDenoConfig({
+    MAX_INPUT_BYTES: "1048576",
     DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
     DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
@@ -29,6 +35,7 @@ test("allows the optional prepare pair to be disabled when both values are absen
 
 test("reports the missing member when the optional prepare pair is partial", () => {
   const base = {
+    MAX_INPUT_BYTES: "1048576",
     DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
     DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
@@ -39,21 +46,22 @@ test("reports the missing member when the optional prepare pair is partial", () 
     DENO_PREPARE_ENDPOINT: "https://tokenizer.example/prepare",
   }), {
     valid: false,
-    missing: ["DENO_PREPARE_THRESHOLD_BYTES"],
-    invalid: [],
+    missing: [],
+    invalid: ["DENO_PREPARE_ENDPOINT"],
   });
   assert.deepEqual(validateProductionDenoConfig({
     ...base,
     DENO_PREPARE_THRESHOLD_BYTES: "4096",
   }), {
     valid: false,
-    missing: ["DENO_PREPARE_ENDPOINT"],
-    invalid: [],
+    missing: [],
+    invalid: ["DENO_PREPARE_THRESHOLD_BYTES"],
   });
 });
 
 test("rejects invalid values in a complete prepare pair", () => {
   const base = {
+    MAX_INPUT_BYTES: "1048576",
     DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
     DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
@@ -78,9 +86,96 @@ test("reports every missing required variable by name", () => {
       "DENO_TOKENIZER_ENDPOINT",
       "DENO_TOKENIZER_THRESHOLD_BYTES",
       "DENO_TOKENIZER_TIMEOUT_MS",
+      "MAX_INPUT_BYTES",
     ],
     invalid: [],
   });
+});
+
+test("accepts an absent prepare pair and a complete prepare pair", () => {
+  assert.deepEqual(validateProductionDenoConfig(completeProductionConfig), {
+    valid: true,
+    missing: [],
+    invalid: [],
+  });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    DENO_PREPARE_ENDPOINT: "https://prepare.example/prepare",
+    DENO_PREPARE_THRESHOLD_BYTES: "700000",
+  }), {
+    valid: true,
+    missing: [],
+    invalid: [],
+  });
+});
+
+test("requires MAX_INPUT_BYTES even when the tokenizer group is complete", () => {
+  const { MAX_INPUT_BYTES: _ignored, ...withoutInputLimit } = completeProductionConfig;
+
+  assert.deepEqual(validateProductionDenoConfig(withoutInputLimit), {
+    valid: false,
+    missing: ["MAX_INPUT_BYTES"],
+    invalid: [],
+  });
+});
+
+test("rejects a one-sided prepare pair before deployment", () => {
+  for (const [name, value] of [
+    ["DENO_PREPARE_ENDPOINT", "https://prepare.example/prepare"],
+    ["DENO_PREPARE_THRESHOLD_BYTES", "700000"],
+  ]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      [name]: value,
+    });
+    assert.deepEqual(result, { valid: false, missing: [], invalid: [name] });
+  }
+});
+
+test("rejects empty prepare placeholders instead of disabling prepare", () => {
+  for (const [endpoint, threshold] of [
+    ["", ""],
+    ["", "700000"],
+    ["https://prepare.example/prepare", ""],
+  ]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      DENO_PREPARE_ENDPOINT: endpoint,
+      DENO_PREPARE_THRESHOLD_BYTES: threshold,
+    });
+
+    assert.equal(result.valid, false);
+    assert.ok(result.invalid.includes("DENO_PREPARE_ENDPOINT") || endpoint === "https://prepare.example/prepare");
+    assert.ok(result.invalid.includes("DENO_PREPARE_THRESHOLD_BYTES") || threshold === "700000");
+  }
+});
+
+test("rejects invalid prepare settings and an independently supplied expected limit", () => {
+  for (const [name, value] of [
+    ["DENO_PREPARE_ENDPOINT", "http://prepare.example/prepare"],
+    ["DENO_PREPARE_ENDPOINT", "https://user:password@prepare.example/prepare"],
+    ["DENO_PREPARE_THRESHOLD_BYTES", "0"],
+    ["DENO_PREPARE_THRESHOLD_BYTES", "1048577"],
+    ["OCTG_EXPECTED_MAX_INPUT_BYTES", "1048576"],
+  ]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      DENO_PREPARE_ENDPOINT: "https://prepare.example/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+      [name]: value,
+    });
+    assert.deepEqual(result, { valid: false, missing: [], invalid: [name] });
+  }
+});
+
+test("requires one positive safe-integer canonical input limit", () => {
+  for (const value of ["0", "1.5", "1e6", "9007199254740992"]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      MAX_INPUT_BYTES: value,
+    });
+    assert.deepEqual(result, { valid: false, missing: [], invalid: ["MAX_INPUT_BYTES"] });
+  }
 });
 
 test("rejects non-HTTPS endpoints and URL credentials", () => {
@@ -90,9 +185,8 @@ test("rejects non-HTTPS endpoints and URL credentials", () => {
     "not-a-url",
   ]) {
     const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
       DENO_TOKENIZER_ENDPOINT: endpoint,
-      DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
-      DENO_TOKENIZER_TIMEOUT_MS: "5000",
     });
     assert.deepEqual(result, {
       valid: false,
@@ -110,9 +204,7 @@ test("rejects zero, non-decimal, and unsafe numeric settings", () => {
     ["DENO_TOKENIZER_TIMEOUT_MS", "9007199254740992"],
   ]) {
     const result = validateProductionDenoConfig({
-      DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
-      DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
-      DENO_TOKENIZER_TIMEOUT_MS: "5000",
+      ...completeProductionConfig,
       [name]: value,
     });
     assert.deepEqual(result, { valid: false, missing: [], invalid: [name] });
@@ -124,6 +216,7 @@ test("reports non-string values as invalid instead of throwing", () => {
     DENO_TOKENIZER_ENDPOINT: 123,
     DENO_TOKENIZER_THRESHOLD_BYTES: null,
     DENO_TOKENIZER_TIMEOUT_MS: true,
+    MAX_INPUT_BYTES: false,
   }), {
     valid: false,
     missing: [],
@@ -131,6 +224,7 @@ test("reports non-string values as invalid instead of throwing", () => {
       "DENO_TOKENIZER_ENDPOINT",
       "DENO_TOKENIZER_THRESHOLD_BYTES",
       "DENO_TOKENIZER_TIMEOUT_MS",
+      "MAX_INPUT_BYTES",
     ],
   });
 });
@@ -151,6 +245,7 @@ test("CLI exits with a value-free error when required variables are missing", ()
   delete environment.DENO_TOKENIZER_ENDPOINT;
   delete environment.DENO_TOKENIZER_THRESHOLD_BYTES;
   delete environment.DENO_TOKENIZER_TIMEOUT_MS;
+  delete environment.MAX_INPUT_BYTES;
 
   const result = spawnSync(process.execPath, [validatorPath], {
     env: environment,
@@ -160,6 +255,6 @@ test("CLI exits with a value-free error when required variables are missing", ()
   assert.equal(result.status, 1);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /octg\.production_deno_config_error/);
-  assert.match(result.stderr, /missing: DENO_TOKENIZER_ENDPOINT, DENO_TOKENIZER_THRESHOLD_BYTES, DENO_TOKENIZER_TIMEOUT_MS/);
+  assert.match(result.stderr, /missing: DENO_TOKENIZER_ENDPOINT, DENO_TOKENIZER_THRESHOLD_BYTES, DENO_TOKENIZER_TIMEOUT_MS, MAX_INPUT_BYTES/);
   assert.doesNotMatch(result.stderr, /https|4096|5000|password/);
 });

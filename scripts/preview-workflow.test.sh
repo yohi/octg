@@ -59,10 +59,15 @@ for (const name of [
   "DENO_TOKENIZER_ENDPOINT",
   "DENO_TOKENIZER_THRESHOLD_BYTES",
   "DENO_TOKENIZER_TIMEOUT_MS",
+  "DENO_PREPARE_ENDPOINT",
+  "DENO_PREPARE_THRESHOLD_BYTES",
 ]) {
   if (!previewConfig.includes(`delete config.vars.${name};`)) {
     throw new Error(`Preview config must not inherit the Production ${name} variable`);
   }
+}
+if (!previewConfig.includes("config.vars.MAX_INPUT_BYTES = process.env.PREVIEW_MAX_INPUT_BYTES")) {
+  throw new Error("Preview config must map the canonical input limit");
 }
 
 const restore = blockBetween(
@@ -130,6 +135,13 @@ const denoSmoke = blockBetween("  deno-version-smoke:", "  version-smoke-fork:")
 if (!denoSmoke.includes("needs: version-smoke")) {
   throw new Error("Deno smoke must run after the existing DO-only Preview smoke");
 }
+const denoValidation = blockBetween(
+  "      - name: Validate Preview Deno configuration",
+  "      - name: Prepare isolated Deno preview config",
+);
+if (denoValidation.includes("unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES")) {
+  throw new Error("Deno configuration validation must retain empty optional prepare variables");
+}
 if (!denoSmoke.includes("github.event.pull_request.head.repo.fork != true")) {
   throw new Error("credential-bearing Deno smoke must skip fork PRs");
 }
@@ -142,12 +154,39 @@ if (!denoSmoke.includes("group: octg-preview-deno")) {
 for (const name of [
   "DENO_PREVIEW_DEPLOY_ORG",
   "DENO_PREVIEW_DEPLOY_APP",
+  "OCTG_PREVIEW_MAX_INPUT_BYTES",
   "DENO_PREVIEW_TOKENIZER_ENDPOINT",
   "DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES",
   "DENO_PREVIEW_TOKENIZER_TIMEOUT_MS",
+  "DENO_PREVIEW_PREPARE_ENDPOINT",
+  "DENO_PREVIEW_PREPARE_THRESHOLD_BYTES",
 ]) {
   if (!denoSmoke.includes(`vars.${name}`)) {
     throw new Error(`Deno smoke must source ${name} from Preview Variables`);
+  }
+}
+for (const name of [
+  "PREVIEW_MAX_INPUT_BYTES",
+  "PREVIEW_DENO_PREPARE_ENDPOINT",
+  "PREVIEW_DENO_PREPARE_THRESHOLD_BYTES",
+  "PREVIEW_DENO_PREPARE_CONFIGURED",
+]) {
+  if (!denoSmoke.includes(name)) {
+    throw new Error(`Deno smoke must propagate ${name}`);
+  }
+}
+if (!denoSmoke.includes("unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES")) {
+  throw new Error("Deno smoke must unset absent prepare variables before config validation/mapping");
+}
+if (!denoSmoke.includes("Preview prepare variables must be supplied together")) {
+  throw new Error("Deno smoke must reject a one-sided prepare pair");
+}
+if (!denoSmoke.includes("node scripts/preview-worker-config.mjs")) {
+  throw new Error("Deno smoke must generate the Worker config through the prepare-aware mapper");
+}
+for (const name of ["MAX_INPUT_BYTES=${maxInputBytes}", "OCTG_EXPECTED_MAX_INPUT_BYTES=${maxInputBytes}"]) {
+  if (!denoSmoke.includes(name)) {
+    throw new Error(`Deno smoke must generate the isolated runtime ${name} assertion`);
   }
 }
 for (const name of [

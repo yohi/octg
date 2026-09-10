@@ -11,9 +11,12 @@ const baseConfig = {
   vars: {
     QUOTA_LIMIT_STANDARD: "1000000",
     QUOTA_LIMIT_MINI: "9950000",
+    MAX_INPUT_BYTES: "1048576",
     DENO_TOKENIZER_ENDPOINT: "https://production-tokenizer.example/tokenize",
     DENO_TOKENIZER_THRESHOLD_BYTES: "1",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
+    DENO_PREPARE_ENDPOINT: "https://production-tokenizer.example/prepare",
+    DENO_PREPARE_THRESHOLD_BYTES: "1",
   },
   triggers: { crons: ["5 0 * * *"] },
   d1_databases: [{
@@ -32,6 +35,7 @@ const validOptions = {
   upstreamBaseUrl: "https://gateway.example.test/openai",
   standardLimit: "0",
   miniLimit: "50000",
+  maxInputBytes: "1048576",
 };
 
 test("runs the CLI when the entrypoint path is relative", () => {
@@ -55,10 +59,13 @@ test("builds a DO-only Preview config without Deno values", () => {
   assert.equal(config.name, "octg-gateway-preview");
   assert.equal(config.vars.QUOTA_LIMIT_STANDARD, "0");
   assert.equal(config.vars.QUOTA_LIMIT_MINI, "50000");
+  assert.equal(config.vars.MAX_INPUT_BYTES, "1048576");
   assert.equal(config.vars.OCTG_UPSTREAM_BASE_URL, "https://gateway.example.test/openai");
   assert.equal(config.vars.DENO_TOKENIZER_ENDPOINT, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_THRESHOLD_BYTES, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_TIMEOUT_MS, undefined);
+  assert.equal(config.vars.DENO_PREPARE_ENDPOINT, undefined);
+  assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, undefined);
   assert.equal(config.triggers, undefined);
   assert.equal(config.d1_databases[0].database_id, validOptions.databaseId);
   assert.notEqual(config, baseConfig);
@@ -81,6 +88,88 @@ test("builds a Deno Preview config only from Preview values", () => {
   assert.equal(config.vars.DENO_TOKENIZER_TIMEOUT_MS, "5000");
   assert.equal(config.vars.DENO_TOKENIZER_AUTH_TOKEN, undefined);
   assert.equal(config.vars.DENO_TOKENIZER_ENDPOINT.includes("production"), false);
+});
+
+test("maps the Preview input limit and complete prepare pair to Worker bindings", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    deno: {
+      endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+      thresholdBytes: "1",
+      timeoutMs: "5000",
+    },
+    prepare: {
+      endpoint: "https://preview-deno.test/prepare",
+      thresholdBytes: "700000",
+    },
+  });
+
+  assert.equal(config.vars.MAX_INPUT_BYTES, "1048576");
+  assert.equal(config.vars.DENO_PREPARE_ENDPOINT, "https://preview-deno.test/prepare");
+  assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, "700000");
+});
+
+test("omits both generated prepare bindings when the pair is absent", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    deno: {
+      endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+      thresholdBytes: "1",
+      timeoutMs: "5000",
+    },
+    prepare: undefined,
+  });
+
+  assert.equal(config.vars.DENO_PREPARE_ENDPOINT, undefined);
+  assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, undefined);
+});
+
+test("rejects empty-string prepare placeholders", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      deno: {
+        endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+        thresholdBytes: "1",
+        timeoutMs: "5000",
+      },
+      prepare: { endpoint: "", thresholdBytes: "" },
+    }),
+    /Deno Preview prepare/,
+  );
+});
+
+test("rejects a one-sided Preview prepare pair", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      prepare: { endpoint: "https://preview-deno.test/prepare" },
+    }),
+    /Deno Preview prepare/,
+  );
+});
+
+test("rejects a complete Preview prepare pair without a tokenizer group", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      prepare: {
+        endpoint: "https://preview-deno.test/prepare",
+        thresholdBytes: "700000",
+      },
+    }),
+    /tokenizer/i,
+  );
+});
+
+test("rejects an invalid Preview input limit", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      maxInputBytes: "0",
+    }),
+    /Preview input limit/,
+  );
 });
 
 test("rejects non-HTTPS or invalid Preview Deno settings", () => {
@@ -137,6 +226,39 @@ test("rejects Preview endpoints equivalent to the Production endpoint", () => {
         },
       }),
       /Production Deno endpoint/,
+    );
+  }
+});
+
+test("rejects Preview prepare endpoints equivalent to the Production endpoint", () => {
+  for (const [productionEndpoint, previewEndpoint] of [
+    [
+      "https://production-tokenizer.example/prepare",
+      "HTTPS://PRODUCTION-TOKENIZER.EXAMPLE/prepare",
+    ],
+    [
+      "https://production-tokenizer.example:443/prepare",
+      "https://production-tokenizer.example/prepare",
+    ],
+  ]) {
+    const config = {
+      ...baseConfig,
+      vars: { ...baseConfig.vars, DENO_PREPARE_ENDPOINT: productionEndpoint },
+    };
+    assert.throws(
+      () => buildPreviewWorkerConfig(config, {
+        ...validOptions,
+        deno: {
+          endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+          thresholdBytes: "1",
+          timeoutMs: "5000",
+        },
+        prepare: {
+          endpoint: previewEndpoint,
+          thresholdBytes: "700000",
+        },
+      }),
+      /Production Deno prepare endpoint/,
     );
   }
 });
