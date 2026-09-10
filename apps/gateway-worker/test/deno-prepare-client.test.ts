@@ -354,41 +354,28 @@ describe("prepareWithDeno — error body 4096-byte boundary", () => {
 /* ---------- 500 and other statuses → unavailable ---------- */
 
 describe("prepareWithDeno — 500 and other statuses → unavailable", () => {
-  it("returns unavailable upstream_status for 500 with no body (Deno body-read failure)", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(null, { status: 500 }),
-    );
+  const serverErrorCases = [
+    { name: "with no body", code: undefined },
+    { name: "with an invalid_body code body", code: "invalid_body" },
+    { name: "with a request_too_large code body", code: "request_too_large" },
+  ] as const;
 
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
+  it.each(serverErrorCases)(
+    "returns unavailable upstream_status for 500 $name",
+    async ({ code }) => {
+      const request = makeSimpleRequest(bodyText);
+      const fetchImpl = vi.fn(async () => {
+        const init: ResponseInit = { status: 500 };
+        if (code !== undefined) {
+          init.headers = { "content-type": "application/json" };
+        }
+        return new Response(code === undefined ? null : makeErrorBody(code), init);
+      });
 
-  it("returns unavailable upstream_status for 500 even with an allowlisted-looking code body", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(makeErrorBody("invalid_body"), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
-
-  it("returns unavailable upstream_status for 500 with request_too_large code body", async () => {
-    const request = makeSimpleRequest(bodyText);
-    const fetchImpl = vi.fn(async () =>
-      new Response(makeErrorBody("request_too_large"), {
-        status: 500,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
-    const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
-    expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
-  });
+      const outcome = await prepareWithDeno({ ...baseArgs, request, fetchImpl });
+      expect(outcome).toEqual({ kind: "unavailable", failure: "upstream_status" });
+    },
+  );
 
   it.each([
     [401, "invalid_body"],

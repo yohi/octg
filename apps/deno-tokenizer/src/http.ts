@@ -277,16 +277,16 @@ function generateMarker(): string {
   const bytes = new Uint8Array(markerHexBytes);
   crypto.getRandomValues(bytes);
   let hex = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    hex += bytes[i].toString(16).padStart(2, "0");
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, "0");
   }
   return `octg_prepare_${hex}`;
 }
 
 function base64urlEncode(bytes: Uint8Array): string {
   let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
+  for (const byte of bytes) {
+    binary += String.fromCodePoint(byte);
   }
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }

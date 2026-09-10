@@ -722,61 +722,55 @@ Deno.test("prepare: shared limit applies to both raw-body rejection and normaliz
 
 // --- Generic text normalization for user/system/developer/assistant and function_call_output ---
 
-Deno.test("prepare: normalizes text parts for user role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const serialized = await response.text();
-  const parsed = JSON.parse(serialized);
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
+const textNormalizationCases = [
+  {
+    name: "user role",
+    input: { role: "user", content: [{ type: "text", text: "hi" }] },
+    path: "content",
+    expectedType: "input_text",
+  },
+  {
+    name: "system role",
+    input: { role: "system", content: [{ type: "text", text: "sys" }] },
+    path: "content",
+    expectedType: "input_text",
+  },
+  {
+    name: "developer role",
+    input: { role: "developer", content: [{ type: "text", text: "dev" }] },
+    path: "content",
+    expectedType: "input_text",
+  },
+  {
+    name: "assistant role",
+    input: { role: "assistant", content: [{ type: "text", text: "asst" }] },
+    path: "content",
+    expectedType: "output_text",
+  },
+  {
+    name: "function_call_output",
+    input: {
+      type: "function_call_output",
+      call_id: "c1",
+      output: [{ type: "text", text: "result" }],
+    },
+    path: "output",
+    expectedType: "input_text",
+  },
+] as const;
 
-Deno.test("prepare: normalizes text parts for system role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "system", content: [{ type: "text", text: "sys" }] }] }),
+for (const testCase of textNormalizationCases) {
+  Deno.test(`prepare: normalizes text parts for ${testCase.name}`, async () => {
+    const fixture = createFixture();
+    const request = prepareRequest({
+      body: JSON.stringify({ model: "m", input: [testCase.input] }),
+    });
+    const response = await fixture.handler(request);
+    assertEquals(response.status, 200);
+    const parsed = JSON.parse(await response.text());
+    assertEquals(parsed.input[0][testCase.path][0].type, testCase.expectedType);
   });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
-
-Deno.test("prepare: normalizes text parts for developer role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "developer", content: [{ type: "text", text: "dev" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
-
-Deno.test("prepare: normalizes text parts for assistant role (text → output_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "assistant", content: [{ type: "text", text: "asst" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "output_text");
-});
-
-Deno.test("prepare: normalizes text parts for function_call_output (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ type: "function_call_output", call_id: "c1", output: [{ type: "text", text: "result" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].output[0].type, "input_text");
-});
+}
 
 // --- Marker regeneration on collision ---
 
