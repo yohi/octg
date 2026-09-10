@@ -955,18 +955,7 @@ export async function handleProxy(
           insertSucceeded ? setReservedTokens(env, requestId, reservation) : undefined).catch(() => undefined));
       }
 
-      // In-flight admission
-      const lease = await stub.acquireInFlight(
-        requestId,
-        resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS),
-        resolveInFlightLeaseTtlMs(env.IN_FLIGHT_LEASE_TTL_MS),
-      );
-      if (lease.ok) {
-        inFlightAcquired = true;
-        inFlightLease = lease.lease;
-      }
-
-      if (prepareTimedOut) {
+      const rejectPrepareTimeout = async (): Promise<Response> => {
         await cancelPreparedBeforeUpstream?.("exception", {
           route: "error:pre_upstream",
           quotaReserved: preparedQuotaReserved,
@@ -983,6 +972,21 @@ export async function handleProxy(
         }
         completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
         return errorResponse(errInternal(requestId));
+      };
+
+      // In-flight admission
+      const lease = await stub.acquireInFlight(
+        requestId,
+        resolveMaxInFlightRequests(env.MAX_IN_FLIGHT_REQUESTS),
+        resolveInFlightLeaseTtlMs(env.IN_FLIGHT_LEASE_TTL_MS),
+      );
+      if (lease.ok) {
+        inFlightAcquired = true;
+        inFlightLease = lease.lease;
+      }
+
+      if (prepareTimedOut) {
+        return rejectPrepareTimeout();
       }
 
       if (!lease.ok) {
@@ -998,22 +1002,7 @@ export async function handleProxy(
       }
 
       if (prepareTimedOut) {
-        await cancelPreparedBeforeUpstream("exception", {
-          route: "error:pre_upstream",
-          quotaReserved: preparedQuotaReserved,
-          upstreamReached: false,
-        });
-        if (inFlightAcquired && inFlightLease !== undefined) {
-          await releaseInFlightBestEffort(stub, inFlightLease);
-          inFlightAcquired = false;
-          inFlightLease = undefined;
-        }
-        if (reservationState === "resolved") {
-          await stub.release(requestId).catch(() => undefined);
-          reservationState = "none";
-        }
-        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
-        return errorResponse(errInternal(requestId));
+        return rejectPrepareTimeout();
       }
 
       // Build marker transform + observer, then call upstream
