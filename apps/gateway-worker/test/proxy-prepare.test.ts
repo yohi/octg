@@ -96,6 +96,48 @@ function preparedStreamResponse(
   });
 }
 
+function stubPreparedResponses(body: string): {
+  readonly calls: string[];
+  readonly fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>;
+} {
+  const calls: string[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+    if (String(input) === "https://deno.test/prepare") {
+      calls.push("prepare");
+      return preparedResponse(body);
+    }
+    calls.push("upstream");
+    await new Response(init?.body).text();
+    return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
+  });
+  vi.stubGlobal("fetch", fetchImpl);
+  return { calls, fetchImpl };
+}
+
+function stubLegacyResponses(): {
+  readonly calls: string[];
+  readonly fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>;
+} {
+  const calls: string[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input);
+    if (url === "https://deno.test/tokenize") {
+      calls.push("tokenize");
+      return new Response(JSON.stringify({ baseTokenCount: 2 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    calls.push("upstream");
+    return new Response(JSON.stringify({ usage: { total_tokens: 9 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", fetchImpl);
+  return { calls, fetchImpl };
+}
+
 function standardQuota() {
   const day = new Date().toISOString().slice(0, 10);
   return env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
@@ -315,17 +357,7 @@ describe("prepare routing", () => {
   it("marks the reservation uncertain when the resolved body is missing its marker", async () => {
     const quota = standardQuota();
     const before = await quota.getState();
-    const calls: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      if (String(input) === "https://deno.test/prepare") {
-        calls.push("prepare");
-        return preparedResponse(JSON.stringify({ max_output_tokens: 64 }));
-      }
-      calls.push("upstream");
-      await new Response(init?.body).text();
-      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
-    });
-    vi.stubGlobal("fetch", fetchImpl);
+    const { calls, fetchImpl } = stubPreparedResponses(JSON.stringify({ max_output_tokens: 64 }));
 
     const response = await responsesRequest();
 
@@ -339,20 +371,10 @@ describe("prepare routing", () => {
   it("marks the reservation uncertain when the resolved body repeats its marker", async () => {
     const quota = standardQuota();
     const before = await quota.getState();
-    const calls: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      if (String(input) === "https://deno.test/prepare") {
-        calls.push("prepare");
-        return preparedResponse(JSON.stringify({
-          max_output_tokens: metadata.outputMarker,
-          duplicate: metadata.outputMarker,
-        }));
-      }
-      calls.push("upstream");
-      await new Response(init?.body).text();
-      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
-    });
-    vi.stubGlobal("fetch", fetchImpl);
+    const { calls, fetchImpl } = stubPreparedResponses(JSON.stringify({
+      max_output_tokens: metadata.outputMarker,
+      duplicate: metadata.outputMarker,
+    }));
 
     const response = await responsesRequest();
 
@@ -383,23 +405,7 @@ describe("prepare routing", () => {
 
   it("uses the legacy Responses path below the prepare threshold", async () => {
     Object.defineProperty(env, "DENO_PREPARE_THRESHOLD_BYTES", { value: "10000", configurable: true });
-    const calls: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input);
-      if (url === "https://deno.test/tokenize") {
-        calls.push("tokenize");
-        return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      calls.push("upstream");
-      return new Response(JSON.stringify({ usage: { total_tokens: 9 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    vi.stubGlobal("fetch", fetchImpl);
+    const { calls, fetchImpl } = stubLegacyResponses();
 
     const response = await responsesRequest();
 
@@ -408,23 +414,7 @@ describe("prepare routing", () => {
   });
 
   it("uses the legacy Responses path for a malformed declared content length", async () => {
-    const calls: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input);
-      if (url === "https://deno.test/tokenize") {
-        calls.push("tokenize");
-        return new Response(JSON.stringify({ baseTokenCount: 2 }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      calls.push("upstream");
-      return new Response(JSON.stringify({ usage: { total_tokens: 9 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    vi.stubGlobal("fetch", fetchImpl);
+    const { calls, fetchImpl } = stubLegacyResponses();
 
     const response = await responsesRequest({ "content-length": "not-a-number" });
 
