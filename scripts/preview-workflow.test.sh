@@ -135,6 +135,13 @@ const denoSmoke = blockBetween("  deno-version-smoke:", "  version-smoke-fork:")
 if (!denoSmoke.includes("needs: version-smoke")) {
   throw new Error("Deno smoke must run after the existing DO-only Preview smoke");
 }
+const denoValidation = blockBetween(
+  "      - name: Validate Preview Deno configuration",
+  "      - name: Prepare isolated Deno preview config",
+);
+if (denoValidation.includes("unset PREVIEW_DENO_PREPARE_ENDPOINT PREVIEW_DENO_PREPARE_THRESHOLD_BYTES")) {
+  throw new Error("Deno configuration validation must retain empty optional prepare variables");
+}
 if (!denoSmoke.includes("github.event.pull_request.head.repo.fork != true")) {
   throw new Error("credential-bearing Deno smoke must skip fork PRs");
 }
