@@ -52,6 +52,23 @@ curl() {
     return 0
   fi
 
+  if [[ "${SMOKE_TEST_MODE:-success}" == "eventual-error" ]]; then
+    local attempt
+    attempt=$(<"$SMOKE_TEST_STATE_FILE")
+    attempt=$((attempt + 1))
+    printf '%s' "$attempt" > "$SMOKE_TEST_STATE_FILE"
+    if [[ "$attempt" -le "${SMOKE_TEST_INITIAL_FAILURES:-3}" ]]; then
+      printf 'X-OCTG-Request-Id: req_01ARZ3NDEKTSV4RRFFQ69G5FAV\r\n' > "$headers_file"
+      printf '{"error":{"code":"invalid_api_key"}}\n' > "$response_file"
+      printf '401'
+      return 0
+    fi
+    printf 'X-OCTG-Request-Id: req_01ARZ3NDEKTSV4RRFFQ69G5FAV\r\nX-OCTG-Route: error:internal_error\r\nX-OCTG-Worker-Version: version-id\r\n' > "$headers_file"
+    printf '{"error":{"code":"internal_error"}}\n' > "$response_file"
+    printf '500'
+    return 0
+  fi
+
   printf 'X-OCTG-Worker-Version: version-id\r\n' > "$headers_file"
   printf '{"choices":[{"message":{"content":"OK"}}]}\n' > "$response_file"
   printf '200'
@@ -91,3 +108,26 @@ SMOKE_TEST_MODE=expected-error \
   OCTG_VERSION_OVERRIDE=version-id \
   OCTG_VERSION_OVERRIDE_WORKER_NAME=preview-worker \
   bash "$(dirname "$0")/ci-smoke-test.sh" "https://preview.example" "gpt-5-mini"
+
+eventual_state_file=$(mktemp)
+printf '0' > "$eventual_state_file"
+if output=$(SMOKE_TEST_MODE=eventual-error \
+  SMOKE_TEST_INITIAL_FAILURES=3 \
+  SMOKE_TEST_STATE_FILE="$eventual_state_file" \
+  OCTG_EXPECTED_HTTP_STATUS=500 \
+  OCTG_SMOKE_API_KEY=octg_sk_test \
+  OCTG_VERSION_OVERRIDE=version-id \
+  OCTG_VERSION_OVERRIDE_WORKER_NAME=preview-worker \
+  bash "$(dirname "$0")/ci-smoke-test.sh" "https://preview.example" "gpt-5-mini" 2>&1); then
+  :
+else
+  status=$?
+  rm -f "$eventual_state_file"
+  printf 'expected smoke success after transient Version Override failures (status %s)\n' "$status" >&2
+  exit 1
+fi
+rm -f "$eventual_state_file"
+[[ "$output" == *"smoke test passed (attempt 4)"* ]] || {
+  printf 'smoke test did not retry until Version Override became available\n' >&2
+  exit 1
+}

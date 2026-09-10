@@ -116,7 +116,9 @@ if [[ -n "${OCTG_VERSION_OVERRIDE:-}" ]]; then
   )
 fi
 
-for attempt in 1 2 3; do
+# Version Override propagation can take longer than the initial 20-second window.
+max_attempts=6
+for ((attempt = 1; attempt <= max_attempts; attempt += 1)); do
   : > "$response_file"
   : > "$headers_file"
   status="000"
@@ -158,10 +160,10 @@ for attempt in 1 2 3; do
   fi
 
   echo "attempt ${attempt}: http_status=${status} request_id=${request_id} message=${failure_message} route=${failure_route} worker_version=${failure_worker_version}" >&2
-  if [[ "$attempt" -lt 3 ]]; then
+  if [[ "$attempt" -lt "$max_attempts" ]]; then
     sleep 10
   fi
 done
 
-echo "smoke test failed after 3 attempts" >&2
+echo "smoke test failed after ${max_attempts} attempts" >&2
 exit 1
