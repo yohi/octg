@@ -665,7 +665,7 @@ absent, authenticated `/health` and `/prepare` verification, sanitized
 approximately 74k-token Responses canaries at concurrency 1 and 2, and a
 resource-stage result with no `exceededCpu` outcome. A prepare rejection or
 unavailable result must reach neither quota reservation nor upstream. Rollback
-must target a known Worker version that predates prepare, or a reviewed
-prepare-absent version, and must repeat the Chat/Responses route checks.
+must target a known Worker version that predates prepare and must repeat the
+Chat/Responses route checks.
 
 The specification must be reviewed whenever those tests or externally visible contracts change.

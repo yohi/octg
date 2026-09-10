@@ -251,10 +251,10 @@ cannot be deployed, repair forward with a new deployment; do not rewrite an
 already applied migration tag.
 
 For a prepare incident, first restore a known Worker version that predates
-prepare, or deploy the reviewed prepare-absent configuration. Restore the
-captured 100% version using the versioned rollback procedure, then verify
-`/health`, Chat Completions, Responses legacy routing, `/quota`, and Admin
-Access. Do not leave a one-sided prepare pair during rollback.
+prepare. Restore the captured 100% version using the versioned rollback
+procedure, then verify `/health`, Chat Completions, Responses legacy routing,
+`/quota`, and Admin Access. Do not leave a one-sided prepare pair during
+rollback.
 
 After rollback:
 

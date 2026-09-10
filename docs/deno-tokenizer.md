@@ -281,9 +281,8 @@ Do not leave a partially configured group as a rollback technique; partial confi
 
 To disable prepare, deploy a Worker configuration with both prepare variables
 absent. Do not pass empty-string `--var` values. If a prepare rollout must be
-reverted, restore a known Worker version that predates prepare, or upload the
-prepare-absent version, then verify that Chat Completions is unchanged and
-Responses uses the legacy tokenization route.
+reverted, restore a known Worker version that predates prepare, then verify that
+Chat Completions is unchanged and Responses uses the legacy tokenization route.
 
 Disabling Deno returns all accepted inputs to the Cloudflare `TokenizerController` path, so validate Worker resource behavior before sending large traffic.
 
