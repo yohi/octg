@@ -138,6 +138,14 @@ EOF
 chmod 700 "$TEMP_DIR/wrangler"
 cat > "$TEMP_DIR/gh" <<'EOF'
 #!/usr/bin/env zsh
+if [[ "$1" == variable && "$2" == list ]]; then
+  if [[ "$*" == *"DENO_PREVIEW_PREPARE_ENDPOINT"* && "${OCTG_TEST_GH_VARIABLE_NAMES:-}" == *"DENO_PREVIEW_PREPARE_ENDPOINT"* ]]; then
+    print -r -- "DENO_PREVIEW_PREPARE_ENDPOINT"
+  fi
+  if [[ "$*" == *"DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* && "${OCTG_TEST_GH_VARIABLE_NAMES:-}" == *"DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]]; then
+    print -r -- "DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
+  fi
+fi
 print -r -- "$*" >> "$OCTG_TEST_GH_LOG"
 if [[ "$1" == secret && "$2" == set ]]; then
   while IFS= read -r line; do
@@ -223,12 +231,16 @@ no_match_log="$(< "$TEMP_DIR/no-match-wrangler.log")"
 }
 
 setup_source="$(< "$SCRIPT_PATH")"
-[[ "$setup_source" == *'gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo "$GITHUB_REPOSITORY" 2>/dev/null || true'* ]] || {
+[[ "$setup_source" == *"delete_github_variable_if_configured DENO_PREVIEW_PREPARE_ENDPOINT"* ]] || {
   print -u2 "setup-preview does not unset the stale prepare endpoint variable"
   exit 1
 }
-[[ "$setup_source" == *'gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES --env preview --repo "$GITHUB_REPOSITORY" 2>/dev/null || true'* ]] || {
+[[ "$setup_source" == *"delete_github_variable_if_configured DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
   print -u2 "setup-preview does not unset the stale prepare threshold variable"
+  exit 1
+}
+[[ "$setup_source" != *"--confirm"* ]] || {
+  print -u2 "setup-preview uses the unsupported --confirm option"
   exit 1
 }
 
@@ -287,6 +299,28 @@ gh_log="$(< "$TEMP_DIR/gh.log")"
 }
 [[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"preview-upstream-token"* && "$gh_log" != *"octg_sk_test"* ]] || {
   print -u2 "GitHub setup leaked a secret value"
+  exit 1
+}
+
+sed '/^DENO_PREVIEW_PREPARE_/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/without-prepare.env"
+PATH="$TEMP_DIR:$PATH" \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/without-prepare.env" \
+  OCTG_PREVIEW_WRANGLER="$TEMP_DIR/wrangler" \
+  OCTG_TEST_GH_VARIABLE_NAMES=DENO_PREVIEW_PREPARE_ENDPOINT \
+  OCTG_TEST_GH_LOG="$TEMP_DIR/gh-delete.log" \
+  OCTG_TEST_WRANGLER_LOG="$TEMP_DIR/github-no-prepare-wrangler.log" \
+  zsh "$SCRIPT_PATH" --github > /dev/null
+gh_delete_log="$(< "$TEMP_DIR/gh-delete.log")"
+[[ "$gh_delete_log" == *"variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not delete the configured stale prepare endpoint"
+  exit 1
+}
+[[ "$gh_delete_log" != *"variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
+  print -u2 "GitHub setup deleted an unconfigured stale prepare threshold"
+  exit 1
+}
+[[ "$gh_delete_log" != *"--confirm"* ]] || {
+  print -u2 "GitHub setup passed the unsupported --confirm option"
   exit 1
 }
 

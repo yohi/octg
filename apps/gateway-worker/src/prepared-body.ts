@@ -186,9 +186,11 @@ export function replaceOutputMarker(
     },
     async cancel() {
       const activeReader = reader;
-      if (activeReader === undefined) return;
-      await activeReader.cancel().catch(() => undefined);
-      releaseReader(activeReader);
+      try {
+        await activeReader?.cancel().catch(() => undefined);
+      } finally {
+        if (activeReader !== undefined) releaseReader(activeReader);
+      }
     },
   });
 }

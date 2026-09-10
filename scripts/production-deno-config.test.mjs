@@ -24,6 +24,61 @@ test("accepts an HTTPS endpoint and positive integer settings", () => {
   });
 });
 
+test("allows the optional prepare pair to be disabled when both values are absent", () => {
+  assert.deepEqual(validateProductionDenoConfig({
+    MAX_INPUT_BYTES: "1048576",
+    DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
+    DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
+    DENO_TOKENIZER_TIMEOUT_MS: "5000",
+  }), { valid: true, missing: [], invalid: [] });
+});
+
+test("reports the missing member when the optional prepare pair is partial", () => {
+  const base = {
+    MAX_INPUT_BYTES: "1048576",
+    DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
+    DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
+    DENO_TOKENIZER_TIMEOUT_MS: "5000",
+  };
+
+  assert.deepEqual(validateProductionDenoConfig({
+    ...base,
+    DENO_PREPARE_ENDPOINT: "https://tokenizer.example/prepare",
+  }), {
+    valid: false,
+    missing: [],
+    invalid: ["DENO_PREPARE_ENDPOINT"],
+  });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...base,
+    DENO_PREPARE_THRESHOLD_BYTES: "4096",
+  }), {
+    valid: false,
+    missing: [],
+    invalid: ["DENO_PREPARE_THRESHOLD_BYTES"],
+  });
+});
+
+test("rejects invalid values in a complete prepare pair", () => {
+  const base = {
+    MAX_INPUT_BYTES: "1048576",
+    DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
+    DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
+    DENO_TOKENIZER_TIMEOUT_MS: "5000",
+    DENO_PREPARE_ENDPOINT: "https://tokenizer.example/prepare",
+    DENO_PREPARE_THRESHOLD_BYTES: "4096",
+  };
+
+  assert.deepEqual(validateProductionDenoConfig({
+    ...base,
+    DENO_PREPARE_ENDPOINT: "http://tokenizer.example/prepare",
+  }), { valid: false, missing: [], invalid: ["DENO_PREPARE_ENDPOINT"] });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...base,
+    DENO_PREPARE_THRESHOLD_BYTES: "0",
+  }), { valid: false, missing: [], invalid: ["DENO_PREPARE_THRESHOLD_BYTES"] });
+});
+
 test("reports every missing required variable by name", () => {
   assert.deepEqual(validateProductionDenoConfig({}), {
     valid: false,

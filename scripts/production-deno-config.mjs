@@ -22,7 +22,7 @@ export function validateProductionDenoConfig(environment) {
 
   for (const name of [...PRODUCTION_DENO_VARIABLE_NAMES, PRODUCTION_INPUT_LIMIT_VARIABLE_NAME]) {
     const value = values[name];
-    if (value === undefined || (typeof value === "string" && value.trim() === "")) {
+    if (isMissingValue(value)) {
       missing.push(name);
     }
   }
@@ -65,7 +65,7 @@ export function validateProductionDenoConfig(environment) {
       isPositiveSafeInteger(values.MAX_INPUT_BYTES) &&
       Number(prepareThreshold.trim()) > Number(values.MAX_INPUT_BYTES.trim())
     ) {
-      invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
+        invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
     }
   }
 
@@ -78,6 +78,10 @@ export function validateProductionDenoConfig(environment) {
     missing,
     invalid: [...new Set(invalid)],
   };
+}
+
+function isMissingValue(value) {
+  return value === undefined || (typeof value === "string" && value.trim() === "");
 }
 
 export function formatProductionDenoConfigError(result) {

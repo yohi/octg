@@ -161,4 +161,17 @@ describe("replaceOutputMarker", () => {
     releaseFirstWrite();
     await pipePromise;
   });
+
+  it("releases the input body lock when canceled before reading", async () => {
+    const body = streamFromChunks([encode(QUOTED_MARKER)]);
+    const transformed = replaceOutputMarker(body, MARKER, 1);
+
+    await transformed.cancel();
+
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    expect(() => {
+      reader = body.getReader();
+    }).not.toThrow();
+    reader?.releaseLock();
+  });
 });

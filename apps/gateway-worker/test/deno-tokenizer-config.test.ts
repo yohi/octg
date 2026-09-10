@@ -281,6 +281,19 @@ describe("resolveDenoRuntimeConfig", () => {
     expect(config.tokenizer.kind).toBe("enabled");
     expect(config.prepare).toEqual({ kind: "invalid", maxInputBytes: 1_048_576 });
   });
+  it("trims surrounding whitespace from prepare settings", () => {
+    const config = resolveDenoRuntimeConfig({
+      ...runtimeTokenizerComplete,
+      DENO_PREPARE_ENDPOINT: "  https://deno.test/prepare  ",
+      DENO_PREPARE_THRESHOLD_BYTES: " 700000 ",
+    });
+
+    expect(config.prepare).toMatchObject({
+      kind: "enabled",
+      endpoint: "https://deno.test/prepare",
+      thresholdBytes: 700000,
+    });
+  });
 
   it("allows prepare threshold at the resolved input limit", () => {
     const config = resolveDenoRuntimeConfig({

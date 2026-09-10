@@ -539,6 +539,22 @@ Deno.test("prepare: returns 200 with normalized body and valid metadata", async 
   assertEquals(fixture.calls(), 1);
 });
 
+Deno.test("prepare: returns a minimal 500 response when the encoder fails", async () => {
+  const encoder: ExactEncoder = {
+    count: () => {
+      throw new Error("encoder failure must not be disclosed");
+    },
+  };
+  const handler = createTokenizerHandler({
+    config: configFor(),
+    encoder,
+  });
+
+  const response = await handler(prepareRequest({ body: responsesBody({}) }));
+
+  assertEquals(response.status, 500);
+  assertEquals(await response.text(), "");
+});
 Deno.test("prepare: reports non-ASCII rawBodyBytes correctly", async () => {
   const fixture = createFixture();
   const requestBody = JSON.stringify({
@@ -606,7 +622,6 @@ Deno.test("prepare: declared oversize stays 413 when body cancellation fails", a
   assertEquals(await response.json(), { code: "request_too_large" });
   assertEquals(fixture.calls(), 0);
 });
-
 Deno.test("prepare: returns 413 with request_too_large for measured oversize with exactly one reader cancellation", async () => {
   const fixture = createFixture(10);
   let cancellations = 0;
@@ -656,7 +671,6 @@ Deno.test("prepare: returns 500 when the encoded metadata header exceeds 4096 by
   assertEquals(await response.text(), "");
   assertEquals(fixture.calls(), 1);
 });
-
 // --- Read failure ---
 
 Deno.test("prepare: returns 500 with no body when getReader rejects", async () => {
@@ -772,61 +786,35 @@ Deno.test("prepare: shared limit applies to both raw-body rejection and normaliz
 
 // --- Generic text normalization for user/system/developer/assistant and function_call_output ---
 
-Deno.test("prepare: normalizes text parts for user role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const serialized = await response.text();
-  const parsed = JSON.parse(serialized);
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
+const textNormalizationCases = [
+  ["user role", { role: "user", content: [{ type: "text", text: "hi" }] }, "content", "input_text"],
+  ["system role", { role: "system", content: [{ type: "text", text: "sys" }] }, "content", "input_text"],
+  ["developer role", { role: "developer", content: [{ type: "text", text: "dev" }] }, "content", "input_text"],
+  ["assistant role", { role: "assistant", content: [{ type: "text", text: "asst" }] }, "content", "output_text"],
+  [
+    "function_call_output",
+    {
+      type: "function_call_output",
+      call_id: "c1",
+      output: [{ type: "text", text: "result" }],
+    },
+    "output",
+    "input_text",
+  ],
+] as const;
 
-Deno.test("prepare: normalizes text parts for system role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "system", content: [{ type: "text", text: "sys" }] }] }),
+for (const [name, input, path, expectedType] of textNormalizationCases) {
+  Deno.test(`prepare: normalizes text parts for ${name}`, async () => {
+    const fixture = createFixture();
+    const request = prepareRequest({
+      body: JSON.stringify({ model: "m", input: [input] }),
+    });
+    const response = await fixture.handler(request);
+    assertEquals(response.status, 200);
+    const parsed = JSON.parse(await response.text());
+    assertEquals(parsed.input[0][path][0].type, expectedType);
   });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
-
-Deno.test("prepare: normalizes text parts for developer role (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "developer", content: [{ type: "text", text: "dev" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "input_text");
-});
-
-Deno.test("prepare: normalizes text parts for assistant role (text → output_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ role: "assistant", content: [{ type: "text", text: "asst" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].content[0].type, "output_text");
-});
-
-Deno.test("prepare: normalizes text parts for function_call_output (text → input_text)", async () => {
-  const fixture = createFixture();
-  const request = prepareRequest({
-    body: JSON.stringify({ model: "m", input: [{ type: "function_call_output", call_id: "c1", output: [{ type: "text", text: "result" }] }] }),
-  });
-  const response = await fixture.handler(request);
-  assertEquals(response.status, 200);
-  const parsed = JSON.parse(await response.text());
-  assertEquals(parsed.input[0].output[0].type, "input_text");
-});
+}
 
 // --- Marker regeneration on collision ---
 
