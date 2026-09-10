@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +75,16 @@ function hasWranglerDeployKeepVars(runCommand) {
   });
 }
 
+function extractPrepareArgsScript(runCommand) {
+  if (!runCommand) return null;
+
+  const start = runCommand.indexOf("prepare_args=()");
+  const end = runCommand.indexOf("secrets_file=", start);
+  if (start < 0 || end < 0) return null;
+
+  return `set -euo pipefail\n${runCommand.slice(start, end)}`;
+}
+
 test("deploy-production workflow preserves remote environment variables using --keep-vars", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
@@ -138,6 +149,77 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
     );
   }
 
+});
+
+test("deploy-production workflow only uploads a complete prepare pair", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const deployCommand = extractStepRun(workflow, "Deploy Worker");
+  const prepareArgsScript = extractPrepareArgsScript(deployCommand);
+
+  assert.ok(prepareArgsScript, "Deploy Worker must conditionally build prepare arguments");
+
+  for (const scenario of [
+    {
+      name: "both values absent",
+      endpoint: "",
+      threshold: "",
+      status: 0,
+      args: [],
+    },
+    {
+      name: "complete pair",
+      endpoint: "https://prepare.example/prepare",
+      threshold: "700000",
+      status: 0,
+      args: [
+        "--var",
+        "DENO_PREPARE_ENDPOINT:https://prepare.example/prepare",
+        "--var",
+        "DENO_PREPARE_THRESHOLD_BYTES:700000",
+      ],
+    },
+    {
+      name: "endpoint without threshold",
+      endpoint: "https://prepare.example/prepare",
+      threshold: "",
+      status: 2,
+      args: [],
+    },
+    {
+      name: "threshold without endpoint",
+      endpoint: "",
+      threshold: "700000",
+      status: 2,
+      args: [],
+    },
+  ]) {
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        `${prepareArgsScript}\nif ((\${#prepare_args[@]} > 0)); then printf '%s\\n' "\${prepare_args[@]}"; fi`,
+      ],
+      {
+        env: {
+          ...process.env,
+          DENO_PREPARE_ENDPOINT: scenario.endpoint,
+          DENO_PREPARE_THRESHOLD_BYTES: scenario.threshold,
+        },
+        encoding: "utf8",
+      },
+    );
+
+    assert.equal(result.status, scenario.status, scenario.name);
+    assert.deepEqual(
+      result.stdout
+        .trimEnd()
+        .split("\n")
+        .filter((line) => line === "--var" || line.startsWith("DENO_PREPARE_")),
+      scenario.args,
+      scenario.name,
+    );
+  }
 });
 
 test("deploy-production workflow synchronizes the Worker auth Secret safely", () => {
