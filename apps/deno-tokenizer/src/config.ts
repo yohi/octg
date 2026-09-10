@@ -15,6 +15,19 @@ export function resolveServiceConfig(
   }
 
   const maxInputBytes = resolveMaxInputBytes(readEnv("MAX_INPUT_BYTES"));
+
+  const expectedMaxInputBytesRaw = readEnv("OCTG_EXPECTED_MAX_INPUT_BYTES");
+  if (expectedMaxInputBytesRaw === undefined) {
+    throw new TypeError("Invalid Deno tokenizer configuration.");
+  }
+  const expectedMaxInputBytes = Number(expectedMaxInputBytesRaw);
+  if (
+    !Number.isSafeInteger(expectedMaxInputBytes) ||
+    expectedMaxInputBytes !== maxInputBytes
+  ) {
+    throw new TypeError("Invalid Deno tokenizer configuration.");
+  }
+
   return {
     authToken,
     maxInputBytes,
