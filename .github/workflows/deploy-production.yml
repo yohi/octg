@@ -50,6 +50,8 @@ jobs:
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
+          DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
+          DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
 
       - name: Validate Production Deno tokenizer authentication Secret
         env:
@@ -89,7 +91,9 @@ jobs:
             --secrets-file "$secrets_file" \
             --var "DENO_TOKENIZER_ENDPOINT:${DENO_TOKENIZER_ENDPOINT}" \
             --var "DENO_TOKENIZER_THRESHOLD_BYTES:${DENO_TOKENIZER_THRESHOLD_BYTES}" \
-            --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}"
+            --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}" \
+            --var "DENO_PREPARE_ENDPOINT:${DENO_PREPARE_ENDPOINT}" \
+            --var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}"
           version_id=$(jq -s -r '
             [.[] | select(.type == "version-upload") | .version_id // empty]
             | last // empty
@@ -111,3 +115,5 @@ jobs:
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
+          DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
+          DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}

@@ -95,6 +95,8 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
     "DENO_TOKENIZER_ENDPOINT",
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
+    "DENO_PREPARE_ENDPOINT",
+    "DENO_PREPARE_THRESHOLD_BYTES",
   ]) {
     assert.match(
       workflow,
@@ -126,6 +128,8 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
     "DENO_TOKENIZER_ENDPOINT",
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
+    "DENO_PREPARE_ENDPOINT",
+    "DENO_PREPARE_THRESHOLD_BYTES",
   ]) {
     assert.match(
       deployCommand,

@@ -353,6 +353,15 @@ if [[ "$CONFIGURE_GITHUB" == true ]]; then
     print -rn -- "$2" | gh secret set "$1" --env preview --repo "$GITHUB_REPOSITORY"
   }
 
+  delete_github_variable_if_configured() {
+    local name="$1"
+    local configured_name
+    configured_name="$(gh variable list --env preview --repo "$GITHUB_REPOSITORY" --json name --jq ".[] | select(.name == \"$name\") | .name")"
+    if [[ -n "$configured_name" ]]; then
+      gh variable delete "$name" --env preview --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+    fi
+  }
+
   set_github_variable CLOUDFLARE_PREVIEW_ACCOUNT_ID "$CLOUDFLARE_PREVIEW_ACCOUNT_ID"
   set_github_variable OCTG_PREVIEW_DATABASE_ID "$PREVIEW_DATABASE_ID"
   set_github_variable OCTG_PREVIEW_UPSTREAM_BASE_URL "$OCTG_PREVIEW_UPSTREAM_BASE_URL"
@@ -371,8 +380,8 @@ if [[ "$CONFIGURE_GITHUB" == true ]]; then
     set_github_variable DENO_PREVIEW_PREPARE_ENDPOINT "$DENO_PREVIEW_PREPARE_ENDPOINT"
     set_github_variable DENO_PREVIEW_PREPARE_THRESHOLD_BYTES "$DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
   else
-    gh variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo "$GITHUB_REPOSITORY" --confirm 2>/dev/null || true
-    gh variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES --env preview --repo "$GITHUB_REPOSITORY" --confirm 2>/dev/null || true
+    delete_github_variable_if_configured DENO_PREVIEW_PREPARE_ENDPOINT
+    delete_github_variable_if_configured DENO_PREVIEW_PREPARE_THRESHOLD_BYTES
   fi
   set_github_secret CLOUDFLARE_PREVIEW_API_TOKEN "$CLOUDFLARE_PREVIEW_API_TOKEN"
   set_github_secret OCTG_UPSTREAM_API_TOKEN "$OCTG_PREVIEW_UPSTREAM_API_TOKEN"
