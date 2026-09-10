@@ -26,6 +26,8 @@ export interface Env {
   readonly DENO_TOKENIZER_AUTH_TOKEN?: string;
   readonly DENO_TOKENIZER_THRESHOLD_BYTES?: string;
   readonly DENO_TOKENIZER_TIMEOUT_MS?: string;
+  readonly DENO_PREPARE_ENDPOINT?: string;
+  readonly DENO_PREPARE_THRESHOLD_BYTES?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;
   readonly IN_FLIGHT_LEASE_TTL_MS?: string;
   readonly IN_FLIGHT_LEASE_RENEWAL_MS?: string;

@@ -21,6 +21,7 @@ OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/o
 OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
 OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
 OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_MAX_INPUT_BYTES=1048576
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME="CI Smoke"
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_test
@@ -32,6 +33,8 @@ DENO_PREVIEW_TOKENIZER_ENDPOINT=https://octg-tokenizer-preview.deno.dev/tokenize
 DENO_PREVIEW_TOKENIZER_AUTH_TOKEN=preview-deno-auth-token
 DENO_PREVIEW_TOKENIZER_THRESHOLD_BYTES=1
 DENO_PREVIEW_TOKENIZER_TIMEOUT_MS=5000
+DENO_PREVIEW_PREPARE_ENDPOINT=https://octg-tokenizer-preview.deno.dev/prepare
+DENO_PREVIEW_PREPARE_THRESHOLD_BYTES=1
 GITHUB_REPOSITORY=yohi/octg
 EOF
 
@@ -41,6 +44,18 @@ output="$(OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" zsh "$SCRIPT_PATH" --dry-r
 [[ "$output" == *"database_id=814c8fdb-dc9d-4a83-9065-001729ccd169"* ]] || { print -u2 "dry-run did not retain the Preview D1 ID"; exit 1; }
 [[ "$output" == *"STANDARD=0"* && "$output" == *"MINI=100000"* ]] || { print -u2 "dry-run did not report quota limits"; exit 1; }
 [[ "$output" != *"test-token"* && "$output" != *"preview-upstream-token"* && "$output" != *"test-pepper"* && "$output" != *"octg_sk_test"* ]] || { print -u2 "dry-run leaked a secret value"; exit 1; }
+
+for invalid_endpoint in \
+  "http://octg-tokenizer-preview.deno.dev/prepare" \
+  "ftp://octg-tokenizer-preview.deno.dev/prepare" \
+  "https://user:password@octg-tokenizer-preview.deno.dev/prepare"; do
+  sed "s|^DENO_PREVIEW_PREPARE_ENDPOINT=.*|DENO_PREVIEW_PREPARE_ENDPOINT=$invalid_endpoint|" \
+    "$TEMP_DIR/valid.env" > "$TEMP_DIR/invalid-prepare-endpoint.env"
+  if OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/invalid-prepare-endpoint.env" zsh "$SCRIPT_PATH" --dry-run > /dev/null 2>&1; then
+    print -u2 "invalid prepare endpoint was accepted: $invalid_endpoint"
+    exit 1
+  fi
+done
 
 MARKER="$TEMP_DIR/command-substitution-ran"
 cat > "$TEMP_DIR/consolidated.env" <<EOF
@@ -57,6 +72,7 @@ OCTG_PREVIEW_UPSTREAM_BASE_URL=https://gateway.example.test/v1/account/gateway/o
 OCTG_PREVIEW_BASE_URL=https://octg-gateway-preview.example.workers.dev
 OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0
 OCTG_PREVIEW_QUOTA_LIMIT_MINI=100000
+OCTG_PREVIEW_MAX_INPUT_BYTES=1048576
 OCTG_PREVIEW_CLIENT_ID=client_ci_smoke
 OCTG_PREVIEW_CLIENT_NAME=CI Smoke
 OCTG_PREVIEW_CLIENT_KEY=octg_sk_preview
@@ -122,6 +138,14 @@ EOF
 chmod 700 "$TEMP_DIR/wrangler"
 cat > "$TEMP_DIR/gh" <<'EOF'
 #!/usr/bin/env zsh
+if [[ "$1" == variable && "$2" == list ]]; then
+  if [[ "$*" == *"DENO_PREVIEW_PREPARE_ENDPOINT"* && "${OCTG_TEST_GH_VARIABLE_NAMES:-}" == *"DENO_PREVIEW_PREPARE_ENDPOINT"* ]]; then
+    print -r -- "DENO_PREVIEW_PREPARE_ENDPOINT"
+  fi
+  if [[ "$*" == *"DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* && "${OCTG_TEST_GH_VARIABLE_NAMES:-}" == *"DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]]; then
+    print -r -- "DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"
+  fi
+fi
 print -r -- "$*" >> "$OCTG_TEST_GH_LOG"
 if [[ "$1" == secret && "$2" == set ]]; then
   while IFS= read -r line; do
@@ -194,6 +218,20 @@ no_match_log="$(< "$TEMP_DIR/no-match-wrangler.log")"
   exit 1
 }
 
+setup_source="$(< "$SCRIPT_PATH")"
+[[ "$setup_source" == *"delete_github_variable_if_configured DENO_PREVIEW_PREPARE_ENDPOINT"* ]] || {
+  print -u2 "setup-preview does not unset the stale prepare endpoint variable"
+  exit 1
+}
+[[ "$setup_source" == *"delete_github_variable_if_configured DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
+  print -u2 "setup-preview does not unset the stale prepare threshold variable"
+  exit 1
+}
+[[ "$setup_source" != *"--confirm"* ]] || {
+  print -u2 "setup-preview uses the unsupported --confirm option"
+  exit 1
+}
+
 github_output="$(
   PATH="$TEMP_DIR:$PATH" \
   OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/valid.env" \
@@ -237,6 +275,28 @@ gh_log="$(< "$TEMP_DIR/gh.log")"
 }
 [[ "$gh_log" != *"test-pepper"* && "$gh_log" != *"preview-upstream-token"* && "$gh_log" != *"octg_sk_test"* ]] || {
   print -u2 "GitHub setup leaked a secret value"
+  exit 1
+}
+
+sed '/^DENO_PREVIEW_PREPARE_/d' "$TEMP_DIR/valid.env" > "$TEMP_DIR/without-prepare.env"
+PATH="$TEMP_DIR:$PATH" \
+  OCTG_PREVIEW_ENV_FILE="$TEMP_DIR/without-prepare.env" \
+  OCTG_PREVIEW_WRANGLER="$TEMP_DIR/wrangler" \
+  OCTG_TEST_GH_VARIABLE_NAMES=DENO_PREVIEW_PREPARE_ENDPOINT \
+  OCTG_TEST_GH_LOG="$TEMP_DIR/gh-delete.log" \
+  OCTG_TEST_WRANGLER_LOG="$TEMP_DIR/github-no-prepare-wrangler.log" \
+  zsh "$SCRIPT_PATH" --github > /dev/null
+gh_delete_log="$(< "$TEMP_DIR/gh-delete.log")"
+[[ "$gh_delete_log" == *"variable delete DENO_PREVIEW_PREPARE_ENDPOINT --env preview --repo yohi/octg"* ]] || {
+  print -u2 "GitHub setup did not delete the configured stale prepare endpoint"
+  exit 1
+}
+[[ "$gh_delete_log" != *"variable delete DENO_PREVIEW_PREPARE_THRESHOLD_BYTES"* ]] || {
+  print -u2 "GitHub setup deleted an unconfigured stale prepare threshold"
+  exit 1
+}
+[[ "$gh_delete_log" != *"--confirm"* ]] || {
+  print -u2 "GitHub setup passed the unsupported --confirm option"
   exit 1
 }
 

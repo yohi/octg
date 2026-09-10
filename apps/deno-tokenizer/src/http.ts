@@ -216,7 +216,7 @@ async function readBoundedRawBody(
   const contentLength = contentLengthValue(request);
   if (contentLength !== null && isDeclaredOversize(contentLength, maxBytes)) {
     if (request.body !== null) {
-      await request.body.cancel();
+      await request.body.cancel().catch(() => undefined);
     }
     return { ok: false, reason: "too_large" };
   }
@@ -242,7 +242,7 @@ async function readBoundedRawBody(
       }
       bytesRead += chunk.value.byteLength;
       if (bytesRead > maxBytes) {
-        await reader.cancel();
+        await reader.cancel().catch(() => undefined);
         return { ok: false, reason: "too_large" };
       }
       chunks.push(chunk.value);
@@ -407,7 +407,7 @@ async function handlePrepare(
 
   const metadataJson = JSON.stringify(metadata);
   const metadataHeader = base64urlEncode(textEncoder.encode(metadataJson));
-  if (metadataHeader.length > maxMetadataHeaderBytes) {
+  if (textEncoder.encode(metadataHeader).byteLength > maxMetadataHeaderBytes) {
     return prepareInternalFailure();
   }
 

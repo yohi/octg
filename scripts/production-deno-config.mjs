@@ -15,7 +15,7 @@ export function validateProductionDenoConfig(environment) {
 
   for (const name of PRODUCTION_DENO_VARIABLE_NAMES) {
     const value = values[name];
-    if (value === undefined || (typeof value === "string" && value.trim() === "")) {
+    if (isMissingValue(value)) {
       missing.push(name);
     }
   }
@@ -34,11 +34,29 @@ export function validateProductionDenoConfig(environment) {
     }
   }
 
+  const prepareEndpointMissing = isMissingValue(values.DENO_PREPARE_ENDPOINT);
+  const prepareThresholdMissing = isMissingValue(values.DENO_PREPARE_THRESHOLD_BYTES);
+  if (prepareEndpointMissing !== prepareThresholdMissing) {
+    if (prepareEndpointMissing) missing.push("DENO_PREPARE_ENDPOINT");
+    if (prepareThresholdMissing) missing.push("DENO_PREPARE_THRESHOLD_BYTES");
+  } else if (!prepareEndpointMissing) {
+    if (!isValidHttpsEndpoint(values.DENO_PREPARE_ENDPOINT)) {
+      invalid.push("DENO_PREPARE_ENDPOINT");
+    }
+    if (!isPositiveSafeInteger(values.DENO_PREPARE_THRESHOLD_BYTES)) {
+      invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
+    }
+  }
+
   return {
     valid: missing.length === 0 && invalid.length === 0,
     missing,
     invalid,
   };
+}
+
+function isMissingValue(value) {
+  return value === undefined || (typeof value === "string" && value.trim() === "");
 }
 
 export function formatProductionDenoConfigError(result) {

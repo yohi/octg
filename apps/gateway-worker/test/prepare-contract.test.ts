@@ -67,6 +67,31 @@ describe("parsePrepareMetadata", () => {
     expect(parsePrepareMetadata(encoded, 10)).toBeUndefined();
   });
 
+  it("accepts a metadata header of exactly 4096 ASCII bytes", () => {
+    const emptyModelBytes = new TextEncoder().encode(
+      JSON.stringify({ ...validMetadata, model: "" }),
+    ).byteLength;
+    const metadata = {
+      ...validMetadata,
+      model: "x".repeat(3072 - emptyModelBytes),
+    };
+    const encoded = encodeMetadataHeader(metadata);
+
+    expect(encoded).toHaveLength(4096);
+    expect(parsePrepareMetadata(encoded, 1_048_576)).toEqual(metadata);
+  });
+
+  it("rejects a metadata header above 4096 ASCII bytes before decoding", () => {
+    const encoded = encodeMetadataHeader({
+      ...validMetadata,
+      model: "x".repeat(3000),
+    });
+
+    expect(encoded.length).toBeGreaterThan(4096);
+    expect(new TextEncoder().encode(encoded).byteLength).toBe(encoded.length);
+    expect(parsePrepareMetadata(encoded, 1_048_576)).toBeUndefined();
+  });
+
   it("returns undefined for invalid base64url", () => {
     expect(parsePrepareMetadata("!!!not-base64url!!!", 1_048_576)).toBeUndefined();
   });
