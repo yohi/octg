@@ -70,6 +70,48 @@ describe("callUpstream", () => {
 
     expect(requestedUrl).toBe("https://aigw.invalid/openai/chat/completions");
   });
+
+  it("passes a ReadableStream body directly to the transport without serializing it", async () => {
+    let receivedBody: BodyInit | null | undefined;
+    const transport: UpstreamTransport = async (input, init) => {
+      receivedBody = init?.body;
+      return new Response();
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("streamed body"));
+        controller.close();
+      },
+    });
+
+    await callUpstream(env, "/chat/completions", stream, meta, null, undefined, transport);
+
+    expect(receivedBody).toBe(stream);
+  });
+
+  it("passes a string body directly to the transport", async () => {
+    let receivedBody: BodyInit | null | undefined;
+    const transport: UpstreamTransport = async (input, init) => {
+      receivedBody = init?.body;
+      return new Response();
+    };
+
+    await callUpstream(env, "/chat/completions", "raw string body", meta, null, undefined, transport);
+
+    expect(receivedBody).toBe("raw string body");
+  });
+
+  it("serializes an object body with JSON.stringify", async () => {
+    let receivedBody: BodyInit | null | undefined;
+    const transport: UpstreamTransport = async (input, init) => {
+      receivedBody = init?.body;
+      return new Response();
+    };
+
+    await callUpstream(env, "/chat/completions", { key: "value" }, meta, null, undefined, transport);
+
+    expect(receivedBody).toBe(JSON.stringify({ key: "value" }));
+  });
 });
 
 describe("buildUpstreamBody", () => {
@@ -107,4 +149,3 @@ describe("buildUpstreamBody", () => {
     expect(result.max_output_tokens).toBe(512);
   });
 });
-

@@ -56,9 +56,17 @@ export async function callUpstream(
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   if (cacheKey) headers["cf-aig-cache-key"] = cacheKey;
   else headers["cf-aig-skip-cache"] = "true";
+  let bodyValue: BodyInit | undefined;
+  if (body instanceof ReadableStream) {
+    bodyValue = body;
+  } else if (typeof body === "string") {
+    bodyValue = body;
+  } else {
+    bodyValue = JSON.stringify(body);
+  }
   return transport(`${env.OCTG_UPSTREAM_BASE_URL}${path}`, {
     method: "POST",
     headers,
-    body: typeof body === "string" ? body : JSON.stringify(body),
+    body: bodyValue,
   });
 }
