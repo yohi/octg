@@ -577,6 +577,7 @@ describe("prepareWithDeno — timeout", () => {
 
     // The fetch resolves with a body that never closes. The timeout fires after resolution.
     let aborted = false;
+    let bodyCancelCount = 0;
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       return new Promise<Response>((resolve) => {
         const signal = init!.signal as AbortSignal;
@@ -589,7 +590,7 @@ describe("prepareWithDeno — timeout", () => {
             // Never enqueue, never close — body hangs.
           },
           cancel() {
-            // Cancel called by timeout handler.
+            bodyCancelCount++;
           },
         });
         resolve(
@@ -618,6 +619,7 @@ describe("prepareWithDeno — timeout", () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(onTimeout).toHaveBeenCalledTimes(1);
     expect(aborted).toBe(true);
+    expect(bodyCancelCount).toBe(1);
   });
 });
 
@@ -630,7 +632,6 @@ describe("prepareWithDeno — cancel idempotency", () => {
     const responseBody = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('{"ok":true}'));
-        controller.close();
       },
       cancel() {
         cancelCount++;
@@ -654,8 +655,7 @@ describe("prepareWithDeno — cancel idempotency", () => {
     await outcome.cancel();
     await outcome.cancel();
 
-    // Body cancel should be called at most once (idempotent).
-    expect(cancelCount).toBeLessThanOrEqual(1);
+    expect(cancelCount).toBe(1);
   });
 
   it("cancel aborts the Deno request and cancels the response body for a rejected outcome", async () => {

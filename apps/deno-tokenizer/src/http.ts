@@ -356,12 +356,17 @@ async function handlePrepare(
     );
   }
 
-  const baseTokenCount = encoder.count(normalized.value.inputText);
-  const estimatedInputTokens = estimatedInputTokensOf({
-    baseTokenCount,
-    messageCount: normalized.value.messageCount,
-    opaqueInputBytes: normalized.value.opaqueInputBytes,
-  });
+  let estimatedInputTokens: number;
+  try {
+    const baseTokenCount = encoder.count(normalized.value.inputText);
+    estimatedInputTokens = estimatedInputTokensOf({
+      baseTokenCount,
+      messageCount: normalized.value.messageCount,
+      opaqueInputBytes: normalized.value.opaqueInputBytes,
+    });
+  } catch {
+    return prepareInternalFailure();
+  }
 
   const upstreamBody = normalizeResponsesUpstreamBody(
     parsedBody as Record<string, unknown>,

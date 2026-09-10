@@ -39,6 +39,7 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
   let cancelled = false;
   let timeoutFired = false;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let cancelResolvedBody: (() => Promise<void>) | undefined;
 
   const cancelResponseBody = async (): Promise<void> => {
     const body = response?.body;
@@ -58,10 +59,11 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
   timeoutHandle = setTimeout(() => {
     timeoutFired = true;
     controller.abort();
-    void cancelResponseBody();
     if (!resolved) {
+      void cancelResponseBody();
       // Pre-resolution timeout — outcome is handled in the catch block.
     } else {
+      void cancelResolvedBody?.();
       // Post-resolution timeout — invoke local lifecycle callback.
       args.onTimeout?.();
     }
@@ -109,22 +111,22 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
     if (outcome.kind === "resolved") {
       // Wrap the body so normal close clears the timer, while timeout after
       // resolution keeps the resolved body in its terminal-failure path.
+      const wrapped = wrapResolvedBody(response.body as ReadableStream<Uint8Array>, () => clearTimeout_());
+      cancelResolvedBody = wrapped.cancel;
       resolved = true;
-
-      const wrappedBody = wrapResolvedBody(response.body as ReadableStream<Uint8Array>, () => clearTimeout_());
 
       const cancel = async (): Promise<void> => {
         if (cancelled) return;
         cancelled = true;
         clearTimeout_();
         controller.abort();
-        await cancelResponseBody();
+        await wrapped.cancel();
       };
 
       return {
         kind: "resolved",
         metadata: outcome.metadata,
-        body: wrappedBody,
+        body: wrapped.body,
         cancel,
       };
     }
@@ -142,18 +144,13 @@ export async function prepareWithDeno(args: PrepareWithDenoArgs): Promise<Prepar
 
 /* ---------- helpers ---------- */
 
-/**
- * Wrap a resolved body stream so that normal close (end-of-stream or cancel)
- * clears the timeout. A timeout after resolution keeps the resolved body in
- * its terminal-failure path — the timer was already cleared or will be by the
- * timeout handler's cancelResponseBody.
- */
 function wrapResolvedBody(
   original: ReadableStream<Uint8Array>,
   onClose: () => void,
-): ReadableStream<Uint8Array> {
+): { readonly body: ReadableStream<Uint8Array>; readonly cancel: () => Promise<void> } {
   const reader = original.getReader();
   let closed = false;
+  let cancelPromise: Promise<void> | undefined;
 
   const cleanup = (): void => {
     if (closed) return;
@@ -161,7 +158,23 @@ function wrapResolvedBody(
     onClose();
   };
 
-  return new ReadableStream<Uint8Array>({
+  const cancel = (): Promise<void> => {
+    if (cancelPromise !== undefined) return cancelPromise;
+    cleanup();
+    cancelPromise = Promise.resolve()
+      .then(() => reader.cancel())
+      .catch(() => undefined)
+      .finally(() => {
+        try {
+          reader.releaseLock();
+        } catch {
+          // already released
+        }
+      });
+    return cancelPromise;
+  };
+
+  const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
@@ -178,17 +191,10 @@ function wrapResolvedBody(
         controller.error(error);
       }
     },
-    cancel() {
-      cleanup();
-      // reader.cancel is best-effort; releaseLock if possible.
-      reader.cancel().catch(() => undefined);
-      try {
-        reader.releaseLock();
-      } catch {
-        // already released
-      }
-    },
+    cancel,
   });
+
+  return { body, cancel };
 }
 
 /**

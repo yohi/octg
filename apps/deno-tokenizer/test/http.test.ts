@@ -539,6 +539,23 @@ Deno.test("prepare: returns 200 with normalized body and valid metadata", async 
   assertEquals(fixture.calls(), 1);
 });
 
+Deno.test("prepare: returns a minimal 500 response when the encoder fails", async () => {
+  const encoder: ExactEncoder = {
+    count: () => {
+      throw new Error("encoder failure must not be disclosed");
+    },
+  };
+  const handler = createTokenizerHandler({
+    config: configFor(),
+    encoder,
+  });
+
+  const response = await handler(prepareRequest({ body: responsesBody({}) }));
+
+  assertEquals(response.status, 500);
+  assertEquals(await response.text(), "");
+});
+
 Deno.test("prepare: reports non-ASCII rawBodyBytes correctly", async () => {
   const fixture = createFixture();
   const requestBody = JSON.stringify({
