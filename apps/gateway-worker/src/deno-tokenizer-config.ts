@@ -2,7 +2,7 @@ import { resolveMaxInputBytes } from "@octg/shared";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-export type DenoTokenizerConfig =
+type DenoEndpointConfig =
   | { readonly kind: "disabled"; readonly maxInputBytes: number }
   | { readonly kind: "invalid"; readonly maxInputBytes: number }
   | {
@@ -13,6 +13,8 @@ export type DenoTokenizerConfig =
       readonly timeoutMs: number;
       readonly maxInputBytes: number;
     };
+
+export type DenoTokenizerConfig = DenoEndpointConfig;
 
 export function resolveDenoTokenizerConfig(env: {
   readonly MAX_INPUT_BYTES?: string;
@@ -68,17 +70,7 @@ function parseSafeInteger(value: string): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-export type DenoPrepareConfig =
-  | { readonly kind: "disabled"; readonly maxInputBytes: number }
-  | { readonly kind: "invalid"; readonly maxInputBytes: number }
-  | {
-      readonly kind: "enabled";
-      readonly endpoint: string;
-      readonly authToken: string;
-      readonly thresholdBytes: number;
-      readonly timeoutMs: number;
-      readonly maxInputBytes: number;
-    };
+export type DenoPrepareConfig = DenoEndpointConfig;
 
 export interface DenoRuntimeConfig {
   readonly tokenizer: DenoTokenizerConfig;
@@ -95,17 +87,14 @@ export function resolveDenoRuntimeConfig(env: {
   readonly DENO_PREPARE_THRESHOLD_BYTES?: string;
 }): DenoRuntimeConfig {
   const tokenizer = resolveDenoTokenizerConfig(env);
-  const maxInputBytes = resolveMaxInputBytes(env.MAX_INPUT_BYTES);
+  const maxInputBytes = tokenizer.maxInputBytes;
 
-  const prepareEndpoint = env.DENO_PREPARE_ENDPOINT;
-  const prepareThreshold = env.DENO_PREPARE_THRESHOLD_BYTES;
+  const prepareEndpoint = env.DENO_PREPARE_ENDPOINT?.trim() || undefined;
+  const prepareThreshold = env.DENO_PREPARE_THRESHOLD_BYTES?.trim() || undefined;
 
   // Normalize empty-string placeholders to absent.
-  const hasEndpoint = prepareEndpoint !== undefined && prepareEndpoint.trim().length > 0;
-  const hasThreshold = prepareThreshold !== undefined && prepareThreshold.trim().length > 0;
-
   // Both prepare settings absent → disabled.
-  if (!hasEndpoint && !hasThreshold) {
+  if (prepareEndpoint === undefined && prepareThreshold === undefined) {
     return { tokenizer, prepare: { kind: "disabled", maxInputBytes } };
   }
 
@@ -116,14 +105,14 @@ export function resolveDenoRuntimeConfig(env: {
 
   // Prepare pair: both absent → disabled; partial → invalid;
   // complete+valid with enabled tokenizer → enabled (reuses tokenizer auth/timeout).
-  if (hasEndpoint !== hasThreshold) {
+  if (prepareEndpoint === undefined || prepareThreshold === undefined) {
     return { tokenizer, prepare: { kind: "invalid", maxInputBytes } };
   }
 
   // Both present — validate.
-  const prepareThresholdBytes = parseSafeInteger(prepareThreshold!);
+  const prepareThresholdBytes = parseSafeInteger(prepareThreshold);
   if (
-    !isHttpsUrlWithoutCredentials(prepareEndpoint!) ||
+    !isHttpsUrlWithoutCredentials(prepareEndpoint) ||
     prepareThresholdBytes === undefined ||
     prepareThresholdBytes <= 0 ||
     prepareThresholdBytes > maxInputBytes
@@ -144,9 +133,9 @@ export function resolveDenoRuntimeConfig(env: {
     tokenizer,
     prepare: {
       kind: "enabled",
-      endpoint: prepareEndpoint!,
+      endpoint: prepareEndpoint,
       authToken: tokenizer.authToken,
-      thresholdBytes: prepareThresholdBytes!,
+      thresholdBytes: prepareThresholdBytes,
       timeoutMs: tokenizer.timeoutMs,
       maxInputBytes,
     },
