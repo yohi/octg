@@ -723,52 +723,32 @@ Deno.test("prepare: shared limit applies to both raw-body rejection and normaliz
 // --- Generic text normalization for user/system/developer/assistant and function_call_output ---
 
 const textNormalizationCases = [
-  {
-    name: "user role",
-    input: { role: "user", content: [{ type: "text", text: "hi" }] },
-    path: "content",
-    expectedType: "input_text",
-  },
-  {
-    name: "system role",
-    input: { role: "system", content: [{ type: "text", text: "sys" }] },
-    path: "content",
-    expectedType: "input_text",
-  },
-  {
-    name: "developer role",
-    input: { role: "developer", content: [{ type: "text", text: "dev" }] },
-    path: "content",
-    expectedType: "input_text",
-  },
-  {
-    name: "assistant role",
-    input: { role: "assistant", content: [{ type: "text", text: "asst" }] },
-    path: "content",
-    expectedType: "output_text",
-  },
-  {
-    name: "function_call_output",
-    input: {
+  ["user role", { role: "user", content: [{ type: "text", text: "hi" }] }, "content", "input_text"],
+  ["system role", { role: "system", content: [{ type: "text", text: "sys" }] }, "content", "input_text"],
+  ["developer role", { role: "developer", content: [{ type: "text", text: "dev" }] }, "content", "input_text"],
+  ["assistant role", { role: "assistant", content: [{ type: "text", text: "asst" }] }, "content", "output_text"],
+  [
+    "function_call_output",
+    {
       type: "function_call_output",
       call_id: "c1",
       output: [{ type: "text", text: "result" }],
     },
-    path: "output",
-    expectedType: "input_text",
-  },
+    "output",
+    "input_text",
+  ],
 ] as const;
 
-for (const testCase of textNormalizationCases) {
-  Deno.test(`prepare: normalizes text parts for ${testCase.name}`, async () => {
+for (const [name, input, path, expectedType] of textNormalizationCases) {
+  Deno.test(`prepare: normalizes text parts for ${name}`, async () => {
     const fixture = createFixture();
     const request = prepareRequest({
-      body: JSON.stringify({ model: "m", input: [testCase.input] }),
+      body: JSON.stringify({ model: "m", input: [input] }),
     });
     const response = await fixture.handler(request);
     assertEquals(response.status, 200);
     const parsed = JSON.parse(await response.text());
-    assertEquals(parsed.input[0][testCase.path][0].type, testCase.expectedType);
+    assertEquals(parsed.input[0][path][0].type, expectedType);
   });
 }
 

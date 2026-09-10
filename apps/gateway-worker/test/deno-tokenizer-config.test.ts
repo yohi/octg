@@ -239,56 +239,21 @@ describe("resolveDenoRuntimeConfig", () => {
   });
 
   const invalidPrepareCases = [
-    {
-      name: "an HTTP endpoint",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "http://deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "700000",
-      },
-    },
-    {
-      name: "endpoint credentials",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "https://user:pass@deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "700000",
-      },
-    },
-    {
-      name: "a zero threshold",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "0",
-      },
-    },
-    {
-      name: "a threshold above maxInputBytes",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "1048577",
-      },
-    },
-    {
-      name: "a fractional threshold",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "1.5",
-      },
-    },
-    {
-      name: "an unsafe integer threshold",
-      overrides: {
-        DENO_PREPARE_ENDPOINT: "https://deno.test/prepare",
-        DENO_PREPARE_THRESHOLD_BYTES: "9007199254740992",
-      },
-    },
+    ["an HTTP endpoint", "http://deno.test/prepare", "700000"],
+    ["endpoint credentials", "https://user:pass@deno.test/prepare", "700000"],
+    ["a zero threshold", "https://deno.test/prepare", "0"],
+    ["a threshold above maxInputBytes", "https://deno.test/prepare", "1048577"],
+    ["a fractional threshold", "https://deno.test/prepare", "1.5"],
+    ["an unsafe integer threshold", "https://deno.test/prepare", "9007199254740992"],
   ] as const;
 
   it.each(invalidPrepareCases)(
-    "returns prepare invalid for $name",
-    ({ overrides }) => {
+    "returns prepare invalid for %s",
+    (_name, endpoint, threshold) => {
       const config = resolveDenoRuntimeConfig({
         ...runtimeTokenizerComplete,
-        ...overrides,
+        DENO_PREPARE_ENDPOINT: endpoint,
+        DENO_PREPARE_THRESHOLD_BYTES: threshold,
       });
 
       expect(config.tokenizer.kind).toBe("enabled");
