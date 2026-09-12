@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript strict mode, Cloudflare Workers, Deno Deploy, GitHub Actions, Node.js 22, Vitest, Node.js test runner, Markdown.
 
+**Spec:** `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md`
+
 ## Global Constraints
 
 - Keep `MAX_INPUT_BYTES` at its current 1 MiB (`1048576`) value.
@@ -24,6 +26,12 @@
 - When prepare is enabled, a missing or malformed `Content-Length` selects Deno prepare. A valid declared length at or below the configured threshold retains the legacy Worker path.
 - Do not modify `apps/gateway-worker/wrangler.jsonc`, `deno.json`, the Deno deployment workflow, Deno source, shared protocol types, or Deno startup input-limit propagation in this revision.
 - Do not log request bodies, client keys, authentication values, or output markers.
+
+## Review Gate Resolution
+
+- **RG-001:** Task 5 makes a deployed, Version Override-targeted Preview candidate and its full acceptance evidence an explicit gate before any production prepare variable, deployment, or canary.
+- **RG-002:** Task 4 requires the operator runbook to carry Task 5's executable temporary-file, result assertion, `wrangler tail`, and request-audit procedure. Task 5 requires those checks for Preview, production, peak, and rollback instead of treating a canary process exit code as acceptance.
+- **RG-003:** This header identifies the approved design spec, and `Requirement Coverage Review` maps every plan requirement to its design path and exact heading.
 
 ---
 
@@ -461,17 +469,18 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
 - [ ] **Step 3: Update the operations runbook without introducing a second specification**
 
-  Replace the prepare-disabled production staging text in `docs/operations.md` with this operational sequence:
+  Replace the prepare-disabled production staging text in `docs/operations.md` with a Preview-before-production operational sequence. The runbook must make a Preview acceptance failure an explicit stop condition before an operator sets a production prepare variable, merges the candidate to `master`, or allows the resulting `deploy-production` run to mutate production.
 
   ```markdown
   1. Independently deploy or verify the Deno `/prepare` service and its health/authentication behavior. This prerequisite is outside the Worker workflow's pre-mutation validation boundary.
-  2. Configure the complete production prepare pair. Use an HTTPS `/prepare` endpoint and the trimmed threshold `"1"`.
-  3. Confirm `deploy-production` validates the pair before D1 migration, Worker version upload, and Worker version deployment. It must upload both bindings directly and must never use empty placeholders.
-  4. Run sanitized approximately 74k-token Responses canaries at concurrency 1 and 2. Confirm a `prepare` finish event, successful reservation and settlement, no Worker `exceededCpu`, and no payload or secret telemetry.
-  5. For rollback, restore a known Worker version that predates prepare. Do not attempt to disable prepare by omitting variables from a later `--keep-vars` upload.
+  2. Use the existing same-repository Preview Deno smoke to deploy a valid prepare-configured Preview Worker version at 0%, then target that exact version with Cloudflare Version Override for the large Responses canary. Keep Preview configuration and credentials isolated from production.
+  3. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require one successful HTTP 200 result with a valid OCTG request ID and the expected Worker version for concurrency 1, and two equivalent results for concurrency 2.
+  4. Correlate every result's request ID to Worker resource-stage telemetry. Require a successful `prepare` finish, no legacy `body_read`/`parse`/`normalize` stages, a successful `quota_reserve` finish before upstream, successful upstream completion, no `exceededCpu`, and a completed request-audit row. Treat the D1 row only as settlement evidence; it never decides quota availability.
+  5. Only after every Preview assertion passes, configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`. Confirm its validation precedes D1 migration, Worker version upload, and Worker version deployment, and that it uploads both bindings directly without empty placeholders.
+  6. Repeat the same request-ID-correlated evidence procedure for production at concurrency 1, 2, and the operator-selected representative peak. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
   ```
 
-  Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
+  The runbook must include the executable temporary-file, canary-result, `wrangler tail`, and request-audit commands from Task 5 rather than replacing them with an unspecified instruction to "review telemetry." It must never print or persist the synthetic payload, client key, Deno authentication value, or upstream response body. Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
 
 - [ ] **Step 4: Verify wording, links, and read-only scope**
 
@@ -495,12 +504,13 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 ### Task 5: Verify The Repository And Execute The Controlled Activation
 
 **Files:**
-- No source changes expected.
-- Temporary synthetic canary payloads: create outside the repository and remove after use.
+- No repository source or helper-script changes expected.
+- Temporary synthetic payloads, canary output, telemetry capture, SQL query text, and audit output: create outside the repository with mode `0600` and remove after use.
 
 **Interfaces:**
-- Consumes: Tasks 1 through 4, isolated Preview configuration, the independently deployed Deno `/prepare` service, and a dedicated production canary client.
-- Produces: automated verification evidence, a safe production activation record, and a rollback verification result with no request content or credentials recorded.
+- Consumes: Tasks 1 through 4; the independently deployed Deno `/prepare` service; a same-repository Preview pull request; isolated Preview and production Wrangler credentials; and dedicated canary clients for each control plane.
+- Produces: automated verification evidence; Preview acceptance evidence that gates every production mutation; a safe production activation record; and request-ID-correlated rollback evidence with no request content or credentials recorded.
+- Requires: `PREVIEW_PREPARE_VERSION_ID`, `PREVIEW_WORKER_NAME`, `PRODUCTION_WORKER_NAME`, `CANARY_D1_DATABASE`, and the intended Worker version are recorded as safe identifiers only. `CANARY_D1_DATABASE` selects audit evidence for the matching control plane; it is never a quota authority.
 - Preserves: the independent Deno deployment workflow and the existing `/tokenize` route for legacy/rollback behavior.
 
 - [ ] **Step 1: Run the full automated verification suite before any deployment**
@@ -521,50 +531,363 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   Record only these safe facts: Deno deployment revision, health status, authenticated prepare status, the deployed `MAX_INPUT_BYTES` decimal value, and successful startup assertion status.
 
-- [ ] **Step 3: Configure and deploy the mandatory production pair**
+- [ ] **Step 3: Deploy and identify an isolated Preview prepare candidate before any production mutation**
 
-  Set `DENO_PREPARE_ENDPOINT` in `deno-production` to the approved production HTTPS URL ending in `/prepare`, then set the exact threshold before triggering the Worker workflow:
+  Configure only Preview's isolated `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` sources. Do not set `deno-production` variables. Open or update a same-repository pull request for the candidate, then wait for the existing `Preview Smoke Test` workflow's `deno-version-smoke` job to pass. That job deploys a valid-auth Deno Preview Worker version at 0% and restores the captured Preview version after its smoke checks.
 
-  ```text
-  DENO_PREPARE_THRESHOLD_BYTES=1
-  ```
-
-  Use the already configured positive-safe-integer `MAX_INPUT_BYTES=1048576`, full tokenizer group, and protected `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN`. Trigger `deploy-production` only after the Deno prerequisite is verified. Confirm the workflow log shows `Validate Production Deno tokenizer configuration` before any D1 migration, version upload, or version deployment; it must not log or expose a value-bearing configuration error.
-
-- [ ] **Step 4: Run an isolated Preview Responses canary at concurrency 1 and 2**
-
-  Configure Preview with its separate `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` sources. Preserve Preview's optional-pair semantics; do not set production values in the Preview control plane.
-
-  Export the existing `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` names with isolated Preview values before running the command. Create a synthetic Responses payload outside the repository, then run the existing canary command:
+  Record the exact valid-auth Preview version by its existing tag, then use it only through Cloudflare Version Override. Do not send the large canary to Preview's restored 100% base version.
 
   ```bash
   set -euo pipefail
+  umask 077
+  : "${PREVIEW_PR_NUMBER:?set the same-repository pull request number}"
+  : "${PREVIEW_WORKER_NAME:?set the isolated Preview Worker name}"
+  : "${PREVIEW_RUN_ID:?set the Preview Smoke Test run ID}"
+  gh run watch "$PREVIEW_RUN_ID" --exit-status
+
+  preview_versions_file="$(mktemp)"
+  trap 'rm -f "$preview_versions_file"' EXIT
+  PREVIEW_PREPARE_VERSION_TAG="pr-${PREVIEW_PR_NUMBER}-deno-valid"
+  ./node_modules/.bin/wrangler versions list \
+    --name "$PREVIEW_WORKER_NAME" \
+    --json > "$preview_versions_file"
+  PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_file" "$PREVIEW_PREPARE_VERSION_TAG" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const [path, tag] = process.argv.slice(2);
+  const ids = new Set();
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value === null || typeof value !== "object") return;
+    const record = value;
+    if (record.tag === tag && typeof (record.version_id ?? record.id) === "string") {
+      ids.add(record.version_id ?? record.id);
+    }
+    Object.values(record).forEach(visit);
+  };
+  visit(JSON.parse(readFileSync(path, "utf8")));
+  if (ids.size !== 1) throw new Error("expected exactly one tagged Preview Worker version");
+  const [id] = ids;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error("Preview Worker version ID is not a UUID");
+  }
+  process.stdout.write(id);
+  NODE
+  )"
+  export PREVIEW_PREPARE_VERSION_ID
+  ```
+
+  A missing, non-unique, or non-UUID version ID fails Preview acceptance. Do not set a production variable, merge the candidate, or invoke a production deployment until the Preview canary in Step 4 passes.
+
+- [ ] **Step 4: Run a request-ID-correlated Preview Responses canary and make it a production gate**
+
+  Export the existing `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` names with isolated Preview values. Use `OCTG_VERSION_OVERRIDE` so every request targets `PREVIEW_PREPARE_VERSION_ID`; `scripts/canary-worker-resource-limits.mjs` cannot add that header itself, so use its exported `requestCanary()` through this one-shot inline Node command. The command changes no repository file and emits only existing safe `octg.canary.result` fields.
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  : "${PREVIEW_PREPARE_VERSION_ID:?set the Preview candidate version ID}"
+  : "${PREVIEW_WORKER_NAME:?set the Preview Worker name}"
+  : "${OCTG_CANARY_URL:?set the isolated Preview URL}"
+  : "${OCTG_CANARY_ALLOWED_HOSTS:?set the isolated Preview host allowlist}"
+  : "${OCTG_CANARY_CLIENT_KEY:?set the isolated Preview canary client key}"
+  export OCTG_VERSION_OVERRIDE="$PREVIEW_PREPARE_VERSION_ID"
+  export OCTG_VERSION_OVERRIDE_WORKER_NAME="$PREVIEW_WORKER_NAME"
+  export CANARY_BODY_MARKER="octg_canary_body_marker_${RANDOM}_${RANDOM}"
   payload_file="$(mktemp)"
-  trap 'rm -f "$payload_file"' EXIT
-  node --input-type=module - "$payload_file" <<'NODE'
+  canary_output="$(mktemp)"
+  telemetry_output="$(mktemp)"
+  trap 'rm -f "$payload_file" "$canary_output" "$telemetry_output"' EXIT
+  node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
   import { writeFileSync } from "node:fs";
 
-  const payloadPath = process.argv[2];
-  const input = "token ".repeat(74_000);
+  const [payloadPath, marker] = process.argv.slice(2);
   writeFileSync(payloadPath, JSON.stringify({
     model: "gpt-5",
-    input,
+    input: `${marker} ${"token ".repeat(74_000)}`,
     max_output_tokens: 16,
   }), { mode: 0o600 });
   NODE
-  CANARY_PAYLOAD_PATH="$payload_file" \
-  npm run canary:worker -- --env-file=admin.env --concurrency=1,2
+  ./node_modules/.bin/wrangler tail "$PREVIEW_WORKER_NAME" \
+    --format=json \
+    --version-id="$PREVIEW_PREPARE_VERSION_ID" >"$telemetry_output" 2>&1 &
+  tail_pid=$!
+  trap 'kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; rm -f "$payload_file" "$canary_output" "$telemetry_output"' EXIT
+  sleep 5
+  kill -0 "$tail_pid"
+  CANARY_PAYLOAD_PATH="$payload_file" CANARY_ENV_FILE=admin.env CANARY_CONCURRENCY=1,2 \
+    node --input-type=module <<'NODE' | tee "$canary_output"
+  import { readFile } from "node:fs/promises";
+  import { requestCanary } from "./scripts/canary-worker-resource-limits.mjs";
+  import { loadEnvironment, resolveCanaryConfig } from "./scripts/run-worker-canary.mjs";
+
+  const environment = await loadEnvironment(process.env.CANARY_ENV_FILE, process.env);
+  const config = resolveCanaryConfig(environment, {
+    concurrency: process.env.CANARY_CONCURRENCY,
+    payloadPath: process.env.CANARY_PAYLOAD_PATH,
+  });
+  const version = process.env.OCTG_VERSION_OVERRIDE;
+  const workerName = process.env.OCTG_VERSION_OVERRIDE_WORKER_NAME;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(version ?? "") || !workerName) {
+    throw new TypeError("valid Version Override inputs are required");
+  }
+  const payload = await readFile(config.payloadPath, "utf8");
+  const fetchWithVersionOverride = (input, init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("Cloudflare-Workers-Version-Overrides", `${workerName}="${version}"`);
+    return fetch(input, { ...init, headers });
+  };
+  for (const concurrency of config.concurrency.split(",").map(Number)) {
+    const results = await Promise.all(Array.from({ length: concurrency }, (_, ordinal) =>
+      requestCanary({
+        url: new URL(config.url),
+        apiKey: config.apiKey,
+        payload,
+        concurrency,
+        ordinal,
+        requestTimeoutMs: config.timeoutMs,
+        fetchImpl: fetchWithVersionOverride,
+      }),
+    ));
+    for (const result of results) console.log(JSON.stringify(result));
+  }
+  NODE
+  sleep 10
+  kill "$tail_pid"
+  wait "$tail_pid" || true
   ```
 
-  Expected: both canary runs succeed without Worker `exceededCpu`; the Worker emits a `prepare` finish event and no legacy `body_read`, `parse`, or `normalize` stage for the prepared request; the request reaches upstream only after quota reservation; and completion settlement is correct.
+  Assert the captured result records instead of treating the canary process exit code as acceptance. Run this exact assertion with `EXPECTED_CONCURRENCIES=1,2` and `EXPECTED_WORKER_VERSION="$PREVIEW_PREPARE_VERSION_ID"`:
 
-- [ ] **Step 5: Run the production canary and record only safe acceptance evidence**
+  ```bash
+  EXPECTED_CONCURRENCIES=1,2 \
+  EXPECTED_WORKER_VERSION="$PREVIEW_PREPARE_VERSION_ID" \
+  node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
 
-  Repeat the same synthetic Responses canary at production concurrency 1 and 2 with a dedicated production canary client and the approved production hostname. Also run the operator-defined expected peak only after the 1 and 2 runs succeed. Record request IDs, Worker version IDs, HTTP statuses, resource-stage outcomes, quota reservation/settlement outcomes, and the absence of `exceededCpu`. Do not save the generated payload, a client key, a Deno authentication value, or any upstream response body in the repository.
+  const [path] = process.argv.slice(2);
+  const expectedVersion = process.env.EXPECTED_WORKER_VERSION;
+  const concurrencies = process.env.EXPECTED_CONCURRENCIES.split(",").map(Number);
+  const expected = new Set(concurrencies.flatMap((concurrency) =>
+    Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`),
+  ));
+  const records = readFileSync(path, "utf8").split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (records.length !== expected.size) throw new Error("unexpected canary result count");
+  for (const record of records) {
+    const key = `${record.concurrency}/${record.ordinal}`;
+    if (!expected.delete(key)) throw new Error("unexpected canary concurrency or ordinal");
+    if (record.outcome !== "response" || record.status !== 200) throw new Error("canary HTTP response failed");
+    if (!/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(record.requestId ?? "")) throw new Error("canary request ID missing");
+    if (record.workerVersion !== expectedVersion) throw new Error("canary Worker version mismatch");
+  }
+  if (expected.size !== 0) throw new Error("missing canary result");
+  console.log("canary result assertions passed");
+  NODE
+  ```
 
-- [ ] **Step 6: Verify rollback from a known pre-prepare Worker version**
+  Use the request IDs from that assertion to inspect only their `octg.resource_stage` records in `telemetry_output`. This is an explicit acceptance assertion, not an informal log review: each request must have exactly one successful `prepare` finish with `tokenizationProvider: "deno"`; no `body_read`, `parse`, or `normalize` stage; a successful `quota_reserve` finish with `quotaReserved: true`; an `upstream` stage after that reservation with successful completion and `upstreamReached: true`; and no `exceededCpu` invocation outcome in the version-filtered capture. Fail when a result has no correlated stage record, a condition is absent, or a condition is contradicted. Also fail if the marker appears in either protected capture:
 
-  Before activation, record the compatible Worker version ID that predates prepare as `KNOWN_PREPARE_FREE_VERSION_ID`. If a rollback is required, restore that exact version instead of omitting prepare variables from a later `--keep-vars` upload:
+  ```bash
+  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output"; then
+    echo "canary payload marker appeared in telemetry" >&2
+    exit 1
+  fi
+  ```
+
+  Query only `request_id` and `status` from the matching control-plane D1 database after a bounded wait. `completed` is the required settlement evidence; `orphaned`, `uncertain`, a missing row, or a query failure fails acceptance. This query is an operational confirmation only: D1 remains audit-only and never makes a quota decision.
+
+  ```bash
+  : "${CANARY_D1_DATABASE:?set the isolated Preview D1 database name}"
+  audit_sql="$(node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const records = readFileSync(process.argv[2], "utf8").split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  const ids = records.map((record) => record.requestId);
+  if (ids.some((id) => !/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(id ?? ""))) throw new Error("unsafe request ID");
+  process.stdout.write(`SELECT request_id, status FROM requests WHERE request_id IN (${ids.map((id) => `'${id}'`).join(",")}) ORDER BY request_id`);
+  NODE
+  )"
+  audit_output="$(mktemp)"
+  trap 'rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+  for attempt in 1 2 3 4 5 6; do
+    ./node_modules/.bin/wrangler d1 execute "$CANARY_D1_DATABASE" \
+      --remote \
+      --json \
+      --command "$audit_sql" >"$audit_output"
+    if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const resultRecords = readFileSync(process.argv[2], "utf8").split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  const expectedIds = new Set(resultRecords.map((record) => record.requestId));
+  const rows = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value === null || typeof value !== "object") return;
+    if (typeof value.request_id === "string" && typeof value.status === "string") rows.push(value);
+    Object.values(value).forEach(visit);
+  };
+  visit(JSON.parse(readFileSync(process.argv[3], "utf8")));
+  for (const requestId of expectedIds) {
+    const matching = rows.filter((row) => row.request_id === requestId);
+    if (matching.length !== 1 || matching[0].status !== "completed") process.exit(1);
+  }
+  NODE
+    then
+      break
+    fi
+    if [ "$attempt" = 6 ]; then
+      echo "canary settlement evidence was not completed" >&2
+      exit 1
+    fi
+    sleep 5
+  done
+  ```
+
+  Preview acceptance is PASS only when every command and assertion above passes. On any failure, delete the temporary files, retain only safe failure facts, and stop. Production configuration, deployment, and canaries are prohibited after a Preview failure.
+
+- [ ] **Step 5: Configure and deploy the mandatory production pair only after Preview PASS**
+
+  Before production activation, record the currently compatible pre-prepare Worker version as `KNOWN_PREPARE_FREE_VERSION_ID` from the single 100% deployment. Do not expose credentials while doing so.
+
+  ```bash
+  set -euo pipefail
+  production_deployments_file="$(mktemp)"
+  trap 'rm -f "$production_deployments_file"' EXIT
+  ./node_modules/.bin/wrangler deployments status \
+    --config apps/gateway-worker/wrangler.jsonc \
+    --json > "$production_deployments_file"
+  KNOWN_PREPARE_FREE_VERSION_ID="$(jq -er '
+    [.versions[] | select(.percentage == 100) | .version_id]
+    | if length == 1 then .[0] else error("expected one 100% production version") end
+  ' "$production_deployments_file")"
+  export KNOWN_PREPARE_FREE_VERSION_ID
+  ```
+
+  Only after Step 4 is PASS, set `DENO_PREPARE_ENDPOINT` in `deno-production` to the approved production HTTPS `/prepare` URL and set `DENO_PREPARE_THRESHOLD_BYTES=1`. The authorized release operator then merges the candidate to `master`; that push invokes `deploy-production`. Do not grant an implementation agent authority to merge a pull request merely to execute this plan.
+
+  Require the production workflow to pass. Its log must show `Validate Production Deno tokenizer configuration` before D1 migration, Worker version upload, and Worker version deployment, with no value-bearing configuration error. Afterwards, identify the exact 100% deployed version with the same `wrangler deployments status` command and assign it to `EXPECTED_PRODUCTION_WORKER_VERSION`. A failed Preview assertion, workflow run, or version lookup is a stop condition; do not continue to the production canary.
+
+- [ ] **Step 6: Run the production canary at concurrency 1 and 2 with the same deterministic evidence gate**
+
+  Set `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` from the dedicated production canary configuration; set `PRODUCTION_WORKER_NAME`, `EXPECTED_PRODUCTION_WORKER_VERSION`, and `CANARY_D1_DATABASE` for production. Start the version-filtered `wrangler tail` capture from Step 4 before the request, create the same synthetic payload in a protected temporary file, and capture stdout to a protected `canary_output` file. Do not use Version Override in production.
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  : "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
+  : "${EXPECTED_PRODUCTION_WORKER_VERSION:?set the deployed production version ID}"
+  : "${CANARY_D1_DATABASE:?set the production D1 database name}"
+  export CANARY_BODY_MARKER="octg_canary_body_marker_${RANDOM}_${RANDOM}"
+  payload_file="$(mktemp)"
+  canary_output="$(mktemp)"
+  telemetry_output="$(mktemp)"
+  audit_output="$(mktemp)"
+  trap 'if [ -n "${tail_pid:-}" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+  node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
+  import { writeFileSync } from "node:fs";
+
+  const [payloadPath, marker] = process.argv.slice(2);
+  writeFileSync(payloadPath, JSON.stringify({
+    model: "gpt-5",
+    input: `${marker} ${"token ".repeat(74_000)}`,
+    max_output_tokens: 16,
+  }), { mode: 0o600 });
+  NODE
+  ./node_modules/.bin/wrangler tail "$PRODUCTION_WORKER_NAME" \
+    --format=json \
+    --version-id="$EXPECTED_PRODUCTION_WORKER_VERSION" >"$telemetry_output" 2>&1 &
+  tail_pid=$!
+  sleep 5
+  kill -0 "$tail_pid"
+  CANARY_PAYLOAD_PATH="$payload_file" \
+  npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
+  sleep 10
+  kill "$tail_pid"
+  wait "$tail_pid" || true
+  EXPECTED_CONCURRENCIES=1,2 \
+  EXPECTED_WORKER_VERSION="$EXPECTED_PRODUCTION_WORKER_VERSION" \
+  node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const [path] = process.argv.slice(2);
+  const expectedVersion = process.env.EXPECTED_WORKER_VERSION;
+  const concurrencies = process.env.EXPECTED_CONCURRENCIES.split(",").map(Number);
+  const expected = new Set(concurrencies.flatMap((concurrency) =>
+    Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`),
+  ));
+  const records = readFileSync(path, "utf8").split("\n").flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (records.length !== expected.size) throw new Error("unexpected canary result count");
+  for (const record of records) {
+    const key = `${record.concurrency}/${record.ordinal}`;
+    if (!expected.delete(key)) throw new Error("unexpected canary concurrency or ordinal");
+    if (record.outcome !== "response" || record.status !== 200) throw new Error("canary HTTP response failed");
+    if (!/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(record.requestId ?? "")) throw new Error("canary request ID missing");
+    if (record.workerVersion !== expectedVersion) throw new Error("canary Worker version mismatch");
+  }
+  if (expected.size !== 0) throw new Error("missing canary result");
+  console.log("canary result assertions passed");
+  NODE
+  ```
+
+  Then run the Step 4 telemetry correlation, marker-leak check, and bounded request-audit query against the production capture. In addition to the marker check, fail without printing the key if the protected captures contain the client key:
+
+  ```bash
+  if grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
+    echo "canary client key appeared in protected capture" >&2
+    exit 1
+  fi
+  ```
+
+  Production acceptance requires every prepared-route condition from Step 4 for every request ID. An HTTP 500, a timeout, a missing result, an unexpected version, missing telemetry, a non-`completed` audit state, or `exceededCpu` is failure, not a successful canary process exit.
+
+- [ ] **Step 7: Run the operator-defined production peak only after concurrency 1 and 2 pass**
+
+  Set `CANARY_PEAK_CONCURRENCY` to the representative expected peak as an integer from `3` through `64`; reject any other value. Allocate fresh protected payload, canary-output, telemetry, and audit-output files, then repeat the complete Step 6 tail capture, result assertion, telemetry correlation, marker-leak check, and bounded request-audit query, changing only the canary input and expected result set.
+
+  ```bash
+  : "${CANARY_PEAK_CONCURRENCY:?set the representative production peak}"
+  if ! [[ "$CANARY_PEAK_CONCURRENCY" =~ ^([3-9]|[1-5][0-9]|6[0-4])$ ]]; then
+    echo "CANARY_PEAK_CONCURRENCY must be an integer from 3 through 64" >&2
+    exit 2
+  fi
+  CANARY_PAYLOAD_PATH="$payload_file" \
+  npm run canary:worker -- --env-file=admin.env \
+    --concurrency="1,2,${CANARY_PEAK_CONCURRENCY}" | tee "$canary_output"
+  ```
+
+  Run the result assertion with `EXPECTED_CONCURRENCIES="1,2,${CANARY_PEAK_CONCURRENCY}"` and `EXPECTED_WORKER_VERSION="$EXPECTED_PRODUCTION_WORKER_VERSION"`. Record only safe counts, request IDs, version IDs, result statuses, stage outcomes, and final PASS/FAIL. Do not record payload, client key, Deno authentication value, or upstream body.
+
+- [ ] **Step 8: Verify rollback from a known pre-prepare Worker version with the same request-ID correlation**
+
+  If rollback is required, restore `KNOWN_PREPARE_FREE_VERSION_ID` instead of omitting prepare variables from a later `--keep-vars` upload:
 
   ```bash
   ./node_modules/.bin/wrangler versions deploy \
@@ -574,29 +897,88 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     --yes
   ```
 
-  Send the same synthetic Responses payload after rollback. Confirm no `prepare` resource stage is emitted; legacy `body_read`, `parse`, and `normalize` stages are emitted; `/tokenize` remains available; tokenization provider selection follows the retained `DENO_TOKENIZER_THRESHOLD_BYTES` setting; and quota reservation and upstream settlement remain correct.
+  Start a new protected capture and canary run before inspecting rollback behavior. Use the same result assertion and bounded audit query shown in Step 6, substituting `KNOWN_PREPARE_FREE_VERSION_ID` for `EXPECTED_PRODUCTION_WORKER_VERSION` and `EXPECTED_CONCURRENCIES=1,2`. Set `EXPECTED_LEGACY_TOKENIZATION_PROVIDER` from the retained tokenizer configuration: `deno` only when the configured legacy Deno tokenizer group and its threshold select it for this payload; otherwise `cloudflare_do`.
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  : "${KNOWN_PREPARE_FREE_VERSION_ID:?set the known rollback version}"
+  : "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
+  : "${CANARY_D1_DATABASE:?set the production D1 database name}"
+  : "${EXPECTED_LEGACY_TOKENIZATION_PROVIDER:?set deno or cloudflare_do from retained configuration}"
+  export CANARY_BODY_MARKER="octg_canary_body_marker_${RANDOM}_${RANDOM}"
+  payload_file="$(mktemp)"
+  canary_output="$(mktemp)"
+  telemetry_output="$(mktemp)"
+  audit_output="$(mktemp)"
+  trap 'if [ -n "${tail_pid:-}" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+  node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
+  import { writeFileSync } from "node:fs";
+
+  const [payloadPath, marker] = process.argv.slice(2);
+  writeFileSync(payloadPath, JSON.stringify({
+    model: "gpt-5",
+    input: `${marker} ${"token ".repeat(74_000)}`,
+    max_output_tokens: 16,
+  }), { mode: 0o600 });
+  NODE
+  ./node_modules/.bin/wrangler tail "$PRODUCTION_WORKER_NAME" \
+    --format=json \
+    --version-id="$KNOWN_PREPARE_FREE_VERSION_ID" >"$telemetry_output" 2>&1 &
+  tail_pid=$!
+  sleep 5
+  kill -0 "$tail_pid"
+  CANARY_PAYLOAD_PATH="$payload_file" \
+  npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
+  sleep 10
+  kill "$tail_pid"
+  wait "$tail_pid" || true
+  ```
+
+  For every request ID, require no `prepare` stage; successful `body_read`, `parse`, and `normalize` stages; a successful `tokenize` finish with `tokenizationProvider` equal to `EXPECTED_LEGACY_TOKENIZATION_PROVIDER`; a successful `quota_reserve` before successful upstream completion; no `exceededCpu`; and `requests.status = "completed"` from the bounded audit query. Confirm `/tokenize` remains available without saving its body:
+
+  ```bash
+  : "${DENO_TOKENIZER_ENDPOINT:?set the retained tokenizer endpoint}"
+  : "${DENO_TOKENIZER_AUTH_TOKEN:?load the retained tokenizer Secret without printing it}"
+  tokenize_payload="$(mktemp)"
+  trap 'rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output" "$tokenize_payload"' EXIT
+  node --input-type=module - "$tokenize_payload" <<'NODE'
+  import { writeFileSync } from "node:fs";
+
+  writeFileSync(process.argv[2], JSON.stringify({ inputText: "rollback canary" }), { mode: 0o600 });
+  NODE
+  curl --fail --silent --show-error \
+    --request POST \
+    --header "Authorization: Bearer ${DENO_TOKENIZER_AUTH_TOKEN}" \
+    --header "Content-Type: application/json" \
+    --data-binary "@${tokenize_payload}" \
+    --output /dev/null \
+    "$DENO_TOKENIZER_ENDPOINT"
+  ```
+
+  Any missing, contradictory, or non-correlated observation fails rollback verification.
 
 ## Requirement Coverage Review
 
-| Specification requirement | Implementing task | Executable or review evidence |
+| Design requirement and source | Implementing task | Executable or review evidence |
 | --- | --- | --- |
-| Malformed `Content-Length` never falls back to Worker-side Responses normalization when prepare is enabled | Task 1 | Proxy regression asserts prepare/upstream calls and absence of `body_read`, `parse`, and `normalize` stages. |
-| Declared raw size above the resolved limit still cancels before Deno | Task 1 | Existing declared-oversize regression remains green. |
-| Production prepare pair is mandatory and threshold is exactly trimmed `"1"` | Task 2 | Node validator tests cover absent, empty, partial, invalid, whitespace-trimmed valid, and noncanonical numeric values. |
-| Production validation occurs before D1 migration, upload, and deploy | Task 3 | Static workflow test checks the validator position against each remote mutation command. |
-| Production upload passes the complete pair explicitly and never emits empty placeholders | Task 3 | Static workflow test checks direct `--var` arguments and rejects optional masking constructs. |
-| Non-production optional pair and legacy rollback paths remain available | Tasks 2 and 4 | Task 2 does not edit runtime resolver; Task 4 documents the separate non-production contract and version rollback. |
-| Deno prerequisite, shared input-limit propagation, Deno source, and secrets remain unchanged | Tasks 3 and 4 | Workflow/reference diff check is empty; secret-file assertions remain green. |
-| Public documentation is synchronized | Task 4 | Normative sections 9.4, 17, and 18 plus configuration, component, and operations documents receive the same production boundary. |
-| CPU mitigation is measurable and independently rollbackable | Task 5 | Preview/production synthetic canaries, safe telemetry checks, and known-version rollback verification. |
+| Malformed `Content-Length` never falls back to Worker-side Responses normalization when prepare is enabled. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Stage 2: Deno Prepare`; `### Worker Data Flow`; `### Proxy behavior` | Task 1 | Proxy regression asserts prepare/upstream calls and absence of `body_read`, `parse`, and `normalize` stages. |
+| Declared raw size above the resolved limit still cancels before Deno. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Stage 2: Deno Prepare`; `### Worker Data Flow`; `### Worker body reader` | Task 1 | Existing declared-oversize regression remains green. |
+| Production prepare pair is mandatory and threshold is exactly trimmed `"1"`. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `### Production configuration validation` | Task 2 | Node validator tests cover absent, empty, partial, invalid, whitespace-trimmed valid, and noncanonical numeric values. |
+| Production validation occurs before D1 migration, upload, and deploy. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Error Handling`; `### Production configuration validation` | Task 3 | Static workflow test checks the validator position against each remote mutation command. |
+| Production upload passes the complete pair explicitly and never emits empty placeholders. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Files in Scope` | Task 3 | Static workflow test checks direct `--var` arguments and rejects optional masking constructs. |
+| Non-production optional pair and legacy rollback paths remain available. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance` | Tasks 2 and 4 | Task 2 does not edit the runtime resolver; Task 4 documents the separate non-production contract and version rollback. |
+| Deno prerequisite, control-plane-local input-limit propagation, Deno source, and secrets remain unchanged. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance`; `## Files in Scope` | Tasks 3 and 4 | Workflow/reference diff check is empty; secret-file assertions remain green. |
+| Public documentation is synchronized with the approved design. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Files in Scope` | Task 4 | Normative sections 9.4, 17, and 18 plus configuration, component, and operations documents receive the same production boundary and executable observation path. |
+| Preview acceptance gates production mutation, and CPU mitigation is measurable and independently rollbackable. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance`; `## Observability`; `### Worker Data Flow`; `## Testing` | Task 5 | Preview Version Override canary must pass request-result, resource-stage, audit, and `exceededCpu` assertions before production configuration or deployment. Production, peak, and rollback repeat the same request-ID correlation. |
 
 ## Plan Self-Review
 
-**Spec coverage:** All files named in the revision scope have a dedicated task. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; rollout, canary, and rollback acceptance are Task 5. No Deno service implementation task is included because the approved spec marks it complete and identifies it as a read-only verification reference for this revision.
+**Spec coverage:** The header identifies the approved superpowers design separately from the repository's normative `SPEC.md`. The coverage table maps each design heading to an implementation task and executable evidence. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; and Preview-gated rollout, canary, and rollback acceptance are Task 5. No Deno service implementation task is included because the approved design marks it complete and identifies it as a read-only verification reference for this revision.
 
-**Placeholder scan:** This plan contains no deferred implementation markers and no generic error-handling instructions. Every source modification names the exact file, existing behavior to replace, tests to add or remove, command to run, expected failure, and target implementation shape. The approved Deno host in the operational configuration is intentionally supplied by the production operator and is never committed.
+**Placeholder scan:** This plan contains no deferred implementation markers or generic error-handling instructions. Every source modification names the exact file, behavior to replace, tests to add or remove, command to run, expected failure, and target implementation shape. Task 5's environment values are deliberately operator-supplied identifiers or secrets; its commands validate and never print them. The approved Deno host is intentionally supplied by the operator and is never committed.
 
-**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, not the Chat Completions-only default canary payload, and verifies the `prepare` resource stage introduced by the existing implementation.
+**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, a Version Override only in Preview, the existing `octg.canary.result` shape, request IDs, resource-stage fields, and audit status without treating D1 as quota authority.
 
 ## Implementation Order
 
