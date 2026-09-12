@@ -2,9 +2,10 @@
 
 ## Status
 
-- Approved architecture: 2026-09-09
-- Design revision: 2026-09-09
-- Implementation: pending
+- Original prepare architecture approved: 2026-09-09
+- Free-tier activation revision approved: 2026-09-12
+- Original prepare implementation: complete
+- Activation and legacy-route hardening: pending
 
 ## Problem
 
@@ -16,7 +17,10 @@ for BPE counting.
 
 Observed failures are in the approximately 760 KB request class. The Worker
 resource events show `body_read`, `parse`, and `normalize` work without a
-corresponding tokenization or upstream completion.
+corresponding tokenization or upstream completion. Production has the Deno
+tokenizer group configured, but its prepare pair is absent, so the existing
+prepare implementation is currently disabled for production Responses
+requests.
 
 ## Goals
 
@@ -24,8 +28,11 @@ corresponding tokenization or upstream completion.
 - Avoid requiring a paid Cloudflare Workers plan.
 - Move large Responses parse, normalization, and exact BPE work out of the
   Worker.
+- Make the existing Deno `/prepare` route the production path for ordinary
+  Responses bodies without requiring a paid Workers plan.
 - Preserve fail-closed quota behavior and existing public error semantics.
-- Preserve the existing small-input and Durable Object tokenizer paths.
+- Preserve the existing legacy paths for Chat Completions, non-production
+  prepare-disabled environments, and rollback.
 - Make the change measurable and independently rollbackable.
 
 ## Non-goals
@@ -35,6 +42,8 @@ corresponding tokenization or upstream completion.
 - Do not persist request bodies or tokenizer state in Deno.
 - Do not initially change the large-request route for Chat Completions.
 - Do not add request payloads, client keys, or authentication values to logs.
+- Do not migrate the complete gateway, quota control plane, or persistence
+  layer to Deno Deploy as part of this change.
 
 ## Invariants
 
@@ -65,6 +74,10 @@ corresponding tokenization or upstream completion.
   prepared route and never invokes a second tokenizer for that route.
 - The existing `/tokenize` endpoint remains available for the legacy route and
   rollback.
+- The free-tier mitigation does not depend on a paid Cloudflare Workers plan.
+- In production, a missing or incomplete prepare pair blocks deployment rather
+  than silently deploying a Worker that can route large Responses requests
+  through the CPU-heavy legacy path.
 
 ## Design
 
@@ -97,9 +110,18 @@ selection uses the raw request `Content-Length`, not normalized text bytes:
 - A valid `Content-Length` above the configured prepare threshold uses Deno.
 - A request without `Content-Length` uses Deno when prepare is enabled.
 - A valid `Content-Length` below the threshold uses the existing Worker path.
-- A malformed `Content-Length` uses the existing Worker path.
+- A malformed `Content-Length` uses Deno when prepare is enabled; it never
+  falls back to Worker-side Responses normalization.
 - A valid `Content-Length` above the resolved `MAX_INPUT_BYTES` is rejected by
   the Worker before forwarding, and the incoming request body is canceled.
+
+Production sets `DENO_PREPARE_THRESHOLD_BYTES` to `1`. Consequently, every
+ordinary non-empty accepted Responses body is sent to Deno, while only
+zero-byte or one-byte declared bodies can remain on the legacy path. Those
+bodies fail at the existing invalid-body boundary without performing
+large-payload normalization. The prepare client sends canonical headers and
+does not forward a malformed original `Content-Length`, so Deno remains the
+bounded reader for that case.
 
 Deno receives the canonical `MAX_INPUT_BYTES` value and the generated
 `OCTG_EXPECTED_MAX_INPUT_BYTES` assertion through the Deno Deploy runtime
@@ -185,6 +207,14 @@ threshold; it never changes Chat configuration semantics.
 
 The prepare endpoint must be HTTPS and must not contain URL credentials. The
 shared Deno authentication value remains a secret on both runtime sides.
+
+For non-production environments, the prepare pair remains optional so the
+existing local and rollback paths can be exercised. Production is stricter:
+`validateProductionDenoConfig` requires
+`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES`, validates them as
+a complete pair, and the workflow passes them explicitly to every production
+Worker upload. The checked-in Wrangler file remains free of production secret
+and environment-specific prepare values.
 
 `MAX_INPUT_BYTES` is not independently selected by the Worker and Deno
 services. Production deployment resolves one positive safe-integer value and
@@ -426,7 +456,9 @@ The prepare branch follows this order:
    above the resolved maximum cancels the incoming request body and returns
    `errInputTooLarge` without a Deno call.
 4. Dispatch the raw body to Deno `/prepare`, or use the existing Worker body
-   path for non-prepared requests.
+   path only for requests below the configured threshold or when prepare is
+   disabled outside production. A malformed `Content-Length` does not select
+   the legacy path when prepare is enabled.
 5. Parse the three-variant prepare outcome. A `rejected` code maps to the
    existing public OCTG error; an `unavailable` outcome maps to
    `errInternal`. Neither outcome invokes the Durable Object tokenizer.
@@ -586,7 +618,11 @@ Errors remain status-only or use the bounded allowlisted error code.
 ### Proxy behavior
 
 - Prepare routing occurs before Worker JSON parsing for large Responses bodies.
-- Small Responses and all Chat Completions retain the legacy path.
+- With the production threshold of `1`, accepted non-empty Responses bodies
+  route to prepare even when `Content-Length` is malformed.
+- Small Responses retain the legacy path when prepare is disabled or a
+  non-production threshold explicitly leaves them there. All Chat Completions
+  retain the legacy path.
 - Model, policy, tool, quota, reservation, and in-flight failures match current
   semantics.
 - Deno failure does not invoke the Durable Object tokenizer.
@@ -609,20 +645,23 @@ Errors remain status-only or use the bounded allowlisted error code.
 
 ## Rollout and Acceptance
 
-1. Deploy Stage 1 with the two prepare settings absent; keep the existing
-   four-setting Deno tokenizer group unchanged.
-2. Run the existing test suite and a sanitized large-body CPU canary.
-3. Deploy the Deno service with `/prepare` and verify health/authentication.
-4. Enable prepare routing for production with a measured threshold. Include
-   the prepare pair in upload arguments only when both values are complete and
-   valid; never pass an empty `--var` as a disabled placeholder.
+1. Deploy or verify the Deno service with `/prepare`, then verify health and
+   authentication without exposing the shared auth value.
+2. Set the complete production pair in the `deno-production` GitHub
+   Environment: `DENO_PREPARE_ENDPOINT` to the production `/prepare` URL and
+   `DENO_PREPARE_THRESHOLD_BYTES` to `1`.
+3. Require the production configuration validator and Worker upload step to
+   reject an absent, partial, empty, or invalid prepare pair. Never pass an
+   empty `--var` as a disabled placeholder.
+4. Run the existing test suite and a sanitized large-body CPU canary in the
+   isolated Preview control plane.
 5. Run sanitized approximately 74k-token payloads at concurrency 1 and 2.
 6. Confirm no Worker `exceededCpu` outcome for the incident payload class.
 7. Confirm a `prepare` finish event, successful quota reservation, and correct
    upstream settlement.
-8. Roll back to a known Worker version that predates prepare. Omitting prepare
-   variables from a later `--keep-vars` upload is not a rollback because remote
-   variables persist.
+8. Roll back to a known Worker version that predates prepare when required.
+   Omitting prepare variables from a later `--keep-vars` upload is not a
+   rollback because remote variables persist.
 
 Rollback verification uses the same synthetic Responses payload that routed to
 prepare before rollback. After the version rollback, verify that:
@@ -676,6 +715,8 @@ dependency.
 Acceptance requires all of the following:
 
 - `MAX_INPUT_BYTES` remains 1 MiB.
+- Production cannot deploy without a complete valid prepare pair and uses
+  threshold `1`.
 - Production and Preview deployment checks propagate one control-plane-local
   input-limit value to both Worker and Deno, and Deno startup fails closed on a
   missing, invalid, or mismatched value.
@@ -688,40 +729,21 @@ Acceptance requires all of the following:
 
 ## Files in Scope
 
-The following are future implementation targets. This document-only revision
-does not modify any of them.
+The original prepare implementation is already present in the repository. The
+following are the activation and legacy-route hardening targets for this
+revision:
 
-- `apps/gateway-worker/src/request-body.ts`
 - `apps/gateway-worker/src/proxy.ts`
-- `apps/gateway-worker/src/upstream.ts`
-- `apps/gateway-worker/src/resource-observation.ts`
-- `apps/gateway-worker/src/deno-tokenizer-config.ts`
-- `apps/gateway-worker/src/deno-tokenizer-client.ts`
-- `apps/gateway-worker/src/tokenization-routing.ts` or a new prepare client
-- `apps/deno-tokenizer/src/http.ts`
-- `apps/deno-tokenizer/src/config.ts`
-- Shared normalization/prepare helpers under `packages/shared/src/`
-- Related Worker and Deno tests
-- `apps/gateway-worker/src/index.ts` for the explicit prepare environment
-  bindings
 - `.github/workflows/deploy-production.yml`
-- `.github/workflows/deploy-deno-tokenizer.yml` for shared input-limit injection
-  and startup assertion wiring
 - `scripts/production-deno-config.mjs`
 - `scripts/production-deno-config.test.mjs`
-- `scripts/preview-worker-config.mjs`
-- `scripts/preview-worker-config.test.mjs`
-- `.github/workflows/preview-smoke.yml`
-- `scripts/preview-workflow.test.sh`
-- `scripts/setup-preview.zsh`
-- `scripts/setup-preview.test.zsh`
-- `.env.example`
+- `scripts/deploy-production-workflow.test.mjs`
+- `apps/gateway-worker/test/proxy-prepare.test.ts`
 - `docs/configuration.md`
 - `docs/deno-tokenizer.md`
 - `docs/operations.md`
-- `SPEC.md`
 
 `apps/gateway-worker/wrangler.jsonc` and `deno.json` are read-only verification
-references. `.github/workflows/deploy-deno-tokenizer.yml` is an implementation
-target for propagating the shared input limit and generated startup assertion;
-its existing source staging and secret isolation must remain unchanged.
+references for this revision. The existing Deno deployment workflow, source
+staging, shared input-limit propagation, startup assertion, and secret
+isolation must remain unchanged.
