@@ -29,9 +29,9 @@
 
 ## Review Gate Resolution
 
-- **RG-001:** Task 5 makes a deployed, Version Override-targeted Preview candidate and its full acceptance evidence an explicit gate before any production prepare variable, deployment, or canary.
-- **RG-002:** Task 4 requires the operator runbook to carry Task 5's executable temporary-file, result assertion, `wrangler tail`, and request-audit procedure. Task 5 requires those checks for Preview, production, peak, and rollback instead of treating a canary process exit code as acceptance.
-- **RG-003:** This header identifies the approved design spec, and `Requirement Coverage Review` maps every plan requirement to its design path and exact heading.
+- **RG-001:** Task 4 and Task 5 preserve the approved rollout order: Deno prerequisite verification, complete production pair configuration, production validation/upload/deployment, isolated Preview canary, then production canary and representative peak. Preview acceptance is not introduced as a prerequisite for production configuration or deployment.
+- **RG-002:** Task 4 requires the operator runbook to carry Task 5's executable temporary-file, result assertion, telemetry parser, `wrangler tail`, and request-audit procedures. Task 5 applies explicit request-ID, mode, version, resource-stage, CPU-outcome, and audit assertions to Preview, production, peak, and rollback instead of treating a canary process exit code as acceptance.
+- **RG-003:** This header identifies the approved design spec, and `Requirement Coverage Review` maps each plan requirement to its design path and exact heading without adding a Preview-before-production gate requirement.
 
 ---
 
@@ -469,18 +469,18 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
 - [ ] **Step 3: Update the operations runbook without introducing a second specification**
 
-  Replace the prepare-disabled production staging text in `docs/operations.md` with a Preview-before-production operational sequence. The runbook must make a Preview acceptance failure an explicit stop condition before an operator sets a production prepare variable, merges the candidate to `master`, or allows the resulting `deploy-production` run to mutate production.
+  Replace the prepare-disabled production staging text in `docs/operations.md` with the rollout sequence from the approved design. Do not make Preview acceptance a prerequisite for setting production variables, merging the candidate, or allowing the production workflow to validate, upload, or deploy. The runbook order must be:
 
   ```markdown
   1. Independently deploy or verify the Deno `/prepare` service and its health/authentication behavior. This prerequisite is outside the Worker workflow's pre-mutation validation boundary.
-  2. Use the existing same-repository Preview Deno smoke to deploy a valid prepare-configured Preview Worker version at 0%, then target that exact version with Cloudflare Version Override for the large Responses canary. Keep Preview configuration and credentials isolated from production.
-  3. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require one successful HTTP 200 result with a valid OCTG request ID and the expected Worker version for concurrency 1, and two equivalent results for concurrency 2.
-  4. Correlate every result's request ID to Worker resource-stage telemetry. Require a successful `prepare` finish, no legacy `body_read`/`parse`/`normalize` stages, a successful `quota_reserve` finish before upstream, successful upstream completion, no `exceededCpu`, and a completed request-audit row. Treat the D1 row only as settlement evidence; it never decides quota availability.
-  5. Only after every Preview assertion passes, configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`. Confirm its validation precedes D1 migration, Worker version upload, and Worker version deployment, and that it uploads both bindings directly without empty placeholders.
-  6. Repeat the same request-ID-correlated evidence procedure for production at concurrency 1, 2, and the operator-selected representative peak. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
+ 2. Configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`.
+ 3. Confirm the production validator runs before D1 migration, Worker version upload, and Worker version deployment, and that both prepare bindings are uploaded directly without empty placeholders.
+ 4. Use the existing same-repository Preview Deno smoke to deploy a valid prepare-configured Preview Worker version at 0%, then target that exact version with Cloudflare Version Override for the large Responses canary. Keep Preview configuration and credentials isolated from production.
+ 5. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require request-result, resource-stage, CPU-outcome, ordering, and bounded request-audit assertions for Preview, production, representative peak, and rollback. Treat the D1 row only as settlement evidence; it never decides quota availability.
+ 6. Run the production canary after the isolated Preview canary, then run the representative peak after concurrency 1 and 2. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
   ```
 
-  The runbook must include the executable temporary-file, canary-result, `wrangler tail`, and request-audit commands from Task 5 rather than replacing them with an unspecified instruction to "review telemetry." It must never print or persist the synthetic payload, client key, Deno authentication value, or upstream response body. Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
+  The runbook must include the executable temporary-file, canary-result, telemetry-parser, `wrangler tail`, and request-audit commands from Task 5 rather than replacing them with an unspecified instruction to "review telemetry." It must never print or persist the synthetic payload, client key, Deno authentication value, or upstream response body. Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
 
 - [ ] **Step 4: Verify wording, links, and read-only scope**
 
@@ -509,9 +509,220 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
 **Interfaces:**
 - Consumes: Tasks 1 through 4; the independently deployed Deno `/prepare` service; a same-repository Preview pull request; isolated Preview and production Wrangler credentials; and dedicated canary clients for each control plane.
-- Produces: automated verification evidence; Preview acceptance evidence that gates every production mutation; a safe production activation record; and request-ID-correlated rollback evidence with no request content or credentials recorded.
+- Produces: automated verification evidence; a safe production activation record; Preview and production request-ID-correlated acceptance evidence; and rollback evidence with no request content or credentials recorded.
 - Requires: `PREVIEW_PREPARE_VERSION_ID`, `PREVIEW_WORKER_NAME`, `PRODUCTION_WORKER_NAME`, `CANARY_D1_DATABASE`, and the intended Worker version are recorded as safe identifiers only. `CANARY_D1_DATABASE` selects audit evidence for the matching control plane; it is never a quota authority.
 - Preserves: the independent Deno deployment workflow and the existing `/tokenize` route for legacy/rollback behavior.
+
+  The following two shell functions are the complete, repository-free acceptance procedures used by the canary steps below. Define them in the protected operator shell before running the steps. They consume only the canary result file and the version-filtered `wrangler tail --format=json` capture; they do not print request bodies, client keys, or authentication values.
+
+  `assert_telemetry` accepts these positional inputs: canary result file, telemetry capture file, expected Worker version, expected concurrency list, expected mode (`prepared` or `legacy`), and the expected legacy tokenization provider. It derives the exact request ID set from the canary result records, rejects duplicate IDs, and fails non-zero for missing/duplicate stage events, wrong outcomes/providers, forbidden stages, bad ordering, wrong revisions, or `exceededCpu`.
+
+  ```bash
+  assert_telemetry() {
+    local canary_output="$1"
+    local telemetry_output="$2"
+    local expected_worker_version="$3"
+    local expected_concurrencies="$4"
+    local expected_mode="$5"
+    local expected_legacy_provider="${6:-}"
+
+    CANARY_OUTPUT="$canary_output" \
+    TELEMETRY_OUTPUT="$telemetry_output" \
+    EXPECTED_WORKER_VERSION="$expected_worker_version" \
+    EXPECTED_CONCURRENCIES="$expected_concurrencies" \
+    EXPECTED_MODE="$expected_mode" \
+    EXPECTED_LEGACY_TOKENIZATION_PROVIDER="$expected_legacy_provider" \
+    node --input-type=module <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const fail = (message) => {
+    throw new Error(`telemetry assertion failed: ${message}`);
+  };
+  const requestIdPattern = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+  const mode = process.env.EXPECTED_MODE;
+  const expectedWorkerVersion = process.env.EXPECTED_WORKER_VERSION;
+  const expectedLegacyProvider = process.env.EXPECTED_LEGACY_TOKENIZATION_PROVIDER;
+  if (!expectedWorkerVersion) fail("expected Worker version is missing");
+  if (mode !== "prepared" && mode !== "legacy") fail("expected mode is invalid");
+  if (mode === "legacy" && !["deno", "cloudflare_do"].includes(expectedLegacyProvider)) {
+    fail("expected legacy tokenization provider is invalid");
+  }
+
+  const expectedKeys = process.env.EXPECTED_CONCURRENCIES.split(",").map((value) => {
+    const concurrency = Number(value.trim());
+    if (!Number.isSafeInteger(concurrency) || concurrency <= 0 || concurrency > 64) {
+      fail("expected concurrency is invalid");
+    }
+    return Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`);
+  }).flat();
+  const expectedKeySet = new Set(expectedKeys);
+  if (expectedKeySet.size !== expectedKeys.length) fail("expected concurrency list contains duplicates");
+
+  const canaryRecords = readFileSync(process.env.CANARY_OUTPUT, "utf8").split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (canaryRecords.length !== expectedKeySet.size) fail("unexpected canary result count");
+  const requestIds = new Set();
+  for (const record of canaryRecords) {
+    const key = `${record.concurrency}/${record.ordinal}`;
+    if (!expectedKeySet.delete(key)) fail("unexpected or duplicate canary ordinal");
+    if (record.outcome !== "response" || record.status !== 200) fail("canary HTTP result failed");
+    if (!requestIdPattern.test(record.requestId ?? "")) fail("canary request ID is missing or invalid");
+    if (record.workerVersion !== expectedWorkerVersion) fail("canary Worker version mismatch");
+    if (requestIds.has(record.requestId)) fail("canary request ID is duplicated");
+    requestIds.add(record.requestId);
+  }
+  if (expectedKeySet.size !== 0) fail("canary result is missing");
+
+  const stageEvents = [];
+  const exceededCpu = [];
+  let order = 0;
+  const visit = (value, lineNumber) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry, lineNumber));
+      return;
+    }
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (text.startsWith("{") || text.startsWith("[")) {
+        try { visit(JSON.parse(text), lineNumber); } catch { /* non-JSON log text */ }
+      }
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    if (value.event === "octg.resource_stage") stageEvents.push({ ...value, order: order++, lineNumber });
+    if (value.outcome === "exceededCpu") exceededCpu.push(value);
+    Object.values(value).forEach((entry) => visit(entry, lineNumber));
+  };
+
+  for (const [lineNumber, line] of readFileSync(process.env.TELEMETRY_OUTPUT, "utf8").split(/\r?\n/).entries()) {
+    if (line.trim() === "") continue;
+    try { visit(JSON.parse(line), lineNumber); } catch { /* missing expected events fail below */ }
+  }
+  if (exceededCpu.length !== 0) fail("Worker reported exceededCpu");
+
+  const forRequest = (requestId) => stageEvents.filter((event) => event.requestId === requestId);
+  const assertNoStage = (events, stages) => {
+    if (events.some((event) => stages.includes(event.stage))) fail("forbidden resource stage observed");
+  };
+  const requireSuccessfulPair = (events, stage, predicate) => {
+    const matching = events.filter((event) => event.stage === stage);
+    const starts = matching.filter((event) => event.phase === "start");
+    const finishes = matching.filter((event) => event.phase === "finish");
+    if (starts.length !== 1 || finishes.length !== 1) fail(`stage ${stage} is not exactly one start/finish pair`);
+    const [start] = starts;
+    const [finish] = finishes;
+    if (start.revisionId !== expectedWorkerVersion || finish.revisionId !== expectedWorkerVersion) {
+      fail(`stage ${stage} has an unexpected Worker revision`);
+    }
+    if (start.order >= finish.order || finish.outcome !== "success" || !predicate(finish)) {
+      fail(`stage ${stage} did not satisfy its success assertion`);
+    }
+    return { start, finish };
+  };
+
+  for (const requestId of requestIds) {
+    const events = forRequest(requestId);
+    if (events.length === 0) fail("request has no correlated resource-stage telemetry");
+    if (events.some((event) => event.revisionId !== expectedWorkerVersion)) {
+      fail("request has telemetry from an unexpected Worker revision");
+    }
+
+    if (mode === "prepared") {
+      assertNoStage(events, ["body_read", "parse", "normalize", "tokenize"]);
+      requireSuccessfulPair(events, "prepare", (finish) => finish.tokenizationProvider === "deno");
+    } else {
+      assertNoStage(events, ["prepare"]);
+      requireSuccessfulPair(events, "body_read", () => true);
+      requireSuccessfulPair(events, "parse", () => true);
+      requireSuccessfulPair(events, "normalize", () => true);
+      requireSuccessfulPair(events, "tokenize", (finish) => finish.tokenizationProvider === expectedLegacyProvider);
+    }
+
+    const quota = requireSuccessfulPair(events, "quota_reserve", (finish) => finish.quotaReserved === true);
+    const upstream = requireSuccessfulPair(events, "upstream", (finish) => finish.upstreamReached === true);
+    if (quota.finish.order >= upstream.start.order) fail("upstream started before quota reservation finished");
+  }
+  console.log("resource-stage telemetry assertions passed");
+  NODE
+  }
+  ```
+
+  `assert_audit_completed` accepts the canary result file, a protected audit output file, and the matching control-plane D1 database name. It queries only the exact request IDs produced by the canary parser, retries for a bounded period, and exits non-zero for a query failure, missing row, duplicate row, or any status other than `completed`.
+
+  ```bash
+  assert_audit_completed() {
+    local canary_output="$1"
+    local audit_output="$2"
+    local database="$3"
+    local audit_sql
+
+    audit_sql="$(node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const requestIdPattern = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+  const records = readFileSync(process.argv[2], "utf8").split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  const ids = records.map((record) => record.requestId);
+  if (ids.length === 0 || ids.some((id) => !requestIdPattern.test(id ?? "")) || new Set(ids).size !== ids.length) {
+    throw new Error("canary request ID set is missing, invalid, or duplicated");
+  }
+  process.stdout.write(`SELECT request_id, status FROM requests WHERE request_id IN (${ids.map((id) => `'${id}'`).join(",")}) ORDER BY request_id`);
+  NODE
+  )"
+
+    for attempt in 1 2 3 4 5 6; do
+      ./node_modules/.bin/wrangler d1 execute "$database" \
+        --remote \
+        --json \
+        --command "$audit_sql" >"$audit_output"
+      if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const resultRecords = readFileSync(process.argv[2], "utf8").split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  const expectedIds = new Set(resultRecords.map((record) => record.requestId));
+  const rows = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value === null || typeof value !== "object") return;
+    if (typeof value.request_id === "string" && typeof value.status === "string") rows.push(value);
+    Object.values(value).forEach(visit);
+  };
+  visit(JSON.parse(readFileSync(process.argv[3], "utf8")));
+  for (const requestId of expectedIds) {
+    const matching = rows.filter((row) => row.request_id === requestId);
+    if (matching.length !== 1 || matching[0].status !== "completed") process.exit(1);
+  }
+  NODE
+      then
+        return 0
+      fi
+      if [ "$attempt" = 6 ]; then
+        echo "canary settlement evidence was not completed" >&2
+        return 1
+      fi
+      sleep 5
+    done
+  }
+  ```
 
 - [ ] **Step 1: Run the full automated verification suite before any deployment**
 
@@ -531,7 +742,32 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   Record only these safe facts: Deno deployment revision, health status, authenticated prepare status, the deployed `MAX_INPUT_BYTES` decimal value, and successful startup assertion status.
 
-- [ ] **Step 3: Deploy and identify an isolated Preview prepare candidate before any production mutation**
+- [ ] **Step 3: Configure and deploy the mandatory production pair before the Preview canary**
+
+  Before production activation, record the currently compatible pre-prepare Worker version as `KNOWN_PREPARE_FREE_VERSION_ID` from the single 100% deployment. Do not expose credentials while doing so.
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  production_deployments_file="$(mktemp)"
+  trap 'rm -f "$production_deployments_file"' EXIT
+  ./node_modules/.bin/wrangler deployments status \
+    --config apps/gateway-worker/wrangler.jsonc \
+    --json > "$production_deployments_file"
+  KNOWN_PREPARE_FREE_VERSION_ID="$(jq -er '
+    [.versions[] | select(.percentage == 100) | .version_id]
+    | if length == 1 then .[0] else error("expected one 100% production version") end
+  ' "$production_deployments_file")"
+  export KNOWN_PREPARE_FREE_VERSION_ID
+  ```
+
+  Set `DENO_PREPARE_ENDPOINT` in `deno-production` to the approved production HTTPS `/prepare` URL and set `DENO_PREPARE_THRESHOLD_BYTES=1`. The authorized release operator then merges the candidate to `master`; that push invokes `deploy-production`. Do not grant an implementation agent authority to merge a pull request merely to execute this plan.
+
+  Require the production workflow to pass. Its log must show `Validate Production Deno tokenizer configuration` before D1 migration, Worker version upload, and Worker version deployment, with no value-bearing configuration error. Afterwards, identify the exact 100% deployed version with the same `wrangler deployments status` command and assign it to `EXPECTED_PRODUCTION_WORKER_VERSION`. A failed workflow run or version lookup is a stop condition for the subsequent canary steps.
+
+  The production pair and its deployment are intentionally before Step 4, matching the approved `## Rollout and Acceptance` sequence. Preview acceptance must not be described as a prerequisite for these production configuration or deployment mutations.
+
+- [ ] **Step 4: Deploy and identify an isolated Preview prepare candidate after production deployment**
 
   Configure only Preview's isolated `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` sources. Do not set `deno-production` variables. Open or update a same-repository pull request for the candidate, then wait for the existing `Preview Smoke Test` workflow's `deno-version-smoke` job to pass. That job deploys a valid-auth Deno Preview Worker version at 0% and restores the captured Preview version after its smoke checks.
 
@@ -577,9 +813,9 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   export PREVIEW_PREPARE_VERSION_ID
   ```
 
-  A missing, non-unique, or non-UUID version ID fails Preview acceptance. Do not set a production variable, merge the candidate, or invoke a production deployment until the Preview canary in Step 4 passes.
+  A missing, non-unique, or non-UUID version ID fails Preview acceptance. Production pair configuration and deployment are completed in Step 3; do not proceed to the production canary until this Preview candidate and its assertions are complete.
 
-- [ ] **Step 4: Run a request-ID-correlated Preview Responses canary and make it a production gate**
+  **Continue Step 4: Run the request-ID-correlated Preview Responses canary after production deployment**
 
   Export the existing `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` names with isolated Preview values. Use `OCTG_VERSION_OVERRIDE` so every request targets `PREVIEW_PREPARE_VERSION_ID`; `scripts/canary-worker-resource-limits.mjs` cannot add that header itself, so use its exported `requestCanary()` through this one-shot inline Node command. The command changes no repository file and emits only existing safe `octg.canary.result` fields.
 
@@ -597,7 +833,9 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   payload_file="$(mktemp)"
   canary_output="$(mktemp)"
   telemetry_output="$(mktemp)"
-  trap 'rm -f "$payload_file" "$canary_output" "$telemetry_output"' EXIT
+  audit_output="$(mktemp)"
+  tail_pid=""
+  trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
   node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
   import { writeFileSync } from "node:fs";
 
@@ -612,7 +850,6 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     --format=json \
     --version-id="$PREVIEW_PREPARE_VERSION_ID" >"$telemetry_output" 2>&1 &
   tail_pid=$!
-  trap 'kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; rm -f "$payload_file" "$canary_output" "$telemetry_output"' EXIT
   sleep 5
   kill -0 "$tail_pid"
   CANARY_PAYLOAD_PATH="$payload_file" CANARY_ENV_FILE=admin.env CANARY_CONCURRENCY=1,2 \
@@ -692,109 +929,47 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   NODE
   ```
 
-  Use the request IDs from that assertion to inspect only their `octg.resource_stage` records in `telemetry_output`. This is an explicit acceptance assertion, not an informal log review: each request must have exactly one successful `prepare` finish with `tokenizationProvider: "deno"`; no `body_read`, `parse`, or `normalize` stage; a successful `quota_reserve` finish with `quotaReserved: true`; an `upstream` stage after that reservation with successful completion and `upstreamReached: true`; and no `exceededCpu` invocation outcome in the version-filtered capture. Fail when a result has no correlated stage record, a condition is absent, or a condition is contradicted. Also fail if the marker appears in either protected capture:
+  Run the complete telemetry procedure defined above with the exact Preview inputs. The canary result file supplies the exact request ID set; the expected mode is `prepared`; and the expected Worker version is the Version Override target. The command fails non-zero for every missing, duplicate, contradictory, out-of-order, wrong-version, forbidden-stage, or `exceededCpu` observation:
 
   ```bash
-  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output"; then
-    echo "canary payload marker appeared in telemetry" >&2
+  assert_telemetry \
+    "$canary_output" \
+    "$telemetry_output" \
+    "$PREVIEW_PREPARE_VERSION_ID" \
+    "1,2" \
+    prepared \
+    ""
+  ```
+
+  Also fail if the marker or the canary client key appears in either protected capture:
+
+  ```bash
+  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
+     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
+    echo "canary payload marker or client key appeared in protected capture" >&2
     exit 1
   fi
   ```
 
-  Query only `request_id` and `status` from the matching control-plane D1 database after a bounded wait. `completed` is the required settlement evidence; `orphaned`, `uncertain`, a missing row, or a query failure fails acceptance. This query is an operational confirmation only: D1 remains audit-only and never makes a quota decision.
+  Run the complete bounded audit procedure defined above with the isolated Preview database and the same canary result file. `completed` is the required settlement evidence; `orphaned`, `uncertain`, a missing row, a duplicate row, or a query failure fails acceptance. This query is an operational confirmation only: D1 remains audit-only and never makes a quota decision.
 
   ```bash
   : "${CANARY_D1_DATABASE:?set the isolated Preview D1 database name}"
-  audit_sql="$(node --input-type=module - "$canary_output" <<'NODE'
-  import { readFileSync } from "node:fs";
-
-  const records = readFileSync(process.argv[2], "utf8").split("\n").flatMap((line) => {
-    try {
-      const value = JSON.parse(line);
-      return value.event === "octg.canary.result" ? [value] : [];
-    } catch {
-      return [];
-    }
-  });
-  const ids = records.map((record) => record.requestId);
-  if (ids.some((id) => !/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(id ?? ""))) throw new Error("unsafe request ID");
-  process.stdout.write(`SELECT request_id, status FROM requests WHERE request_id IN (${ids.map((id) => `'${id}'`).join(",")}) ORDER BY request_id`);
-  NODE
-  )"
-  audit_output="$(mktemp)"
-  trap 'rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
-  for attempt in 1 2 3 4 5 6; do
-    ./node_modules/.bin/wrangler d1 execute "$CANARY_D1_DATABASE" \
-      --remote \
-      --json \
-      --command "$audit_sql" >"$audit_output"
-    if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
-  import { readFileSync } from "node:fs";
-
-  const resultRecords = readFileSync(process.argv[2], "utf8").split("\n").flatMap((line) => {
-    try {
-      const value = JSON.parse(line);
-      return value.event === "octg.canary.result" ? [value] : [];
-    } catch {
-      return [];
-    }
-  });
-  const expectedIds = new Set(resultRecords.map((record) => record.requestId));
-  const rows = [];
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.forEach(visit);
-    if (value === null || typeof value !== "object") return;
-    if (typeof value.request_id === "string" && typeof value.status === "string") rows.push(value);
-    Object.values(value).forEach(visit);
-  };
-  visit(JSON.parse(readFileSync(process.argv[3], "utf8")));
-  for (const requestId of expectedIds) {
-    const matching = rows.filter((row) => row.request_id === requestId);
-    if (matching.length !== 1 || matching[0].status !== "completed") process.exit(1);
-  }
-  NODE
-    then
-      break
-    fi
-    if [ "$attempt" = 6 ]; then
-      echo "canary settlement evidence was not completed" >&2
-      exit 1
-    fi
-    sleep 5
-  done
+  assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
   ```
 
-  Preview acceptance is PASS only when every command and assertion above passes. On any failure, delete the temporary files, retain only safe failure facts, and stop. Production configuration, deployment, and canaries are prohibited after a Preview failure.
+  Preview acceptance is PASS only when every command and assertion above passes. On failure, delete the temporary files, retain only safe failure facts, and stop the subsequent production canary. This Preview evidence is collected after production configuration and deployment; it is not a pre-mutation production gate.
 
-- [ ] **Step 5: Configure and deploy the mandatory production pair only after Preview PASS**
+- [ ] **Step 5: Run the production canary at concurrency 1 and 2 with explicit deterministic evidence assertions**
 
-  Before production activation, record the currently compatible pre-prepare Worker version as `KNOWN_PREPARE_FREE_VERSION_ID` from the single 100% deployment. Do not expose credentials while doing so.
-
-  ```bash
-  set -euo pipefail
-  production_deployments_file="$(mktemp)"
-  trap 'rm -f "$production_deployments_file"' EXIT
-  ./node_modules/.bin/wrangler deployments status \
-    --config apps/gateway-worker/wrangler.jsonc \
-    --json > "$production_deployments_file"
-  KNOWN_PREPARE_FREE_VERSION_ID="$(jq -er '
-    [.versions[] | select(.percentage == 100) | .version_id]
-    | if length == 1 then .[0] else error("expected one 100% production version") end
-  ' "$production_deployments_file")"
-  export KNOWN_PREPARE_FREE_VERSION_ID
-  ```
-
-  Only after Step 4 is PASS, set `DENO_PREPARE_ENDPOINT` in `deno-production` to the approved production HTTPS `/prepare` URL and set `DENO_PREPARE_THRESHOLD_BYTES=1`. The authorized release operator then merges the candidate to `master`; that push invokes `deploy-production`. Do not grant an implementation agent authority to merge a pull request merely to execute this plan.
-
-  Require the production workflow to pass. Its log must show `Validate Production Deno tokenizer configuration` before D1 migration, Worker version upload, and Worker version deployment, with no value-bearing configuration error. Afterwards, identify the exact 100% deployed version with the same `wrangler deployments status` command and assign it to `EXPECTED_PRODUCTION_WORKER_VERSION`. A failed Preview assertion, workflow run, or version lookup is a stop condition; do not continue to the production canary.
-
-- [ ] **Step 6: Run the production canary at concurrency 1 and 2 with the same deterministic evidence gate**
-
-  Set `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` from the dedicated production canary configuration; set `PRODUCTION_WORKER_NAME`, `EXPECTED_PRODUCTION_WORKER_VERSION`, and `CANARY_D1_DATABASE` for production. Start the version-filtered `wrangler tail` capture from Step 4 before the request, create the same synthetic payload in a protected temporary file, and capture stdout to a protected `canary_output` file. Do not use Version Override in production.
+  Set `OCTG_CANARY_URL`, `OCTG_CANARY_ALLOWED_HOSTS`, and `OCTG_CANARY_CLIENT_KEY` from the dedicated production canary configuration; set `PRODUCTION_WORKER_NAME`, `EXPECTED_PRODUCTION_WORKER_VERSION`, and `CANARY_D1_DATABASE` for production. Start a version-filtered `wrangler tail` capture before the request, create the synthetic payload in a protected temporary file, and capture stdout to a protected `canary_output` file. Do not use Version Override in production.
 
   ```bash
   set -euo pipefail
   umask 077
+  : "${OCTG_CANARY_URL:?set the production canary URL}"
+  : "${OCTG_CANARY_ALLOWED_HOSTS:?set the production canary host allowlist}"
+  : "${OCTG_CANARY_CLIENT_KEY:?set the production canary client key}"
   : "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
   : "${EXPECTED_PRODUCTION_WORKER_VERSION:?set the deployed production version ID}"
   : "${CANARY_D1_DATABASE:?set the production D1 database name}"
@@ -857,35 +1032,136 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   NODE
   ```
 
-  Then run the Step 4 telemetry correlation, marker-leak check, and bounded request-audit query against the production capture. In addition to the marker check, fail without printing the key if the protected captures contain the client key:
+  Run the complete telemetry procedure defined above with the exact production inputs. The expected mode is `prepared`, the exact request ID set is derived from this step's `canary_output`, and the expected Worker version is `EXPECTED_PRODUCTION_WORKER_VERSION`:
 
   ```bash
-  if grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
-    echo "canary client key appeared in protected capture" >&2
-    exit 1
-  fi
+  assert_telemetry \
+    "$canary_output" \
+    "$telemetry_output" \
+    "$EXPECTED_PRODUCTION_WORKER_VERSION" \
+    "1,2" \
+    prepared \
+    ""
   ```
 
-  Production acceptance requires every prepared-route condition from Step 4 for every request ID. An HTTP 500, a timeout, a missing result, an unexpected version, missing telemetry, a non-`completed` audit state, or `exceededCpu` is failure, not a successful canary process exit.
-
-- [ ] **Step 7: Run the operator-defined production peak only after concurrency 1 and 2 pass**
-
-  Set `CANARY_PEAK_CONCURRENCY` to the representative expected peak as an integer from `3` through `64`; reject any other value. Allocate fresh protected payload, canary-output, telemetry, and audit-output files, then repeat the complete Step 6 tail capture, result assertion, telemetry correlation, marker-leak check, and bounded request-audit query, changing only the canary input and expected result set.
+  Run the marker and client-key leak check, then the complete bounded audit procedure with this step's production database:
 
   ```bash
+  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
+     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
+    echo "canary payload marker or client key appeared in protected capture" >&2
+    exit 1
+  fi
+  assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
+  ```
+
+  Production acceptance requires every assertion in this step for every request ID. An HTTP 500, a timeout, a missing or duplicate result, an unexpected version or revision, missing telemetry, a forbidden legacy stage, a bad reservation/upstream order, a non-`completed` audit state, or `exceededCpu` is failure, not a successful canary process exit.
+
+- [ ] **Step 6: Run the operator-defined production peak after concurrency 1 and 2 pass**
+
+  Set `CANARY_PEAK_CONCURRENCY` to the representative expected peak as an integer from `3` through `64`; reject any other value. This step allocates fresh files and independently starts the version-filtered tail capture, sends concurrency `1`, `2`, and the selected peak, then runs both the HTTP/result assertion and the prepared-mode telemetry and audit assertions.
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  : "${OCTG_CANARY_URL:?set the production canary URL}"
+  : "${OCTG_CANARY_ALLOWED_HOSTS:?set the production canary host allowlist}"
+  : "${OCTG_CANARY_CLIENT_KEY:?set the production canary client key}"
+  : "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
+  : "${EXPECTED_PRODUCTION_WORKER_VERSION:?set the deployed production version ID}"
+  : "${CANARY_D1_DATABASE:?set the production D1 database name}"
   : "${CANARY_PEAK_CONCURRENCY:?set the representative production peak}"
   if ! [[ "$CANARY_PEAK_CONCURRENCY" =~ ^([3-9]|[1-5][0-9]|6[0-4])$ ]]; then
     echo "CANARY_PEAK_CONCURRENCY must be an integer from 3 through 64" >&2
     exit 2
   fi
+  export CANARY_BODY_MARKER="octg_canary_body_marker_${RANDOM}_${RANDOM}"
+  payload_file="$(mktemp)"
+  canary_output="$(mktemp)"
+  telemetry_output="$(mktemp)"
+  audit_output="$(mktemp)"
+  tail_pid=""
+  trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+  node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
+  import { writeFileSync } from "node:fs";
+
+  const [payloadPath, marker] = process.argv.slice(2);
+  writeFileSync(payloadPath, JSON.stringify({
+    model: "gpt-5",
+    input: `${marker} ${"token ".repeat(74_000)}`,
+    max_output_tokens: 16,
+  }), { mode: 0o600 });
+  NODE
+  ./node_modules/.bin/wrangler tail "$PRODUCTION_WORKER_NAME" \
+    --format=json \
+    --version-id="$EXPECTED_PRODUCTION_WORKER_VERSION" >"$telemetry_output" 2>&1 &
+  tail_pid=$!
+  sleep 5
+  kill -0 "$tail_pid"
   CANARY_PAYLOAD_PATH="$payload_file" \
   npm run canary:worker -- --env-file=admin.env \
     --concurrency="1,2,${CANARY_PEAK_CONCURRENCY}" | tee "$canary_output"
+  sleep 10
+  kill "$tail_pid"
+  wait "$tail_pid" || true
   ```
 
-  Run the result assertion with `EXPECTED_CONCURRENCIES="1,2,${CANARY_PEAK_CONCURRENCY}"` and `EXPECTED_WORKER_VERSION="$EXPECTED_PRODUCTION_WORKER_VERSION"`. Record only safe counts, request IDs, version IDs, result statuses, stage outcomes, and final PASS/FAIL. Do not record payload, client key, Deno authentication value, or upstream body.
+  Run this exact HTTP/result assertion; it derives the expected result key set from `EXPECTED_CONCURRENCIES` and fails on missing, duplicate, unexpected, non-200, missing-request-ID, or wrong-version results:
 
-- [ ] **Step 8: Verify rollback from a known pre-prepare Worker version with the same request-ID correlation**
+  ```bash
+  EXPECTED_CONCURRENCIES="1,2,${CANARY_PEAK_CONCURRENCY}" \
+  EXPECTED_WORKER_VERSION="$EXPECTED_PRODUCTION_WORKER_VERSION" \
+  node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const [path] = process.argv.slice(2);
+  const expectedVersion = process.env.EXPECTED_WORKER_VERSION;
+  const concurrencies = process.env.EXPECTED_CONCURRENCIES.split(",").map(Number);
+  const expected = new Set(concurrencies.flatMap((concurrency) =>
+    Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`),
+  ));
+  const records = readFileSync(path, "utf8").split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (records.length !== expected.size) throw new Error("unexpected canary result count");
+  for (const record of records) {
+    const key = `${record.concurrency}/${record.ordinal}`;
+    if (!expected.delete(key)) throw new Error("unexpected canary concurrency or ordinal");
+    if (record.outcome !== "response" || record.status !== 200) throw new Error("canary HTTP response failed");
+    if (!/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(record.requestId ?? "")) throw new Error("canary request ID missing");
+    if (record.workerVersion !== expectedVersion) throw new Error("canary Worker version mismatch");
+  }
+  if (expected.size !== 0) throw new Error("missing canary result");
+  console.log("canary result assertions passed");
+  NODE
+  ```
+
+  Run the complete prepared-mode telemetry assertion with this step's exact files, request ID set, and Worker version, then check for marker/client-key leakage and assert completed audit rows from the production database:
+
+  ```bash
+  assert_telemetry \
+    "$canary_output" \
+    "$telemetry_output" \
+    "$EXPECTED_PRODUCTION_WORKER_VERSION" \
+    "1,2,${CANARY_PEAK_CONCURRENCY}" \
+    prepared \
+    ""
+  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
+     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
+    echo "canary payload marker or client key appeared in protected capture" >&2
+    exit 1
+  fi
+  assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
+  ```
+
+  Record only safe counts, request IDs, version IDs, result statuses, stage outcomes, and final PASS/FAIL. Do not record payload, client key, Deno authentication value, or upstream body.
+
+- [ ] **Step 7: Verify rollback from a known pre-prepare Worker version with explicit legacy-mode assertions**
 
   If rollback is required, restore `KNOWN_PREPARE_FREE_VERSION_ID` instead of omitting prepare variables from a later `--keep-vars` upload:
 
@@ -897,11 +1173,14 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     --yes
   ```
 
-  Start a new protected capture and canary run before inspecting rollback behavior. Use the same result assertion and bounded audit query shown in Step 6, substituting `KNOWN_PREPARE_FREE_VERSION_ID` for `EXPECTED_PRODUCTION_WORKER_VERSION` and `EXPECTED_CONCURRENCIES=1,2`. Set `EXPECTED_LEGACY_TOKENIZATION_PROVIDER` from the retained tokenizer configuration: `deno` only when the configured legacy Deno tokenizer group and its threshold select it for this payload; otherwise `cloudflare_do`.
+  Start a new protected capture and canary run before inspecting rollback behavior. Set `EXPECTED_LEGACY_TOKENIZATION_PROVIDER` from the retained tokenizer configuration: `deno` only when the configured legacy Deno tokenizer group and its threshold select it for this payload; otherwise `cloudflare_do`. This step supplies `KNOWN_PREPARE_FREE_VERSION_ID` as the expected Worker version, `1,2` as the exact concurrency set, and `legacy` as the telemetry mode.
 
   ```bash
   set -euo pipefail
   umask 077
+  : "${OCTG_CANARY_URL:?set the production canary URL}"
+  : "${OCTG_CANARY_ALLOWED_HOSTS:?set the production canary host allowlist}"
+  : "${OCTG_CANARY_CLIENT_KEY:?set the production canary client key}"
   : "${KNOWN_PREPARE_FREE_VERSION_ID:?set the known rollback version}"
   : "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
   : "${CANARY_D1_DATABASE:?set the production D1 database name}"
@@ -911,7 +1190,8 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   canary_output="$(mktemp)"
   telemetry_output="$(mktemp)"
   audit_output="$(mktemp)"
-  trap 'if [ -n "${tail_pid:-}" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+  tail_pid=""
+  trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
   node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
   import { writeFileSync } from "node:fs";
 
@@ -935,7 +1215,60 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   wait "$tail_pid" || true
   ```
 
-  For every request ID, require no `prepare` stage; successful `body_read`, `parse`, and `normalize` stages; a successful `tokenize` finish with `tokenizationProvider` equal to `EXPECTED_LEGACY_TOKENIZATION_PROVIDER`; a successful `quota_reserve` before successful upstream completion; no `exceededCpu`; and `requests.status = "completed"` from the bounded audit query. Confirm `/tokenize` remains available without saving its body:
+  Run this exact HTTP/result assertion for the rollback request set:
+
+  ```bash
+  EXPECTED_CONCURRENCIES=1,2 \
+  EXPECTED_WORKER_VERSION="$KNOWN_PREPARE_FREE_VERSION_ID" \
+  node --input-type=module - "$canary_output" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const [path] = process.argv.slice(2);
+  const expectedVersion = process.env.EXPECTED_WORKER_VERSION;
+  const concurrencies = process.env.EXPECTED_CONCURRENCIES.split(",").map(Number);
+  const expected = new Set(concurrencies.flatMap((concurrency) =>
+    Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`),
+  ));
+  const records = readFileSync(path, "utf8").split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value.event === "octg.canary.result" ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (records.length !== expected.size) throw new Error("unexpected canary result count");
+  for (const record of records) {
+    const key = `${record.concurrency}/${record.ordinal}`;
+    if (!expected.delete(key)) throw new Error("unexpected canary concurrency or ordinal");
+    if (record.outcome !== "response" || record.status !== 200) throw new Error("rollback HTTP response failed");
+    if (!/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(record.requestId ?? "")) throw new Error("rollback request ID missing");
+    if (record.workerVersion !== expectedVersion) throw new Error("rollback Worker version mismatch");
+  }
+  if (expected.size !== 0) throw new Error("missing rollback canary result");
+  console.log("rollback result assertions passed");
+  NODE
+  ```
+
+  Run the complete legacy-mode telemetry assertion with this step's exact files and version. It requires no `prepare` stage; successful `body_read`, `parse`, and `normalize` stages; a successful `tokenize` finish with the configured legacy provider; a successful `quota_reserve` before successful upstream completion; and no `exceededCpu`:
+
+  ```bash
+  assert_telemetry \
+    "$canary_output" \
+    "$telemetry_output" \
+    "$KNOWN_PREPARE_FREE_VERSION_ID" \
+    "1,2" \
+    legacy \
+    "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
+  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
+     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
+    echo "rollback payload marker or client key appeared in protected capture" >&2
+    exit 1
+  fi
+  assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
+  ```
+
+  The audit assertion requires `requests.status = "completed"` for every rollback request. Confirm `/tokenize` remains available without saving its body:
 
   ```bash
   : "${DENO_TOKENIZER_ENDPOINT:?set the retained tokenizer endpoint}"
@@ -970,15 +1303,16 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 | Non-production optional pair and legacy rollback paths remain available. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance` | Tasks 2 and 4 | Task 2 does not edit the runtime resolver; Task 4 documents the separate non-production contract and version rollback. |
 | Deno prerequisite, control-plane-local input-limit propagation, Deno source, and secrets remain unchanged. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance`; `## Files in Scope` | Tasks 3 and 4 | Workflow/reference diff check is empty; secret-file assertions remain green. |
 | Public documentation is synchronized with the approved design. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Files in Scope` | Task 4 | Normative sections 9.4, 17, and 18 plus configuration, component, and operations documents receive the same production boundary and executable observation path. |
-| Preview acceptance gates production mutation, and CPU mitigation is measurable and independently rollbackable. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance`; `## Observability`; `### Worker Data Flow`; `## Testing` | Task 5 | Preview Version Override canary must pass request-result, resource-stage, audit, and `exceededCpu` assertions before production configuration or deployment. Production, peak, and rollback repeat the same request-ID correlation. |
+| Deno prerequisite verification, complete production pair configuration, production validation/upload/deployment, isolated Preview canary, then production canary and representative peak. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance` | Tasks 4 and 5 | Task 4 documents the approved order; Task 5 executes production configuration/deployment in Step 3, isolated Preview evidence in Step 4, production canary in Step 5, and representative peak in Step 6. |
+| CPU mitigation is observable and independently rollbackable. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Observability`; `## Testing`; `## Rollout and Acceptance` | Task 5 | The complete telemetry parser asserts exact request IDs, prepared/legacy resource stages, quota/upstream ordering, Worker revision, and absence of `exceededCpu`; the bounded D1 query asserts completed settlement evidence; Step 7 verifies the legacy route on a known pre-prepare version. |
 
 ## Plan Self-Review
 
-**Spec coverage:** The header identifies the approved superpowers design separately from the repository's normative `SPEC.md`. The coverage table maps each design heading to an implementation task and executable evidence. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; and Preview-gated rollout, canary, and rollback acceptance are Task 5. No Deno service implementation task is included because the approved design marks it complete and identifies it as a read-only verification reference for this revision.
+**Spec coverage:** The header identifies the approved superpowers design separately from the repository's normative `SPEC.md`. The coverage table maps each design heading to an implementation task and executable evidence. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; and the approved production-then-Preview-then-acceptance rollout, canary, and rollback procedures are Task 5. No Deno service implementation task is included because the approved design marks it complete and identifies it as a read-only verification reference for this revision.
 
 **Placeholder scan:** This plan contains no deferred implementation markers or generic error-handling instructions. Every source modification names the exact file, behavior to replace, tests to add or remove, command to run, expected failure, and target implementation shape. Task 5's environment values are deliberately operator-supplied identifiers or secrets; its commands validate and never print them. The approved Deno host is intentionally supplied by the operator and is never committed.
 
-**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, a Version Override only in Preview, the existing `octg.canary.result` shape, request IDs, resource-stage fields, and audit status without treating D1 as quota authority.
+**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, a Version Override only in Preview, the existing `octg.canary.result` shape, request IDs, `octg.resource_stage` fields, the existing Worker invocation `outcome` values, and audit status without treating D1 as quota authority. The reusable shell procedures define the exact prepared/legacy modes and all step-specific inputs explicitly.
 
 ## Implementation Order
 
