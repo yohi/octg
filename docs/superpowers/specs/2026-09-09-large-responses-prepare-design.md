@@ -81,9 +81,11 @@ requests.
 - In production, the trimmed `DENO_PREPARE_THRESHOLD_BYTES` value is exactly
   `"1"`; any other value is invalid, even when it is a positive safe integer
   within `MAX_INPUT_BYTES`.
-- Production prepare configuration validation completes before D1 migrations,
-  Worker version upload, or Worker version deployment. Invalid configuration
-  produces no remote mutation.
+- Invalid production Worker configuration causes the `deploy-production`
+  workflow to fail before its first remote mutation: D1 migration, Worker
+  version upload, or Worker version deployment. The independent Deno
+  `/prepare` service prerequisite deployment or verification is outside this
+  validation boundary and remains unchanged.
 
 ## Design
 
@@ -221,9 +223,11 @@ contract before the Worker version is uploaded:
   exactly the canonical string `"1"`. Leading-zero, decimal, exponent, and
   other numeric representations such as `"01"`, `"1.0"`, and `"1e0"` are
   rejected.
-- The validation failure occurs before D1 migration, Worker version upload, or
-  Worker version deployment. No remote mutation is attempted for invalid
-  production configuration.
+- Invalid production Worker configuration causes the `deploy-production`
+  workflow to fail before its first remote mutation: D1 migration, Worker
+  version upload, or Worker version deployment. The independent Deno
+  `/prepare` service prerequisite deployment or verification is outside this
+  validation boundary and remains unchanged.
 - The complete production pair is passed explicitly to the Worker upload; it
   is never omitted to represent the disabled state.
 
@@ -555,11 +559,14 @@ reservation as known-unused.
 
 Production configuration errors are evaluated outside the request path by the
 deployment validator. Missing, empty, partial, invalid, or non-canonical
-prepare values, including any trimmed threshold other than `"1"`, stop the
-workflow before D1 migration, Worker upload, and Worker deployment. This strict
-production rule does not change the non-production runtime truth table: both
-prepare values absent remains disabled, and a complete non-production pair may
-use any positive safe integer threshold no greater than `MAX_INPUT_BYTES`.
+prepare values, including any trimmed threshold other than `"1"`, cause the
+`deploy-production` workflow to stop before its first remote mutation: D1
+migration, Worker upload, or Worker deployment. The independent Deno
+`/prepare` service prerequisite deployment or verification is outside this
+validation boundary and remains unchanged. This strict production rule does
+not change the non-production runtime truth table: both prepare values absent
+remains disabled, and a complete non-production pair may use any positive safe
+integer threshold no greater than `MAX_INPUT_BYTES`.
 
 ## Observability
 
@@ -652,9 +659,10 @@ Errors remain status-only or use the bounded allowlisted error code.
 - Missing, empty, partial, invalid, or non-canonical production prepare values
   are rejected. This includes `"0"`, `"01"`, `"1.0"`, `"1e0"`, and every
   positive threshold other than `"1"`, including `"700000"`.
-- A production validation failure occurs before D1 migration, Worker version
-  upload, and Worker version deployment, and the workflow performs no remote
-  mutation in that case.
+- A production Worker configuration validation failure causes
+  `deploy-production` to stop before its first remote mutation: D1 migration,
+  Worker version upload, or Worker version deployment. The independent Deno
+  prerequisite deployment remains outside this guarantee and unchanged.
 - Non-production configuration tests continue to prove that both prepare
   values absent disables prepare and that a complete valid pair may use any
   positive safe-integer threshold no greater than `MAX_INPUT_BYTES`.
@@ -689,16 +697,21 @@ Errors remain status-only or use the bounded allowlisted error code.
 
 ## Rollout and Acceptance
 
-1. Deploy or verify the Deno service with `/prepare`, then verify health and
-   authentication without exposing the shared auth value.
+1. As an independent prerequisite, deploy or verify the Deno service with
+   `/prepare`, then verify health and authentication without exposing the
+   shared auth value. This operation belongs to the independent
+   `.github/workflows/deploy-deno-tokenizer.yml` workflow and is outside the
+   `deploy-production` Worker configuration validation boundary; that Deno
+   workflow remains unchanged.
 2. Set the complete production pair in the `deno-production` GitHub
    Environment: `DENO_PREPARE_ENDPOINT` to the production `/prepare` URL and
    `DENO_PREPARE_THRESHOLD_BYTES` to `1`.
 3. Require the production configuration validator and Worker upload step to
    reject an absent, partial, empty, invalid, or non-canonical prepare pair,
    including every threshold other than the trimmed string `"1"`. The
-   validation must finish before D1 migration or Worker upload. Never pass an
-   empty `--var` as a disabled placeholder.
+   `deploy-production` validation must finish before its first remote mutation:
+   D1 migration, Worker upload, or Worker deployment. Never pass an empty
+   `--var` as a disabled placeholder.
 4. Run the existing test suite and a sanitized large-body CPU canary in the
    isolated Preview control plane.
 5. Run sanitized approximately 74k-token payloads at concurrency 1 and 2.
@@ -756,7 +769,9 @@ prepare variables. Disabled-by-default is represented by variable absence, not
 empty-string placeholders. The existing Deno deployment manifest and staging
 workflow already include `apps/deno-tokenizer/src/**` and
 `packages/shared/src/**`; they require verification but no new source-tree
-dependency.
+dependency. The independent `.github/workflows/deploy-deno-tokenizer.yml`
+workflow is outside the `deploy-production` validation boundary and remains
+unchanged.
 
 Acceptance requires all of the following:
 
@@ -764,8 +779,10 @@ Acceptance requires all of the following:
 - Production cannot deploy without a complete valid prepare pair and uses
   the canonical trimmed threshold string `"1"`; numeric alternatives such as
   `"01"`, `"1.0"`, and `"1e0"` are invalid.
-- Production configuration validation fails before D1 migration, Worker
-  upload, or Worker deployment and performs no remote mutation when invalid.
+- Production configuration validation fails within `deploy-production` before
+  its first remote mutation: D1 migration, Worker upload, or Worker
+  deployment. It performs no remote mutation in that workflow when invalid;
+  the independent Deno prerequisite deployment is outside this guarantee.
 - Production and Preview deployment checks propagate one control-plane-local
   input-limit value to both Worker and Deno, and Deno startup fails closed on a
   missing, invalid, or mismatched value.
