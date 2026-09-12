@@ -78,6 +78,12 @@ requests.
 - In production, a missing or incomplete prepare pair blocks deployment rather
   than silently deploying a Worker that can route large Responses requests
   through the CPU-heavy legacy path.
+- In production, the trimmed `DENO_PREPARE_THRESHOLD_BYTES` value is exactly
+  `"1"`; any other value is invalid, even when it is a positive safe integer
+  within `MAX_INPUT_BYTES`.
+- Production prepare configuration validation completes before D1 migrations,
+  Worker version upload, or Worker version deployment. Invalid configuration
+  produces no remote mutation.
 
 ## Design
 
@@ -204,6 +210,22 @@ when the existing tokenizer group supplies the shared auth token and timeout.
 resolved `MAX_INPUT_BYTES`. An invalid prepare pair affects all Responses
 requests, including requests that would otherwise be below the prepare
 threshold; it never changes Chat configuration semantics.
+
+The truth table defines runtime resolver semantics for non-production and
+rollback environments. Production applies the following stricter deployment
+contract before the Worker version is uploaded:
+
+- The prepare pair is mandatory. Missing, empty, partial, or otherwise invalid
+  values are configuration errors.
+- After trimming surrounding whitespace, `DENO_PREPARE_THRESHOLD_BYTES` must be
+  exactly the canonical string `"1"`. Leading-zero, decimal, exponent, and
+  other numeric representations such as `"01"`, `"1.0"`, and `"1e0"` are
+  rejected.
+- The validation failure occurs before D1 migration, Worker version upload, or
+  Worker version deployment. No remote mutation is attempted for invalid
+  production configuration.
+- The complete production pair is passed explicitly to the Worker upload; it
+  is never omitted to represent the disabled state.
 
 The prepare endpoint must be HTTPS and must not contain URL credentials. The
 shared Deno authentication value remains a secret on both runtime sides.
@@ -531,6 +553,14 @@ stream-integrity failure is classified by whether the existing
 former case, and the latter uses `markUncertain` without releasing the
 reservation as known-unused.
 
+Production configuration errors are evaluated outside the request path by the
+deployment validator. Missing, empty, partial, invalid, or non-canonical
+prepare values, including any trimmed threshold other than `"1"`, stop the
+workflow before D1 migration, Worker upload, and Worker deployment. This strict
+production rule does not change the non-production runtime truth table: both
+prepare values absent remains disabled, and a complete non-production pair may
+use any positive safe integer threshold no greater than `MAX_INPUT_BYTES`.
+
 ## Observability
 
 The Worker adds a `prepare` resource stage for the Deno prepare branch. The
@@ -615,6 +645,20 @@ Errors remain status-only or use the bounded allowlisted error code.
   missing-marker detection and body read failure during consumption.
 - Final output token count remains the value selected after quota budgeting.
 
+### Production configuration validation
+
+- A complete production tokenizer group plus a complete prepare pair with the
+  trimmed threshold string `"1"` is accepted.
+- Missing, empty, partial, invalid, or non-canonical production prepare values
+  are rejected. This includes `"0"`, `"01"`, `"1.0"`, `"1e0"`, and every
+  positive threshold other than `"1"`, including `"700000"`.
+- A production validation failure occurs before D1 migration, Worker version
+  upload, and Worker version deployment, and the workflow performs no remote
+  mutation in that case.
+- Non-production configuration tests continue to prove that both prepare
+  values absent disables prepare and that a complete valid pair may use any
+  positive safe-integer threshold no greater than `MAX_INPUT_BYTES`.
+
 ### Proxy behavior
 
 - Prepare routing occurs before Worker JSON parsing for large Responses bodies.
@@ -651,7 +695,9 @@ Errors remain status-only or use the bounded allowlisted error code.
    Environment: `DENO_PREPARE_ENDPOINT` to the production `/prepare` URL and
    `DENO_PREPARE_THRESHOLD_BYTES` to `1`.
 3. Require the production configuration validator and Worker upload step to
-   reject an absent, partial, empty, or invalid prepare pair. Never pass an
+   reject an absent, partial, empty, invalid, or non-canonical prepare pair,
+   including every threshold other than the trimmed string `"1"`. The
+   validation must finish before D1 migration or Worker upload. Never pass an
    empty `--var` as a disabled placeholder.
 4. Run the existing test suite and a sanitized large-body CPU canary in the
    isolated Preview control plane.
@@ -716,7 +762,10 @@ Acceptance requires all of the following:
 
 - `MAX_INPUT_BYTES` remains 1 MiB.
 - Production cannot deploy without a complete valid prepare pair and uses
-  threshold `1`.
+  the canonical trimmed threshold string `"1"`; numeric alternatives such as
+  `"01"`, `"1.0"`, and `"1e0"` are invalid.
+- Production configuration validation fails before D1 migration, Worker
+  upload, or Worker deployment and performs no remote mutation when invalid.
 - Production and Preview deployment checks propagate one control-plane-local
   input-limit value to both Worker and Deno, and Deno startup fails closed on a
   missing, invalid, or mismatched value.
@@ -739,9 +788,21 @@ revision:
 - `scripts/production-deno-config.test.mjs`
 - `scripts/deploy-production-workflow.test.mjs`
 - `apps/gateway-worker/test/proxy-prepare.test.ts`
+- `SPEC.md` (`§9.4`, `§17`, and `§18`)
 - `docs/configuration.md`
 - `docs/deno-tokenizer.md`
 - `docs/operations.md`
+
+The implementation must synchronize the public documentation in the same
+change. `SPEC.md §9.4` must define the production/non-production prepare
+semantics and the exact threshold rule. `SPEC.md §17` must define the
+production mandatory-pair, threshold, and pre-mutation validation invariants.
+`SPEC.md §18` must define activation verification and rollback requirements.
+`docs/configuration.md` must distinguish the production-required pair from the
+non-production optional pair. `docs/deno-tokenizer.md` must document the
+production threshold and routing boundary. `docs/operations.md` must document
+the mandatory production activation, validation-before-mutation rule, canary,
+monitoring, and rollback procedure.
 
 `apps/gateway-worker/wrangler.jsonc` and `deno.json` are read-only verification
 references for this revision. The existing Deno deployment workflow, source
