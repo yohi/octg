@@ -234,6 +234,28 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     }
   });
 
+  test("retains invalid reporting for non-empty partial prepare values", () => {
+    assert.deepEqual(validateProductionDenoConfig({
+      ...completeProductionConfig,
+      DENO_PREPARE_ENDPOINT: "http://prepare.example/prepare",
+      DENO_PREPARE_THRESHOLD_BYTES: undefined,
+    }), {
+      valid: false,
+      missing: ["DENO_PREPARE_THRESHOLD_BYTES"],
+      invalid: ["DENO_PREPARE_ENDPOINT"],
+    });
+
+    assert.deepEqual(validateProductionDenoConfig({
+      ...completeProductionConfig,
+      DENO_PREPARE_ENDPOINT: undefined,
+      DENO_PREPARE_THRESHOLD_BYTES: "700000",
+    }), {
+      valid: false,
+      missing: ["DENO_PREPARE_ENDPOINT"],
+      invalid: ["DENO_PREPARE_THRESHOLD_BYTES"],
+    });
+  });
+
   test("reports every missing production variable by name", () => {
     assert.deepEqual(validateProductionDenoConfig({}), {
       valid: false,
@@ -539,7 +561,7 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 - Requires: while the candidate pull request is open, `PREVIEW_PR_NUMBER`, `PREVIEW_HEAD_SHA`, `PREVIEW_CONFIGURED_AT`, `PREVIEW_RUN_ID`, `PREVIEW_RUN_ATTEMPT`, and `PREVIEW_PREPARE_VERSION_ID` are recorded as safe identifiers or timestamps only; `PREVIEW_WORKER_NAME`, `PREVIEW_CONFIG`, `PRODUCTION_WORKER_NAME`, `CANARY_D1_DATABASE`, and the intended Worker version are also recorded as safe identifiers or an isolated temporary configuration path. The run identity must describe a successful `pull_request` attempt for `PREVIEW_HEAD_SHA` that started after `PREVIEW_CONFIGURED_AT`, and the version ID must be the sole new valid-auth artifact correlated to that attempt. `PREVIEW_PREPARE_VERSION_ID` is captured before the candidate is merged and is the only Preview Version Override target used by the large-body canary. `PREVIEW_CONFIG` selects the isolated Preview control plane for deployment status, traffic changes, and cleanup. `CANARY_D1_DATABASE` selects audit evidence for the matching control plane; it is never a quota authority.
 - Preserves: the independent Deno deployment workflow and the existing `/tokenize` route for legacy/rollback behavior.
 
-  The following two shell functions are the complete, repository-free acceptance procedures used by the canary steps below. Define them in the protected operator shell before running the steps. They consume only the canary result file and the version-filtered `wrangler tail --format=json` capture; they do not print request bodies, client keys, or authentication values.
+  The following three shell functions are the complete, repository-free acceptance procedures used by the canary steps below. Define them in the protected operator shell before running the steps. They consume only the canary result file and the version-filtered `wrangler tail --format=json` capture; secret values are supplied to Node.js through standard input and are never passed as process arguments.
 
   `assert_telemetry` accepts these positional inputs: canary result file, telemetry capture file, expected Worker version, expected concurrency list, expected mode (`prepared` or `legacy`), and the expected legacy tokenization provider. It derives the exact request ID set from the canary result records, rejects duplicate IDs, and fails non-zero for missing/duplicate stage events, wrong outcomes/providers, forbidden stages, bad ordering, wrong revisions, or `exceededCpu`.
 
@@ -679,6 +701,35 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   }
   ```
 
+  `assert_no_canary_secret_leak` accepts the two protected capture paths. It checks both the synthetic body marker and the canary client key through a Node.js validator; the two values cross the process boundary only through standard input.
+
+  ```bash
+  assert_no_canary_secret_leak() {
+    local canary_output="$1"
+    local telemetry_output="$2"
+
+    printf '%s\0%s\0' "$CANARY_BODY_MARKER" "$OCTG_CANARY_CLIENT_KEY" |
+      CANARY_OUTPUT="$canary_output" \
+      TELEMETRY_OUTPUT="$telemetry_output" \
+      node --input-type=module -e '
+        import { readFileSync } from "node:fs";
+
+        const [marker, clientKey] = readFileSync(0, "utf8").split("\0");
+        if (marker === undefined || clientKey === undefined || marker.length === 0 || clientKey.length === 0) {
+          throw new Error("canary secret validation input is incomplete");
+        }
+        const paths = [process.env.CANARY_OUTPUT, process.env.TELEMETRY_OUTPUT];
+        if (paths.some((path) => typeof path !== "string")) {
+          throw new Error("canary capture path is missing");
+        }
+        const captures = paths.map((path) => readFileSync(path, "utf8"));
+        if (captures.some((capture) => capture.includes(marker) || capture.includes(clientKey))) {
+          throw new Error("canary payload marker or client key appeared in protected capture");
+        }
+      '
+  }
+  ```
+
   `assert_audit_completed` accepts the canary result file, a protected audit output file, and the matching control-plane D1 database name. It queries only the exact request IDs produced by the canary parser, retries for a bounded period, and exits non-zero for a query failure, missing row, duplicate row, or any status other than `completed`.
 
   ```bash
@@ -709,11 +760,11 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   )"
 
     for attempt in 1 2 3 4 5 6; do
-      ./node_modules/.bin/wrangler d1 execute "$database" \
+      if ./node_modules/.bin/wrangler d1 execute "$database" \
         --remote \
         --json \
-        --command "$audit_sql" >"$audit_output"
-      if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
+        --command "$audit_sql" >"$audit_output"; then
+        if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
   import { readFileSync } from "node:fs";
 
   const resultRecords = readFileSync(process.argv[2], "utf8").split(/\r?\n/).flatMap((line) => {
@@ -738,8 +789,9 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     if (matching.length !== 1 || matching[0].status !== "completed") process.exit(1);
   }
   NODE
-      then
-        return 0
+        then
+          return 0
+        fi
       fi
       if [ "$attempt" = 6 ]; then
         echo "canary settlement evidence was not completed" >&2
@@ -1182,11 +1234,7 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   Also fail if the marker or the canary client key appears in either protected capture:
 
   ```bash
-  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
-     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
-    echo "canary payload marker or client key appeared in protected capture" >&2
-    exit 1
-  fi
+  assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
   ```
 
   Run the complete bounded audit procedure defined above with the isolated Preview database and the same canary result file. `completed` is the required settlement evidence; `orphaned`, `uncertain`, a missing row, a duplicate row, or a query failure fails acceptance. This query is an operational confirmation only: D1 remains audit-only and never makes a quota decision.
@@ -1285,11 +1333,7 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
   Run the marker and client-key leak check, then the complete bounded audit procedure with this step's production database:
 
   ```bash
-  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
-     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
-    echo "canary payload marker or client key appeared in protected capture" >&2
-    exit 1
-  fi
+  assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
   assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
   ```
 
@@ -1389,11 +1433,7 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     "1,2,${CANARY_PEAK_CONCURRENCY}" \
     prepared \
     ""
-  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
-     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
-    echo "canary payload marker or client key appeared in protected capture" >&2
-    exit 1
-  fi
+  assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
   assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
   ```
 
@@ -1498,11 +1538,7 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
     "1,2" \
     legacy \
     "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
-  if grep -Fq "$CANARY_BODY_MARKER" "$canary_output" "$telemetry_output" || \
-     grep -Fq "$OCTG_CANARY_CLIENT_KEY" "$canary_output" "$telemetry_output"; then
-    echo "rollback payload marker or client key appeared in protected capture" >&2
-    exit 1
-  fi
+  assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
   assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
   ```
 
@@ -1518,13 +1554,23 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   writeFileSync(process.argv[2], JSON.stringify({ inputText: "rollback canary" }), { mode: 0o600 });
   NODE
-  curl --fail --silent --show-error \
-    --request POST \
-    --header "Authorization: Bearer ${DENO_TOKENIZER_AUTH_TOKEN}" \
-    --header "Content-Type: application/json" \
-    --data-binary "@${tokenize_payload}" \
-    --output /dev/null \
-    "$DENO_TOKENIZER_ENDPOINT"
+  printf '%s' "$DENO_TOKENIZER_AUTH_TOKEN" |
+    node --input-type=module -e '
+      import { readFileSync } from "node:fs";
+
+      const token = readFileSync(0, "utf8");
+      if (token.length === 0 || token.includes("\r") || token.includes("\n")) {
+        throw new Error("Deno tokenizer authentication value is invalid");
+      }
+      process.stdout.write(`header = ${JSON.stringify(`Authorization: Bearer ${token}`)}\n`);
+    ' |
+    curl --fail --silent --show-error \
+      --request POST \
+      --config - \
+      --header "Content-Type: application/json" \
+      --data-binary "@${tokenize_payload}" \
+      --output /dev/null \
+      "$DENO_TOKENIZER_ENDPOINT"
   ```
 
   Any missing, contradictory, or non-correlated observation fails rollback verification.
