@@ -241,7 +241,7 @@ import { readFileSync } from "node:fs";
 const [path, expectedHeadSha] = process.argv.slice(2);
 const pullRequest = JSON.parse(readFileSync(path, "utf8"));
 if (!/^[0-9a-f]{40}$/i.test(expectedHeadSha)) throw new Error("Preview head SHA is malformed");
-if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository === true) {
+if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository !== false) {
   throw new Error("Preview candidate must be an open same-repository pull request");
 }
 if (pullRequest.headRefOid !== expectedHeadSha) {
@@ -286,7 +286,7 @@ import { readFileSync } from "node:fs";
 
 const [path, expectedHeadSha] = process.argv.slice(2);
 const pullRequest = JSON.parse(readFileSync(path, "utf8"));
-if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository === true || pullRequest.headRefOid !== expectedHeadSha) {
+if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository !== false || pullRequest.headRefOid !== expectedHeadSha) {
   throw new Error("Preview candidate pull request changed during artifact staging");
 }
 NODE
