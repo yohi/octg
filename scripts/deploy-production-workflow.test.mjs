@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,14 +74,79 @@ function hasWranglerDeployKeepVars(runCommand) {
   });
 }
 
-function extractPrepareArgsScript(runCommand) {
-  if (!runCommand) return null;
+function extractWorkflowJobs(workflow) {
+  const jobsIndex = workflow.search(/^jobs:\s*$/m);
+  if (jobsIndex < 0) return [];
 
-  const start = runCommand.indexOf("prepare_args=()");
-  const end = runCommand.indexOf("secrets_file=", start);
-  if (start < 0 || end < 0) return null;
+  const jobsWorkflow = workflow.slice(jobsIndex);
+  const jobMatches = [...jobsWorkflow.matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)];
+  return jobMatches.map((match, index) => {
+    const jobEnd = jobMatches[index + 1]?.index ?? jobsWorkflow.length;
+    const block = jobsWorkflow.slice(match.index, jobEnd);
+    return {
+      id: match[1],
+      needs: extractJobNeeds(block),
+      steps: extractWorkflowSteps(block),
+    };
+  });
+}
 
-  return `set -euo pipefail\n${runCommand.slice(start, end)}`;
+function extractJobNeeds(jobBlock) {
+  const needsMatch = jobBlock.match(/^    needs:\s*(.*)$/m);
+  if (!needsMatch) return [];
+
+  const inlineNeeds = needsMatch[1].trim();
+  if (inlineNeeds) {
+    return inlineNeeds
+      .replace(/^\[|\]$/g, "")
+      .split(",")
+      .map((value) => value.trim().replace(/^['"]|['"]$/g, ""))
+      .filter(Boolean);
+  }
+
+  const needs = [];
+  const afterNeeds = jobBlock.slice(needsMatch.index + needsMatch[0].length);
+  for (const line of afterNeeds.split("\n")) {
+    if (/^ {4}\S/.test(line)) break;
+    const itemMatch = line.match(/^ {6}- ([A-Za-z0-9_-]+)\s*$/);
+    if (itemMatch) needs.push(itemMatch[1]);
+  }
+  return needs;
+}
+
+function extractWorkflowSteps(jobBlock) {
+  return [...jobBlock.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => {
+    const name = match[1].trim();
+    return { name, run: extractStepRun(jobBlock.slice(match.index), name) };
+  });
+}
+
+function assertRemoteMutationsFollowValidation(workflow, validationStepName, changeCommands) {
+  const jobs = extractWorkflowJobs(workflow);
+  const validationJobs = jobs.filter((job) =>
+    job.steps.some((step) => step.name === validationStepName)
+  );
+  assert.equal(validationJobs.length, 1, "Production configuration validation must exist in one job");
+
+  const validationJob = validationJobs[0];
+  const validationStepIndex = validationJob.steps.findIndex((step) => step.name === validationStepName);
+  for (const command of changeCommands) {
+    const changeJobs = jobs.filter((job) =>
+      job.steps.some((step) => typeof step.run === "string" && step.run.includes(command))
+    );
+    assert.equal(changeJobs.length, 1, `Production workflow must contain one job for ${command}`);
+
+    const changeJob = changeJobs[0];
+    const changeStepIndex = changeJob.steps.findIndex((step) =>
+      typeof step.run === "string" && step.run.includes(command)
+    );
+    const followsInSameJob = changeJob.id === validationJob.id && changeStepIndex > validationStepIndex;
+    const dependsOnValidationJob = changeJob.needs.includes(validationJob.id);
+    assert.ok(
+      followsInSameJob || dependsOnValidationJob,
+      `Production validation must precede ${command} in the same job or through needs: ${validationJob.id}`,
+    );
+  }
 }
 
 test("deploy-production workflow preserves remote environment variables using --keep-vars", () => {
@@ -98,10 +162,9 @@ test("deploy-production workflow preserves remote environment variables using --
   );
 });
 
-test("deploy-production workflow validates and injects non-secret Deno settings", () => {
+test("deploy-production workflow sources all non-secret settings from GitHub Variables", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
-
   for (const variableName of [
     "MAX_INPUT_BYTES",
     "DENO_TOKENIZER_ENDPOINT",
@@ -116,126 +179,38 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
       `Production workflow must source ${variableName} from GitHub Variables`,
     );
   }
+});
 
-  const validationStep = extractStepRun(
-    workflow,
-    "Validate Production Deno tokenizer configuration",
-  );
-  assert.match(validationStep, /node scripts\/production-deno-config\.mjs/);
-  assert.match(workflow, /PRODUCTION_PREPARE_CONFIGURED: \$\{\{ vars\.DENO_PREPARE_ENDPOINT != '' \|\| vars\.DENO_PREPARE_THRESHOLD_BYTES != '' \}\}/);
-  assert.match(validationStep, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
+test("deploy-production validates prepare configuration before every remote mutation", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const validationStepName = "Validate Production Deno tokenizer configuration";
+  const changeCommands = [
+    "wrangler d1 migrations apply",
+    "wrangler versions upload",
+    "wrangler versions deploy",
+  ];
 
-  const validationIndex = workflow.indexOf(
-    "- name: Validate Production Deno tokenizer configuration",
-  );
-  const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
-  assert.ok(validationIndex >= 0, "Production Deno validation step must exist");
-  assert.ok(
-    migrationIndex > validationIndex,
-    "Production Deno validation must run before D1 migrations",
-  );
+  assertRemoteMutationsFollowValidation(workflow, validationStepName, changeCommands);
+});
 
+test("deploy-production uploads the mandatory prepare pair directly", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const validationStep = extractStepRun(workflow, "Validate Production Deno tokenizer configuration");
   const deployCommand = extractStepRun(workflow, "Deploy Worker");
-  assert.ok(deployCommand, "Deploy Worker step must contain a run command");
-  assert.match(deployCommand, /--keep-vars/);
-  for (const variableName of [
-    "MAX_INPUT_BYTES",
-    "DENO_TOKENIZER_ENDPOINT",
-    "DENO_TOKENIZER_THRESHOLD_BYTES",
-    "DENO_TOKENIZER_TIMEOUT_MS",
-    "DENO_PREPARE_ENDPOINT",
-    "DENO_PREPARE_THRESHOLD_BYTES",
-  ]) {
-    assert.match(
-      deployCommand,
-      new RegExp(`--var "${variableName}:\\$\\{${variableName}\\}"`),
-      `Deploy Worker must pass ${variableName} explicitly to Wrangler`,
-    );
-  }
-
-  assert.match(deployCommand, /prepare_args=\(\)/);
-  assert.match(deployCommand, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
-  assert.match(deployCommand, /--var "MAX_INPUT_BYTES:\$\{MAX_INPUT_BYTES\}"/);
-  const prepareCheckIndex = deployCommand.indexOf("Production prepare variables must be supplied together");
-  const prepareAppendIndex = deployCommand.indexOf('prepare_args+=(--var "DENO_PREPARE_ENDPOINT');
-  assert.ok(prepareCheckIndex >= 0 && prepareCheckIndex < prepareAppendIndex);
+  assert.ok(validationStep, "Production configuration validation must have a run command");
+  assert.ok(deployCommand, "Deploy Worker must have a run command");
+  assert.match(validationStep, /node scripts\/production-deno-config\.mjs/);
+  assert.doesNotMatch(validationStep, /PRODUCTION_PREPARE_CONFIGURED|unset DENO_PREPARE_/);
+  assert.match(deployCommand, /--var "DENO_PREPARE_ENDPOINT:\$\{DENO_PREPARE_ENDPOINT\}"/);
+  assert.match(deployCommand, /--var "DENO_PREPARE_THRESHOLD_BYTES:\$\{DENO_PREPARE_THRESHOLD_BYTES\}"/);
+  assert.doesNotMatch(deployCommand, /prepare_args=\(\)|PRODUCTION_PREPARE_CONFIGURED|unset DENO_PREPARE_/);
 
   const denoWorkflow = readFileSync(join(root, ".github/workflows/deploy-deno-tokenizer.yml"), "utf8");
   assert.match(denoWorkflow, /MAX_INPUT_BYTES: \$\{\{ vars\.MAX_INPUT_BYTES \}\}/);
   assert.match(denoWorkflow, /MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
   assert.match(denoWorkflow, /OCTG_EXPECTED_MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
-
-});
-
-test("deploy-production workflow only uploads a complete prepare pair", () => {
-  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
-  const workflow = readFileSync(workflowPath, "utf8");
-  const deployCommand = extractStepRun(workflow, "Deploy Worker");
-  const prepareArgsScript = extractPrepareArgsScript(deployCommand);
-
-  assert.ok(prepareArgsScript, "Deploy Worker must conditionally build prepare arguments");
-
-  for (const scenario of [
-    {
-      name: "both values absent",
-      endpoint: "",
-      threshold: "",
-      status: 0,
-      args: [],
-    },
-    {
-      name: "complete pair",
-      endpoint: "https://prepare.example/prepare",
-      threshold: "700000",
-      status: 0,
-      args: [
-        "--var",
-        "DENO_PREPARE_ENDPOINT:https://prepare.example/prepare",
-        "--var",
-        "DENO_PREPARE_THRESHOLD_BYTES:700000",
-      ],
-    },
-    {
-      name: "endpoint without threshold",
-      endpoint: "https://prepare.example/prepare",
-      threshold: "",
-      status: 2,
-      args: [],
-    },
-    {
-      name: "threshold without endpoint",
-      endpoint: "",
-      threshold: "700000",
-      status: 2,
-      args: [],
-    },
-  ]) {
-    const result = spawnSync(
-      "bash",
-      [
-        "-c",
-        `${prepareArgsScript}\nif ((\${#prepare_args[@]} > 0)); then printf '%s\\n' "\${prepare_args[@]}"; fi`,
-      ],
-      {
-        env: {
-          ...process.env,
-          DENO_PREPARE_ENDPOINT: scenario.endpoint,
-          DENO_PREPARE_THRESHOLD_BYTES: scenario.threshold,
-        },
-        encoding: "utf8",
-      },
-    );
-
-    assert.equal(result.status, scenario.status, scenario.name);
-    assert.deepEqual(
-      result.stdout
-        .trimEnd()
-        .split("\n")
-        .filter((line) => line === "--var" || line.startsWith("DENO_PREPARE_")),
-      scenario.args,
-      scenario.name,
-    );
-  }
 });
 
 test("deploy-production workflow synchronizes the Worker auth Secret safely", () => {
