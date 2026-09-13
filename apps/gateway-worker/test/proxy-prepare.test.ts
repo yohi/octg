@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import type { PrepareMetadata } from "@octg/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseDeclaredContentLength } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 const PREPARE_BINDINGS = [
@@ -436,6 +437,32 @@ describe("prepare routing", () => {
     expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "body_read" }));
     expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "parse" }));
     expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "normalize" }));
+  });
+
+  it.each(["1e2", "0x10"] as const)(
+    "routes non-decimal Content-Length %j through prepare",
+    async (contentLength) => {
+      // Given: the prepare threshold is above every numeric coercion of the malformed values.
+      Object.defineProperty(env, "DENO_PREPARE_THRESHOLD_BYTES", { value: "1000", configurable: true });
+      const { calls } = stubPreparedResponses(JSON.stringify({
+        max_output_tokens: metadata.outputMarker,
+      }));
+
+      // When: a Responses request supplies a non-decimal declared length.
+      const response = await responsesRequest({ "content-length": contentLength });
+
+      // Then: the malformed header selects prepare instead of the legacy path.
+      expect(response.status).toBe(200);
+      expect(calls).toEqual(["prepare", "upstream"]);
+    },
+  );
+
+  it("classifies an empty Content-Length as malformed", () => {
+    // Given: an empty declared length reaches the parser.
+    const declared = parseDeclaredContentLength("");
+
+    // Then: the empty value is not treated as zero bytes.
+    expect(declared).toEqual({ kind: "malformed" });
   });
 
   it("cancels a declared oversized Responses body before contacting Deno", async () => {

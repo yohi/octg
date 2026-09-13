@@ -256,8 +256,9 @@ type DeclaredContentLength =
   | { readonly kind: "malformed" }
   | { readonly kind: "valid"; readonly value: number };
 
-function parseDeclaredContentLength(value: string | null): DeclaredContentLength {
+export function parseDeclaredContentLength(value: string | null): DeclaredContentLength {
   if (value === null) return { kind: "absent" };
+  if (!/^[0-9]+$/.test(value)) return { kind: "malformed" };
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0
     ? { kind: "valid", value: parsed }
