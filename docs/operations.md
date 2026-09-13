@@ -252,6 +252,239 @@ NODE
 export PREVIEW_PREPARE_VERSION_ID
 ```
 
+Define these protected acceptance helpers in the operator shell before running
+the canary blocks. They consume only protected capture files; credentials are
+passed to the leak check through standard input and never as process arguments.
+
+```bash
+assert_telemetry() {
+  local canary_output="$1"
+  local telemetry_output="$2"
+  local expected_worker_version="$3"
+  local expected_concurrencies="$4"
+  local expected_mode="$5"
+  local expected_legacy_provider="${6:-}"
+
+  CANARY_OUTPUT="$canary_output" \
+  TELEMETRY_OUTPUT="$telemetry_output" \
+  EXPECTED_WORKER_VERSION="$expected_worker_version" \
+  EXPECTED_CONCURRENCIES="$expected_concurrencies" \
+  EXPECTED_MODE="$expected_mode" \
+  EXPECTED_LEGACY_TOKENIZATION_PROVIDER="$expected_legacy_provider" \
+  node --input-type=module <<'NODE'
+import { readFileSync } from "node:fs";
+
+const fail = (message) => {
+  throw new Error(`telemetry assertion failed: ${message}`);
+};
+const requestIdPattern = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+const mode = process.env.EXPECTED_MODE;
+const expectedWorkerVersion = process.env.EXPECTED_WORKER_VERSION;
+const expectedLegacyProvider = process.env.EXPECTED_LEGACY_TOKENIZATION_PROVIDER;
+if (!expectedWorkerVersion) fail("expected Worker version is missing");
+if (mode !== "prepared" && mode !== "legacy") fail("expected mode is invalid");
+if (mode === "legacy" && !["deno", "cloudflare_do"].includes(expectedLegacyProvider)) {
+  fail("expected legacy tokenization provider is invalid");
+}
+
+const expectedKeys = process.env.EXPECTED_CONCURRENCIES.split(",").map((value) => {
+  const concurrency = Number(value.trim());
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0 || concurrency > 64) {
+    fail("expected concurrency is invalid");
+  }
+  return Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`);
+}).flat();
+const expectedKeySet = new Set(expectedKeys);
+if (expectedKeySet.size !== expectedKeys.length) fail("expected concurrency list contains duplicates");
+
+const canaryRecords = readFileSync(process.env.CANARY_OUTPUT, "utf8").split(/\r?\n/).flatMap((line) => {
+  try {
+    const value = JSON.parse(line);
+    return value.event === "octg.canary.result" ? [value] : [];
+  } catch {
+    return [];
+  }
+});
+if (canaryRecords.length !== expectedKeySet.size) fail("unexpected canary result count");
+const requestIds = new Set();
+for (const record of canaryRecords) {
+  const key = `${record.concurrency}/${record.ordinal}`;
+  if (!expectedKeySet.delete(key)) fail("unexpected or duplicate canary ordinal");
+  if (record.outcome !== "response" || record.status !== 200) fail("canary HTTP result failed");
+  if (!requestIdPattern.test(record.requestId ?? "")) fail("canary request ID is missing or invalid");
+  if (record.workerVersion !== expectedWorkerVersion) fail("canary Worker version mismatch");
+  if (requestIds.has(record.requestId)) fail("canary request ID is duplicated");
+  requestIds.add(record.requestId);
+}
+if (expectedKeySet.size !== 0) fail("canary result is missing");
+
+const stageEvents = [];
+const exceededCpu = [];
+let order = 0;
+const visit = (value, lineNumber) => {
+  if (Array.isArray(value)) {
+    value.forEach((entry) => visit(entry, lineNumber));
+    return;
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text.startsWith("{") || text.startsWith("[")) {
+      try { visit(JSON.parse(text), lineNumber); } catch { /* non-JSON log text */ }
+    }
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (value.event === "octg.resource_stage") stageEvents.push({ ...value, order: order++, lineNumber });
+  if (value.outcome === "exceededCpu") exceededCpu.push(value);
+  Object.values(value).forEach((entry) => visit(entry, lineNumber));
+};
+
+for (const [lineNumber, line] of readFileSync(process.env.TELEMETRY_OUTPUT, "utf8").split(/\r?\n/).entries()) {
+  if (line.trim() === "") continue;
+  try { visit(JSON.parse(line), lineNumber); } catch { /* missing expected events fail below */ }
+}
+if (exceededCpu.length !== 0) fail("Worker reported exceededCpu");
+
+const forRequest = (requestId) => stageEvents.filter((event) => event.requestId === requestId);
+const assertNoStage = (events, stages) => {
+  if (events.some((event) => stages.includes(event.stage))) fail("forbidden resource stage observed");
+};
+const requireSuccessfulPair = (events, stage, predicate) => {
+  const matching = events.filter((event) => event.stage === stage);
+  const starts = matching.filter((event) => event.phase === "start");
+  const finishes = matching.filter((event) => event.phase === "finish");
+  if (starts.length !== 1 || finishes.length !== 1) fail(`stage ${stage} is not exactly one start/finish pair`);
+  const [start] = starts;
+  const [finish] = finishes;
+  if (start.revisionId !== expectedWorkerVersion || finish.revisionId !== expectedWorkerVersion) {
+    fail(`stage ${stage} has an unexpected Worker revision`);
+  }
+  if (start.order >= finish.order || finish.outcome !== "success" || !predicate(finish)) {
+    fail(`stage ${stage} did not satisfy its success assertion`);
+  }
+  return { start, finish };
+};
+
+for (const requestId of requestIds) {
+  const events = forRequest(requestId);
+  if (events.length === 0) fail("request has no correlated resource-stage telemetry");
+  if (events.some((event) => event.revisionId !== expectedWorkerVersion)) {
+    fail("request has telemetry from an unexpected Worker revision");
+  }
+
+  if (mode === "prepared") {
+    assertNoStage(events, ["body_read", "parse", "normalize", "tokenize"]);
+    requireSuccessfulPair(events, "prepare", (finish) => finish.tokenizationProvider === "deno");
+  } else {
+    assertNoStage(events, ["prepare"]);
+    requireSuccessfulPair(events, "body_read", () => true);
+    requireSuccessfulPair(events, "parse", () => true);
+    requireSuccessfulPair(events, "normalize", () => true);
+    requireSuccessfulPair(events, "tokenize", (finish) => finish.tokenizationProvider === expectedLegacyProvider);
+  }
+
+  const quota = requireSuccessfulPair(events, "quota_reserve", (finish) => finish.quotaReserved === true);
+  const upstream = requireSuccessfulPair(events, "upstream", (finish) => finish.upstreamReached === true);
+  if (quota.finish.order >= upstream.start.order) fail("upstream started before quota reservation finished");
+}
+console.log("resource-stage telemetry assertions passed");
+NODE
+}
+
+assert_no_canary_secret_leak() {
+  local canary_output="$1"
+  local telemetry_output="$2"
+
+  printf '%s\0%s\0' "$CANARY_BODY_MARKER" "$OCTG_CANARY_CLIENT_KEY" |
+    CANARY_OUTPUT="$canary_output" \
+    TELEMETRY_OUTPUT="$telemetry_output" \
+    node --input-type=module -e '
+      import { readFileSync } from "node:fs";
+
+      const [marker, clientKey] = readFileSync(0, "utf8").split("\0");
+      if (marker === undefined || clientKey === undefined || marker.length === 0 || clientKey.length === 0) {
+        throw new Error("canary secret validation input is incomplete");
+      }
+      const paths = [process.env.CANARY_OUTPUT, process.env.TELEMETRY_OUTPUT];
+      if (paths.some((path) => typeof path !== "string")) {
+        throw new Error("canary capture path is missing");
+      }
+      const captures = paths.map((path) => readFileSync(path, "utf8"));
+      if (captures.some((capture) => capture.includes(marker) || capture.includes(clientKey))) {
+        throw new Error("canary payload marker or client key appeared in protected capture");
+      }
+    '
+}
+
+assert_audit_completed() {
+  local canary_output="$1"
+  local audit_output="$2"
+  local database="$3"
+  local audit_sql
+
+  audit_sql="$(node --input-type=module - "$canary_output" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const requestIdPattern = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
+const records = readFileSync(process.argv[2], "utf8").split(/\r?\n/).flatMap((line) => {
+  try {
+    const value = JSON.parse(line);
+    return value.event === "octg.canary.result" ? [value] : [];
+  } catch {
+    return [];
+  }
+});
+const ids = records.map((record) => record.requestId);
+if (ids.length === 0 || ids.some((id) => !requestIdPattern.test(id ?? "")) || new Set(ids).size !== ids.length) {
+  throw new Error("canary request ID set is missing, invalid, or duplicated");
+}
+process.stdout.write(`SELECT request_id, status FROM requests WHERE request_id IN (${ids.map((id) => `'${id}'`).join(",")}) ORDER BY request_id`);
+NODE
+  )"
+
+  for attempt in 1 2 3 4 5 6; do
+    if ./node_modules/.bin/wrangler d1 execute "$database" \
+      --remote \
+      --json \
+      --command "$audit_sql" >"$audit_output"; then
+      if node --input-type=module - "$canary_output" "$audit_output" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const resultRecords = readFileSync(process.argv[2], "utf8").split(/\r?\n/).flatMap((line) => {
+  try {
+    const value = JSON.parse(line);
+    return value.event === "octg.canary.result" ? [value] : [];
+  } catch {
+    return [];
+  }
+});
+const expectedIds = new Set(resultRecords.map((record) => record.requestId));
+const rows = [];
+const visit = (value) => {
+  if (Array.isArray(value)) return value.forEach(visit);
+  if (value === null || typeof value !== "object") return;
+  if (typeof value.request_id === "string" && typeof value.status === "string") rows.push(value);
+  Object.values(value).forEach(visit);
+};
+visit(JSON.parse(readFileSync(process.argv[3], "utf8")));
+for (const requestId of expectedIds) {
+  const matching = rows.filter((row) => row.request_id === requestId);
+  if (matching.length !== 1 || matching[0].status !== "completed") process.exit(1);
+}
+NODE
+      then
+        return 0
+      fi
+    fi
+    if [ "$attempt" = 6 ]; then
+      echo "canary settlement evidence was not completed" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+```
+
 For each canary, capture the version-filtered tail and canary results before
 asserting them:
 
@@ -269,14 +502,43 @@ kill "$tail_pid" 2>/dev/null || true
 wait "$tail_pid" || true
 ```
 
-Run the repository's protected telemetry parser and bounded request-audit query
-against those files. `assert_telemetry` must be run with `prepared` for Preview,
-production, and peak, and with `legacy` plus the retained provider for rollback.
-`assert_no_canary_secret_leak` and `assert_audit_completed` are the corresponding
-Task 5 assertions; all must exit successfully. The complete protected function
-definitions are in the [Task 5 acceptance procedures](./superpowers/plans/2026-09-12-large-responses-prepare-activation.md#task-5-verify-the-repository-and-execute-the-controlled-activation).
-The D1 query is settlement evidence only. See [SPEC.md](../SPEC.md) for the
-complete routing and validation contract.
+Run the protected telemetry parser and bounded request-audit query against those
+files using the helper definitions above. `assert_telemetry` must be run with
+`prepared` for Preview, production, and peak, and with `legacy` plus the retained
+provider for rollback. `assert_no_canary_secret_leak` and
+`assert_audit_completed` are the corresponding assertions; all must exit
+successfully. The D1 query is settlement evidence only. See [SPEC.md](../SPEC.md)
+for the complete routing and validation contract.
+
+Preview large-body acceptance uses the pre-staged candidate, verifies its
+current deployment membership before Version Override, restores the captured
+base at 100% in the same protected shell on every exit path, and then runs:
+
+```bash
+assert_telemetry "$preview_canary_output" "$preview_telemetry_output" \
+  "$PREVIEW_PREPARE_VERSION_ID" "1,2" prepared ""
+assert_no_canary_secret_leak "$preview_canary_output" "$preview_telemetry_output"
+assert_audit_completed "$preview_canary_output" "$preview_audit_output" "$PREVIEW_D1_DATABASE"
+```
+
+The production canary runs only after Preview acceptance and uses the deployed
+production version without Version Override:
+
+```bash
+assert_telemetry "$production_canary_output" "$production_telemetry_output" \
+  "$EXPECTED_PRODUCTION_WORKER_VERSION" "1,2" prepared ""
+assert_no_canary_secret_leak "$production_canary_output" "$production_telemetry_output"
+assert_audit_completed "$production_canary_output" "$production_audit_output" "$CANARY_D1_DATABASE"
+```
+
+The representative production peak runs only after concurrency 1 and 2 pass:
+
+```bash
+assert_telemetry "$peak_canary_output" "$peak_telemetry_output" \
+  "$EXPECTED_PRODUCTION_WORKER_VERSION" "1,2,${CANARY_PEAK_CONCURRENCY}" prepared ""
+assert_no_canary_secret_leak "$peak_canary_output" "$peak_telemetry_output"
+assert_audit_completed "$peak_canary_output" "$peak_audit_output" "$CANARY_D1_DATABASE"
+```
 
 If rollback is required, use the known pre-prepare version and run the same
 protected canary procedure in legacy mode:
