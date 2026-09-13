@@ -87,7 +87,7 @@ test("deploy-production workflow preserves remote environment variables using --
   );
 });
 
-test("deploy-production validates prepare configuration before every remote mutation", () => {
+test("deploy-production workflow sources all non-secret settings from GitHub Variables", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
   for (const variableName of [
@@ -104,7 +104,11 @@ test("deploy-production validates prepare configuration before every remote muta
       `Production workflow must source ${variableName} from GitHub Variables`,
     );
   }
+});
 
+test("deploy-production validates prepare configuration before every remote mutation", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
   const validationIndex = workflow.indexOf("- name: Validate Production Deno tokenizer configuration");
   assert.ok(validationIndex >= 0, "Production configuration validation step must exist");
   for (const command of [
