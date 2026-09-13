@@ -13,6 +13,8 @@ export const PRODUCTION_PREPARE_VARIABLE_NAMES = [
 
 export const PRODUCTION_INPUT_LIMIT_VARIABLE_NAME = "MAX_INPUT_BYTES";
 
+export const CANONICAL_PREPARE_THRESHOLD_BYTES = "1";
+
 export function validateProductionDenoConfig(environment) {
   const values = environment !== null && typeof environment === "object"
     ? environment
@@ -53,7 +55,7 @@ export function validateProductionDenoConfig(environment) {
   }
   if (
     !missing.includes("DENO_PREPARE_THRESHOLD_BYTES") &&
-    (typeof prepareThreshold !== "string" || prepareThreshold.trim() !== "1")
+    (typeof prepareThreshold !== "string" || prepareThreshold.trim() !== CANONICAL_PREPARE_THRESHOLD_BYTES)
   ) {
     invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
   }

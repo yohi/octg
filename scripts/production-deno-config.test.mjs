@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  CANONICAL_PREPARE_THRESHOLD_BYTES,
   formatProductionDenoConfigError,
   validateProductionDenoConfig,
 } from "./production-deno-config.mjs";
@@ -38,6 +39,10 @@ test("requires the complete prepare pair in production", () => {
     missing: ["DENO_PREPARE_ENDPOINT", "DENO_PREPARE_THRESHOLD_BYTES"],
     invalid: [],
   });
+});
+
+test("defines the canonical production prepare threshold as a string", () => {
+  assert.equal(CANONICAL_PREPARE_THRESHOLD_BYTES, "1");
 });
 
 test("accepts only the canonical production prepare threshold", () => {
