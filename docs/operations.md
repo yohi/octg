@@ -144,9 +144,12 @@ When enabled, requests below the configured text-byte threshold use the Durable 
 
 A Deno failure does not transparently retry through the Durable Object path.
 
-Responses prepare is disabled when both `DENO_PREPARE_ENDPOINT` and
-`DENO_PREPARE_THRESHOLD_BYTES` are absent. Treat a one-sided or invalid pair
-as a deployment failure, not as a reason to silently use the Durable Object.
+Outside Production runtime, Responses prepare is disabled when both
+`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are absent. Production
+requires the complete pair and rejects absent, one-sided, or invalid values
+before deployment; after activation, disable prepare only by rolling back to a
+known pre-prepare Worker version. Treat a one-sided or invalid pair as a
+deployment failure, not as a reason to silently use the Durable Object.
 Prepare-only invalidity affects Responses; Chat Completions remains on its
 existing path.
 
@@ -217,39 +220,141 @@ upstream response body.
 ```bash
 set -euo pipefail
 umask 077
-preview_versions_before_file="$(mktemp)"
-preview_versions_after_file="$(mktemp)"
-trap 'rm -f "$preview_versions_before_file" "$preview_versions_after_file"' EXIT
-./node_modules/.bin/wrangler versions list --name "$PREVIEW_WORKER_NAME" --json > "$preview_versions_before_file"
-gh run rerun "$PREVIEW_RUN_ID"
-gh run watch "$PREVIEW_RUN_ID" --exit-status
-./node_modules/.bin/wrangler versions list --name "$PREVIEW_WORKER_NAME" --json > "$preview_versions_after_file"
-```
-
-Select the sole new UUID whose annotations match the staged tag and exact
-candidate SHA message; reject zero or multiple matches. The following lookup
-is the Task 5 correlation rule and must run before the candidate is merged:
-
-```bash
-PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_before_file" "$preview_versions_after_file" "$PREVIEW_PR_NUMBER" "$PREVIEW_HEAD_SHA" <<'NODE'
+  : "${PREVIEW_PR_NUMBER:?set the still-open same-repository pull request number}"
+  : "${PREVIEW_HEAD_SHA:?set the exact candidate pull request head SHA}"
+  : "${PREVIEW_CONFIGURED_AT:?record the UTC time immediately after Preview variables were saved}"
+  : "${PREVIEW_WORKER_NAME:?set the isolated Preview Worker name}"
+  : "${PREVIEW_RUN_ID:?set the candidate's Preview Smoke Test run ID}"
+  : "${CLOUDFLARE_API_TOKEN:?load the isolated Preview API token without printing it}"
+  : "${CLOUDFLARE_ACCOUNT_ID:?set the isolated Preview account ID}"
+  preview_pr_file="$(mktemp)"
+  preview_run_before_file="$(mktemp)"
+  preview_run_after_file="$(mktemp)"
+  preview_versions_before_file="$(mktemp)"
+  preview_versions_after_file="$(mktemp)"
+  trap 'rm -f "$preview_pr_file" "$preview_run_before_file" "$preview_run_after_file" "$preview_versions_before_file" "$preview_versions_after_file"' EXIT
+  gh pr view "$PREVIEW_PR_NUMBER" \
+    --json state,headRefOid,isCrossRepository > "$preview_pr_file"
+  node --input-type=module - "$preview_pr_file" "$PREVIEW_HEAD_SHA" <<'NODE'
 import { readFileSync } from "node:fs";
 
-const [beforePath, afterPath, prNumber, headSha] = process.argv.slice(2);
+const [path, expectedHeadSha] = process.argv.slice(2);
+const pullRequest = JSON.parse(readFileSync(path, "utf8"));
+if (!/^[0-9a-f]{40}$/i.test(expectedHeadSha)) throw new Error("Preview head SHA is malformed");
+if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository === true) {
+  throw new Error("Preview candidate must be an open same-repository pull request");
+}
+if (pullRequest.headRefOid !== expectedHeadSha) {
+  throw new Error("Preview pull request head SHA changed");
+}
+NODE
+  gh run view "$PREVIEW_RUN_ID" \
+    --json workflowName,event,headSha,status,conclusion,attempt > "$preview_run_before_file"
+  initial_attempt="$(node --input-type=module - "$preview_run_before_file" "$PREVIEW_HEAD_SHA" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [path, expectedHeadSha] = process.argv.slice(2);
+const run = JSON.parse(readFileSync(path, "utf8"));
+if (run.workflowName !== "Preview Smoke Test" || run.event !== "pull_request" || run.headSha !== expectedHeadSha) {
+  throw new Error("Preview run is not the expected pull_request workflow for the candidate SHA");
+}
+if (!Number.isSafeInteger(run.attempt)) throw new Error("Preview run attempt is missing");
+process.stdout.write(String(run.attempt));
+NODE
+  )"
+  initial_status="$(node --input-type=module - "$preview_run_before_file" <<'NODE'
+import { readFileSync } from "node:fs";
+process.stdout.write(String(JSON.parse(readFileSync(process.argv[2], "utf8")).status ?? ""));
+NODE
+  )"
+  if [ "$initial_status" != "completed" ]; then
+    gh run watch "$PREVIEW_RUN_ID" || true
+  fi
+  PREVIEW_PREPARE_VERSION_TAG="pr-${PREVIEW_PR_NUMBER}-deno-valid"
+  PREVIEW_PREPARE_VERSION_MESSAGE="pr-${PREVIEW_PR_NUMBER} ${PREVIEW_HEAD_SHA} Deno valid auth"
+  ./node_modules/.bin/wrangler versions list \
+    --name "$PREVIEW_WORKER_NAME" \
+    --json > "$preview_versions_before_file"
+  gh run rerun "$PREVIEW_RUN_ID"
+  gh run watch "$PREVIEW_RUN_ID" --exit-status
+  gh run view "$PREVIEW_RUN_ID" \
+    --json workflowName,event,headSha,status,conclusion,attempt,startedAt,jobs > "$preview_run_after_file"
+  gh pr view "$PREVIEW_PR_NUMBER" \
+    --json state,headRefOid,isCrossRepository > "$preview_pr_file"
+  node --input-type=module - "$preview_pr_file" "$PREVIEW_HEAD_SHA" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [path, expectedHeadSha] = process.argv.slice(2);
+const pullRequest = JSON.parse(readFileSync(path, "utf8"));
+if (pullRequest.state !== "OPEN" || pullRequest.isCrossRepository === true || pullRequest.headRefOid !== expectedHeadSha) {
+  throw new Error("Preview candidate pull request changed during artifact staging");
+}
+NODE
+  PREVIEW_RUN_ATTEMPT="$(node --input-type=module - "$preview_run_after_file" "$PREVIEW_HEAD_SHA" "$PREVIEW_CONFIGURED_AT" "$initial_attempt" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [path, expectedHeadSha, configuredAt, previousAttempt] = process.argv.slice(2);
+const run = JSON.parse(readFileSync(path, "utf8"));
+if (run.workflowName !== "Preview Smoke Test" || run.event !== "pull_request" || run.headSha !== expectedHeadSha) {
+  throw new Error("Preview run is not the expected pull_request workflow for the candidate SHA");
+}
+if (run.status !== "completed" || run.conclusion !== "success") {
+  throw new Error("Preview Smoke Test did not complete successfully");
+}
+if (!Number.isSafeInteger(run.attempt) || run.attempt <= Number(previousAttempt)) {
+  throw new Error("Preview workflow attempt was not re-run after configuration");
+}
+const configuredTimestamp = Date.parse(configuredAt);
+const startedTimestamp = typeof run.startedAt === "string" ? Date.parse(run.startedAt) : NaN;
+if (!configuredAt.endsWith("Z") || !Number.isFinite(configuredTimestamp) || !Number.isFinite(startedTimestamp) || startedTimestamp <= configuredTimestamp) {
+  throw new Error("Preview workflow attempt did not start after configuration");
+}
+const denoJobs = Array.isArray(run.jobs)
+  ? run.jobs.filter((job) => job?.name === "deno-version-smoke")
+  : [];
+if (denoJobs.length !== 1 || denoJobs[0]?.conclusion !== "success") {
+  throw new Error("deno-version-smoke did not complete successfully");
+}
+process.stdout.write(String(run.attempt));
+NODE
+  )"
+  ./node_modules/.bin/wrangler versions list \
+    --name "$PREVIEW_WORKER_NAME" \
+    --json > "$preview_versions_after_file"
+  PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_before_file" "$preview_versions_after_file" "$PREVIEW_PREPARE_VERSION_TAG" "$PREVIEW_PREPARE_VERSION_MESSAGE" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [beforePath, afterPath, expectedTag, expectedMessage] = process.argv.slice(2);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const readVersions = (path) => JSON.parse(readFileSync(path, "utf8"));
+const readVersions = (path) => {
+  const versions = JSON.parse(readFileSync(path, "utf8"));
+  if (!Array.isArray(versions)) throw new Error("Wrangler versions list JSON must be an array");
+  return versions.map((version) => {
+    const id = version?.id;
+    if (typeof id !== "string" || !uuid.test(id)) throw new Error("Preview Worker version ID is not a UUID");
+    return { id, tag: version?.annotations?.["workers/tag"], message: version?.annotations?.["workers/message"] };
+  });
+};
 const before = readVersions(beforePath);
-const beforeIds = new Set(before.map((version) => version?.id));
-const tag = `pr-${prNumber}-deno-valid`;
-const message = `pr-${prNumber} ${headSha} Deno valid auth`;
-const candidates = readVersions(afterPath).filter((version) =>
-  typeof version?.id === "string" && uuid.test(version.id) && !beforeIds.has(version.id) &&
-  version.annotations?.["workers/tag"] === tag && version.annotations?.["workers/message"] === message,
+const after = readVersions(afterPath);
+const beforeIds = new Set(before.map((version) => version.id));
+const candidates = after.filter((version) =>
+  !beforeIds.has(version.id) &&
+  version.tag === expectedTag &&
+  version.message === expectedMessage,
 );
-if (candidates.length !== 1) throw new Error("expected exactly one new valid-auth Preview Worker version");
+if (candidates.length !== 1) {
+  throw new Error("expected exactly one new valid-auth Preview Worker version for the workflow attempt");
+}
 process.stdout.write(candidates[0].id);
 NODE
-)"
-export PREVIEW_PREPARE_VERSION_ID
+  )"
+  if ! [[ "$PREVIEW_PREPARE_VERSION_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "Preview artifact identity is malformed" >&2
+    exit 1
+  fi
+  export PREVIEW_PREPARE_VERSION_ID
+  export PREVIEW_RUN_ATTEMPT
 ```
 
 Define these protected acceptance helpers in the operator shell before running
@@ -568,20 +673,105 @@ Before rollback:
 
 Do not rewrite or remove an already applied Durable Object migration tag to make rollback easier.
 
-After restoring the known pre-prepare version, run the rollback-specific
-protected canary capture and execute all three acceptance assertions. Use the
-rollback capture files and the retained legacy tokenization provider:
+If rollback is required, restore `KNOWN_PREPARE_FREE_VERSION_ID` instead of
+omitting prepare variables from a later `--keep-vars` upload. Start a new
+protected capture and canary run before inspecting rollback behavior. Set
+`EXPECTED_LEGACY_TOKENIZATION_PROVIDER` to `deno` only when the retained legacy
+Deno tokenizer group and threshold select it for this payload; otherwise use
+`cloudflare_do`.
 
 ```bash
 set -euo pipefail
 umask 077
+: "${OCTG_CANARY_URL:?set the production canary URL}"
+: "${OCTG_CANARY_ALLOWED_HOSTS:?set the production canary host allowlist}"
+: "${OCTG_CANARY_CLIENT_KEY:?set the production canary client key}"
+: "${KNOWN_PREPARE_FREE_VERSION_ID:?set the known rollback version}"
+: "${PRODUCTION_WORKER_NAME:?set the production Worker name}"
+: "${CANARY_D1_DATABASE:?set the production D1 database name}"
+: "${EXPECTED_LEGACY_TOKENIZATION_PROVIDER:?set deno or cloudflare_do from retained configuration}"
+export CANARY_BODY_MARKER="octg_canary_body_marker_${RANDOM}_${RANDOM}"
+payload_file="$(mktemp)"
 canary_output="$(mktemp)"
 telemetry_output="$(mktemp)"
 audit_output="$(mktemp)"
 tail_pid=""
-trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$canary_output" "$telemetry_output" "$audit_output"' EXIT
-assert_telemetry "$canary_output" "$telemetry_output" \
-  "$KNOWN_PREPARE_FREE_VERSION_ID" "1,2" legacy \
+trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
+import { writeFileSync } from "node:fs";
+
+const [payloadPath, marker] = process.argv.slice(2);
+writeFileSync(payloadPath, JSON.stringify({
+  model: "gpt-5",
+  input: `${marker} ${"token ".repeat(74_000)}`,
+  max_output_tokens: 16,
+}), { mode: 0o600 });
+NODE
+./node_modules/.bin/wrangler versions deploy \
+  "${KNOWN_PREPARE_FREE_VERSION_ID}@100%" \
+  --config apps/gateway-worker/wrangler.jsonc \
+  --message "Rollback to pre-prepare Worker version" \
+  --yes
+./node_modules/.bin/wrangler tail "$PRODUCTION_WORKER_NAME" \
+  --format=json \
+  --version-id="$KNOWN_PREPARE_FREE_VERSION_ID" >"$telemetry_output" 2>&1 &
+tail_pid=$!
+sleep 5
+kill -0 "$tail_pid"
+CANARY_PAYLOAD_PATH="$payload_file" \
+  npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
+sleep 10
+kill "$tail_pid"
+wait "$tail_pid" || true
+```
+
+Validate the exact rollback result set before parsing resource telemetry:
+
+```bash
+EXPECTED_CONCURRENCIES=1,2 \
+EXPECTED_WORKER_VERSION="$KNOWN_PREPARE_FREE_VERSION_ID" \
+node --input-type=module - "$canary_output" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [path] = process.argv.slice(2);
+const expectedVersion = process.env.EXPECTED_WORKER_VERSION;
+const concurrencies = process.env.EXPECTED_CONCURRENCIES.split(",").map(Number);
+const expected = new Set(concurrencies.flatMap((concurrency) =>
+  Array.from({ length: concurrency }, (_, ordinal) => `${concurrency}/${ordinal}`),
+));
+const records = readFileSync(path, "utf8").split(/\r?\n/).flatMap((line) => {
+  try {
+    const value = JSON.parse(line);
+    return value.event === "octg.canary.result" ? [value] : [];
+  } catch {
+    return [];
+  }
+});
+if (records.length !== expected.size) throw new Error("unexpected canary result count");
+for (const record of records) {
+  const key = `${record.concurrency}/${record.ordinal}`;
+  if (!expected.delete(key)) throw new Error("unexpected canary concurrency or ordinal");
+  if (record.outcome !== "response" || record.status !== 200) throw new Error("rollback HTTP response failed");
+  if (!/^req_[0-9A-HJKMNP-TV-Z]{26}$/.test(record.requestId ?? "")) throw new Error("rollback request ID missing");
+  if (record.workerVersion !== expectedVersion) throw new Error("rollback Worker version mismatch");
+}
+if (expected.size !== 0) throw new Error("missing rollback canary result");
+console.log("rollback result assertions passed");
+NODE
+```
+
+Run all rollback assertions against the same protected files. The telemetry
+parser requires no `prepare` stage, successful `body_read`, `parse`, and
+`normalize` pairs, a successful `tokenize` finish with the retained provider,
+quota reservation before upstream, and no `exceededCpu`:
+
+```bash
+assert_telemetry \
+  "$canary_output" \
+  "$telemetry_output" \
+  "$KNOWN_PREPARE_FREE_VERSION_ID" \
+  "1,2" \
+  legacy \
   "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
 assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
 assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"

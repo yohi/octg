@@ -198,8 +198,10 @@ The current Production workflow requires the complete Deno setting group and
 does not create the Deno-disabled baseline. Do not use it for that first stage.
 
 Do not activate only one or two tokenizer settings, or only one prepare
-variable. Absence of both prepare variables is the only prepare-disabled
-configuration.
+variable. Outside Production runtime, absence of both prepare variables is the
+prepare-disabled configuration. Production requires the complete prepare pair;
+after activation, use a known pre-prepare Worker version rollback rather than
+omitting prepare variables to disable it.
 
 For the resource-limit regression, use synthetic or sanitized text in the
 approximately 74k-token class. Run concurrency 1, concurrency 2, and the
