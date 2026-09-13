@@ -39,7 +39,7 @@ A partial group or invalid value means **configuration error**. The Worker fails
 
 The endpoint must be HTTPS. Threshold and timeout must be positive values accepted by the runtime validators.
 
-The Responses prepare route is an additional optional pair:
+The Responses prepare route is an additional optional non-production pair:
 
 - `DENO_PREPARE_ENDPOINT`;
 - `DENO_PREPARE_THRESHOLD_BYTES`.
@@ -49,6 +49,14 @@ for large Responses requests when the tokenizer group is also valid. A
 one-sided or invalid pair is a configuration error. Prepare configuration is
 validated separately from Chat Completions: prepare-only invalidity fails
 closed for Responses and does not change the existing Chat Completions route.
+
+In production, `DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are
+mandatory. The endpoint is HTTPS without URL credentials, and after trimming
+the threshold must be exactly `"1"`. An ordinary accepted non-empty Responses
+body routes to `/prepare` at threshold `"1"`, including when the original
+declared length is missing or malformed. Only valid zero-byte or one-byte
+declared bodies can remain on the legacy invalid-body boundary. See
+[`SPEC.md`](../SPEC.md) for the normative routing and validation contract.
 
 The shared `MAX_INPUT_BYTES` value bounds both Worker input handling and the
 Deno `/prepare` raw-body/normalized-input path. Production uses one canonical
@@ -182,7 +190,8 @@ separate reviewed deployment procedure:
 4. activate the complete four-setting Worker tokenizer configuration together;
 5. run a small-input request and confirm `cloudflare_do`;
 6. run an accepted large-input canary and confirm `deno`;
-7. verify `/prepare` health/auth behavior, then configure its complete pair;
+7. verify `/prepare` health/auth behavior, then configure the mandatory prepare
+   pair with threshold `"1"`;
 8. monitor resource-stage events and quota accounting.
 
 The current Production workflow requires the complete Deno setting group and
@@ -279,10 +288,10 @@ To disable Deno routing, deploy a Worker configuration in which the Deno four-se
 
 Do not leave a partially configured group as a rollback technique; partial configuration is intentionally invalid.
 
-To disable prepare, deploy a Worker configuration with both prepare variables
-absent. Do not pass empty-string `--var` values. If a prepare rollout must be
-reverted, restore a known Worker version that predates prepare, then verify that
-Chat Completions is unchanged and Responses uses the legacy tokenization route.
+To disable prepare after production activation, restore a known Worker version
+that predates prepare. Do not rely on omitted variables or empty-string `--var`
+values. Then verify that Chat Completions is unchanged and Responses uses the
+legacy tokenization route.
 
 Disabling Deno returns all accepted inputs to the Cloudflare `TokenizerController` path, so validate Worker resource behavior before sending large traffic.
 

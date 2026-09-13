@@ -150,11 +150,11 @@ as a deployment failure, not as a reason to silently use the Durable Object.
 Prepare-only invalidity affects Responses; Chat Completions remains on its
 existing path.
 
-Production deployments use Wrangler `--keep-vars`. Omitting the prepare pair
-therefore disables prepare only for a fresh Worker version that has never had
-prepare bindings. After prepare bindings have been deployed, remove them by
-rolling back to a known pre-prepare Worker version rather than relying on an
-omitted variable.
+Production deployments use Wrangler `--keep-vars`. The production pair is
+mandatory and is validated before D1 migration, Worker upload, and Worker
+deployment. After prepare bindings have been deployed, remove them by rolling
+back to a known pre-prepare Worker version rather than relying on an omitted
+variable.
 
 Monitor:
 
@@ -176,44 +176,122 @@ See [deno-tokenizer.md](./deno-tokenizer.md) for Deno-specific deployment and ac
 
 ## Responses Prepare Rollout and Acceptance
 
-Use the following staged procedure for prepare:
+Before the normative sequence, document a separate **Preview artifact staging**
+procedure that runs while the candidate pull request is still open:
 
-1. **Stage 1 — prepare absent.** Deploy the Worker and Deno tokenizer with
-   both prepare variables absent. Do not upload empty-string `--var`
-   placeholders. Confirm ordinary Chat Completions and Responses requests use
-   the existing tokenizer path.
-2. **Verify the service.** Check `/health`, then send an authenticated
-   `/tokenize` request and an authenticated `/prepare` request using sanitized
-   JSON. Confirm invalid authentication is rejected and no request body,
-   metadata input, bearer token, or other secret appears in logs.
-3. **Verify the shared limit.** Confirm the exact canonical
-   `MAX_INPUT_BYTES` value is present in the Worker binding and Deno runtime.
-   Confirm `OCTG_EXPECTED_MAX_INPUT_BYTES` was generated from that value and
-   that startup fails before `Deno.serve` for a missing, invalid, or mismatched
-   assertion. Preview must use `OCTG_PREVIEW_MAX_INPUT_BYTES` independently.
-4. **Enable the pair.** Configure both prepare variables together, with an
-   HTTPS endpoint and threshold no greater than the canonical input limit.
-   Confirm a one-sided pair is rejected before any deployment arguments are
-   built. Confirm the Worker config contains both generated
-   `DENO_PREPARE_*` bindings and contains neither when both source values are
-   absent.
-5. **Canary.** Send sanitized approximately 74k-token Responses payloads at
-   concurrency 1 and 2. Confirm the prepare stage precedes quota reservation,
-   successful requests reach upstream only after reservation, marker
-   replacement produces the requested output limit, and normal quota headers
-   remain correct. Confirm a prepare rejection, timeout, authentication
-   failure, or network failure reaches neither quota reservation nor upstream
-   and never falls back to `TokenizerController`.
-6. **Resource acceptance.** Review Worker resource-stage telemetry and Deno
-   logs for paired start/finish outcomes. Accept only when there is no
-   `exceededCpu` outcome, no payload/secret logging, and quota/upstream
-   accounting is correct at concurrency 1, 2, and the operator-defined peak.
+- Configure only the isolated Preview input-limit and prepare sources, and
+  record the UTC configuration-complete time after those values are saved.
+- Keep the candidate pull request open at the recorded head SHA. Use a
+  same-repository `Preview Smoke Test` attempt whose `event` is
+  `pull_request`, whose `headSha` is that exact SHA, and whose
+  `deno-version-smoke` job finishes successfully after configuration. A
+  completed run from before configuration is not a qualifying attempt; use the
+  existing GitHub Actions re-run operation when necessary.
+- Correlate the qualifying attempt with exactly one new valid-auth version
+  by comparing the version ID set immediately before and after the attempt,
+  then matching `pr-<number>-deno-valid` and the message containing the exact
+  candidate SHA. Record the run ID, attempt, candidate SHA, and exact version
+  ID; restoring traffic does not delete this deployable version artifact.
+- Treat this as ordinary PR smoke and artifact staging only. It is not the
+  approximately 74k-token large-body acceptance canary and it is not a gate
+  for production configuration, validation, upload, or deployment.
 
-The five Deno prepare validation codes are `invalid_body`, `non_text`,
-`max_tokens_conflict`, `input_too_large`, and `request_too_large`. The 400/413
-validation body is bounded to 4096 bytes and contains only its code. Metadata
-and the `X-OCTG-Prepare-Metadata` header are bounded as well; do not increase
-these bounds as an incident workaround.
+Carry the exact staged version ID forward after the candidate merge. Step 4
+must not open or update a pull request or rely on a post-merge `pull_request`
+event.
+
+The normative runbook order is:
+
+1. Independently deploy or verify the Deno `/prepare` service and its health/authentication behavior. This prerequisite is outside the Worker workflow's pre-mutation validation boundary.
+2. Configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`.
+3. Confirm the production validator runs before D1 migration, Worker version upload, and Worker version deployment, and that both prepare bindings are uploaded directly without empty placeholders.
+4. After production deployment, read the current isolated Preview deployment and require exactly one 100% base version. Re-add the recorded valid-auth Preview Worker version at 0% beside that base at 100%, read back and verify both memberships, then use Cloudflare Version Override for the large Responses canary. Do not trigger a new Preview workflow or open/update a pull request here. After the canary, including failure or timeout, restore the captured base to 100% and verify that the candidate is no longer a current-deployment member. Keep Preview configuration and credentials isolated from production; a cleanup failure must be reported alongside, and never replace, the original canary result.
+5. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require request-result, resource-stage, CPU-outcome, ordering, and bounded request-audit assertions for Preview, production, representative peak, and rollback. Treat the D1 row only as settlement evidence; it never decides quota availability.
+6. Run the production canary after the isolated Preview canary, then run the representative peak after concurrency 1 and 2. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
+
+Use the following executable commands from the controlled acceptance procedure.
+They create protected temporary files and remove them after use; never print or
+persist the synthetic payload, client key, Deno authentication value, or
+upstream response body.
+
+```bash
+set -euo pipefail
+umask 077
+preview_versions_before_file="$(mktemp)"
+preview_versions_after_file="$(mktemp)"
+trap 'rm -f "$preview_versions_before_file" "$preview_versions_after_file"' EXIT
+./node_modules/.bin/wrangler versions list --name "$PREVIEW_WORKER_NAME" --json > "$preview_versions_before_file"
+gh run rerun "$PREVIEW_RUN_ID"
+gh run watch "$PREVIEW_RUN_ID" --exit-status
+./node_modules/.bin/wrangler versions list --name "$PREVIEW_WORKER_NAME" --json > "$preview_versions_after_file"
+```
+
+Select the sole new UUID whose annotations match the staged tag and exact
+candidate SHA message; reject zero or multiple matches. The following lookup
+is the Task 5 correlation rule and must run before the candidate is merged:
+
+```bash
+PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_before_file" "$preview_versions_after_file" "$PREVIEW_PR_NUMBER" "$PREVIEW_HEAD_SHA" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const [beforePath, afterPath, prNumber, headSha] = process.argv.slice(2);
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const readVersions = (path) => JSON.parse(readFileSync(path, "utf8"));
+const before = readVersions(beforePath);
+const beforeIds = new Set(before.map((version) => version?.id));
+const tag = `pr-${prNumber}-deno-valid`;
+const message = `pr-${prNumber} ${headSha} Deno valid auth`;
+const candidates = readVersions(afterPath).filter((version) =>
+  typeof version?.id === "string" && uuid.test(version.id) && !beforeIds.has(version.id) &&
+  version.annotations?.["workers/tag"] === tag && version.annotations?.["workers/message"] === message,
+);
+if (candidates.length !== 1) throw new Error("expected exactly one new valid-auth Preview Worker version");
+process.stdout.write(candidates[0].id);
+NODE
+)"
+export PREVIEW_PREPARE_VERSION_ID
+```
+
+For each canary, capture the version-filtered tail and canary results before
+asserting them:
+
+```bash
+canary_output="$(mktemp)"
+telemetry_output="$(mktemp)"
+audit_output="$(mktemp)"
+trap 'rm -f "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+./node_modules/.bin/wrangler tail "$WORKER_NAME" \
+  --format=json --version-id="$EXPECTED_WORKER_VERSION" >"$telemetry_output" 2>&1 &
+tail_pid=$!
+CANARY_PAYLOAD_PATH="$PAYLOAD_FILE" \
+  npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
+kill "$tail_pid" 2>/dev/null || true
+wait "$tail_pid" || true
+```
+
+Run the repository's protected telemetry parser and bounded request-audit query
+against those files. `assert_telemetry` must be run with `prepared` for Preview,
+production, and peak, and with `legacy` plus the retained provider for rollback.
+`assert_no_canary_secret_leak` and `assert_audit_completed` are the corresponding
+Task 5 assertions; all must exit successfully. The D1 query is settlement
+evidence only. See [SPEC.md](../SPEC.md) for the complete routing and validation
+contract.
+
+If rollback is required, use the known pre-prepare version and run the same
+protected canary procedure in legacy mode:
+
+```bash
+./node_modules/.bin/wrangler versions deploy \
+  "${KNOWN_PREPARE_FREE_VERSION_ID}@100%" \
+  --config apps/gateway-worker/wrangler.jsonc \
+  --message "Rollback to pre-prepare Worker version" \
+  --yes
+assert_telemetry "$canary_output" "$telemetry_output" \
+  "$KNOWN_PREPARE_FREE_VERSION_ID" "1,2" legacy \
+  "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
+assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
+assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
+```
 
 ## Admin Policy Changes
 
@@ -253,8 +331,10 @@ already applied migration tag.
 For a prepare incident, first restore a known Worker version that predates
 prepare. Restore the captured 100% version using the versioned rollback
 procedure, then verify `/health`, Chat Completions, Responses legacy routing,
-`/quota`, and Admin Access. Do not leave a one-sided prepare pair during
-rollback.
+`/quota`, and Admin Access. Require legacy `body_read`/`parse`/`normalize`
+stages, no `prepare` stage, the configured legacy tokenization provider,
+successful reservation/upstream completion, and completed settlement evidence.
+Do not leave a one-sided prepare pair during rollback.
 
 After rollback:
 

@@ -102,18 +102,30 @@ If all four settings are absent, the Deno tokenizer is disabled and tokenization
 
 If only some settings are present, or a value is invalid, the gateway fails closed. It does not silently fall back.
 
-Responses prepare is a separate optional pair:
+**Non-production runtime contract:** both prepare values absent disables prepare.
+A complete valid pair may use any positive safe-integer threshold no greater
+than `MAX_INPUT_BYTES`.
+
+**Production deployment contract:** `DENO_PREPARE_ENDPOINT` and
+`DENO_PREPARE_THRESHOLD_BYTES` are required GitHub Variables. The endpoint is
+HTTPS without URL credentials. After trimming, the threshold is exactly `"1"`;
+values such as `"01"`, `"1.0"`, `"1e0"`, and `"700000"` are rejected. The
+production validator runs before D1 migration, Worker upload, and Worker
+deployment, then both bindings are uploaded explicitly.
 
 | Setting | Kind | Purpose |
 | --- | --- | --- |
 | `DENO_PREPARE_ENDPOINT` | variable | HTTPS `/prepare` endpoint |
 | `DENO_PREPARE_THRESHOLD_BYTES` | variable | Responses raw-body threshold for `/prepare` |
 
-Both prepare variables absent means prepare is disabled. The pair is
-all-or-nothing: a one-sided or invalid pair is rejected before request
-dispatch. Prepare-only invalidity affects Responses requests; Chat Completions
-continues to use its existing tokenizer path. A prepare failure never falls
-back to `TokenizerController`.
+Outside production, both prepare variables absent disables prepare; a complete
+valid pair enables it; and a partial or invalid pair is a Responses-only
+configuration error. With prepare enabled, a missing or malformed
+`Content-Length` routes a Responses request to `/prepare`; a valid declared
+length at or below the threshold retains the legacy path. A valid declared
+length above `MAX_INPUT_BYTES` is rejected before Deno. Prepare-only invalidity
+affects Responses requests; Chat Completions continues to use its existing
+tokenizer path. A prepare failure never falls back to `TokenizerController`.
 
 GitHub/Deno deployment inputs from `.env.example`:
 
@@ -132,14 +144,14 @@ See [deno-tokenizer.md](./deno-tokenizer.md).
 
 For Production GitHub Actions, `MAX_INPUT_BYTES`,
 `DENO_TOKENIZER_ENDPOINT`, `DENO_TOKENIZER_THRESHOLD_BYTES`, and
-`DENO_TOKENIZER_TIMEOUT_MS` are Repository Variables. The optional
-`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are also a pair of
-Production Variables. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` is the protected
+`DENO_TOKENIZER_TIMEOUT_MS` are Repository Variables. The required
+`DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are a required pair
+of Production Variables. `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` is the protected
 shared-auth source in the `deno-production` Environment. The Production Worker
-workflow validates the required tokenizer group and canonical input limit
-before the remote D1 migration, then uploads the exact input limit and only
-adds the two prepare `--var` arguments when both prepare values are present.
-It never uploads empty-string prepare placeholders.
+workflow validates the required tokenizer group, canonical input limit, and
+production prepare pair before the remote D1 migration, Worker upload, and
+Worker deployment, then uploads both prepare `--var` arguments explicitly. It
+never uploads empty-string prepare placeholders.
 
 The Deno Deploy workflow uses `DENO_DEPLOY_ORG`, `DENO_DEPLOY_APP`, and the
 separate `DENO_DEPLOY_TOKEN` management Secret. The Deno runtime receives the
@@ -158,10 +170,11 @@ separate, explicitly reviewed deployment procedure that excludes Deno settings
 and does not preserve stale Deno variables; do not treat the Production
 workflow as that baseline procedure.
 
-After the Deno-disabled baseline has been verified, deploy the Deno application
-and runtime Secret, configure the complete Worker Deno group, verify the shared
-tokenizer input ceiling, and run the Deno route canary. Configure the prepare
-pair only after the prepare-disabled baseline has passed its acceptance checks.
+After the Deno prerequisite has been verified, deploy the Deno application and
+runtime Secret, configure the complete Worker Deno group, verify the shared
+tokenizer input ceiling, and run the Deno route canary. Configure the mandatory
+production prepare pair with threshold `"1"` before the authorized production
+deployment.
 
 Changing a Worker runtime Secret must produce an active version containing both
 the Secret and its required Variables. A Secret-only update is not a complete
