@@ -664,8 +664,7 @@ export async function handleProxy(
     }
 
     const usePrepare = endpoint === "responses" && denoPrepareConfig.kind === "enabled" &&
-      declared.kind !== "malformed" &&
-      (declared.kind === "absent" || declared.value > denoPrepareConfig.thresholdBytes);
+      (declared.kind !== "valid" || declared.value > denoPrepareConfig.thresholdBytes);
 
     if (usePrepare && denoPrepareConfig.kind === "enabled") {
       const prepareConfig = denoPrepareConfig;
