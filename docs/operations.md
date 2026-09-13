@@ -540,22 +540,6 @@ assert_no_canary_secret_leak "$peak_canary_output" "$peak_telemetry_output"
 assert_audit_completed "$peak_canary_output" "$peak_audit_output" "$CANARY_D1_DATABASE"
 ```
 
-If rollback is required, use the known pre-prepare version and run the same
-protected canary procedure in legacy mode:
-
-```bash
-./node_modules/.bin/wrangler versions deploy \
-  "${KNOWN_PREPARE_FREE_VERSION_ID}@100%" \
-  --config apps/gateway-worker/wrangler.jsonc \
-  --message "Rollback to pre-prepare Worker version" \
-  --yes
-assert_telemetry "$canary_output" "$telemetry_output" \
-  "$KNOWN_PREPARE_FREE_VERSION_ID" "1,2" legacy \
-  "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
-assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
-assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
-```
-
 ## Admin Policy Changes
 
 The Admin API can change client policies and model registry entries.
@@ -586,14 +570,21 @@ Do not rewrite or remove an already applied Durable Object migration tag to make
 
 After restoring the known pre-prepare version, run the rollback-specific
 protected canary capture and execute all three acceptance assertions. Use the
-rollback temporary files and the retained legacy tokenization provider:
+rollback capture files and the retained legacy tokenization provider:
 
 ```bash
-assert_telemetry "$rollback_canary_output" "$rollback_telemetry_output" \
+set -euo pipefail
+umask 077
+canary_output="$(mktemp)"
+telemetry_output="$(mktemp)"
+audit_output="$(mktemp)"
+tail_pid=""
+trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+assert_telemetry "$canary_output" "$telemetry_output" \
   "$KNOWN_PREPARE_FREE_VERSION_ID" "1,2" legacy \
   "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
-assert_no_canary_secret_leak "$rollback_canary_output" "$rollback_telemetry_output"
-assert_audit_completed "$rollback_canary_output" "$rollback_audit_output" "$CANARY_D1_DATABASE"
+assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
+assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
 ```
 
 After the TokenizerController migration has been applied, prefer a rollback
