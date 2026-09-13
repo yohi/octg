@@ -20,7 +20,11 @@ export function validateProductionDenoConfig(environment) {
   const missing = [];
   const invalid = [];
 
-  for (const name of [...PRODUCTION_DENO_VARIABLE_NAMES, PRODUCTION_INPUT_LIMIT_VARIABLE_NAME]) {
+  for (const name of [
+    ...PRODUCTION_DENO_VARIABLE_NAMES,
+    ...PRODUCTION_PREPARE_VARIABLE_NAMES,
+    PRODUCTION_INPUT_LIMIT_VARIABLE_NAME,
+  ]) {
     const value = values[name];
     if (isMissingValue(value)) {
       missing.push(name);
@@ -44,29 +48,14 @@ export function validateProductionDenoConfig(environment) {
 
   const prepareEndpoint = values.DENO_PREPARE_ENDPOINT;
   const prepareThreshold = values.DENO_PREPARE_THRESHOLD_BYTES;
-  const hasPrepareEndpoint = isPresent(prepareEndpoint);
-  const hasPrepareThreshold = isPresent(prepareThreshold);
-  const hasPrepareValue = prepareEndpoint !== undefined || prepareThreshold !== undefined;
-  const emptyPrepareNames = [
-    isEmptyString(prepareEndpoint) ? "DENO_PREPARE_ENDPOINT" : undefined,
-    isEmptyString(prepareThreshold) ? "DENO_PREPARE_THRESHOLD_BYTES" : undefined,
-  ].filter((name) => name !== undefined);
-  if (emptyPrepareNames.length > 0) {
-    invalid.push(...emptyPrepareNames);
-  } else if (hasPrepareValue && hasPrepareEndpoint !== hasPrepareThreshold) {
-    invalid.push(hasPrepareEndpoint
-      ? "DENO_PREPARE_ENDPOINT"
-      : "DENO_PREPARE_THRESHOLD_BYTES");
-  } else if (hasPrepareEndpoint && hasPrepareThreshold) {
-    if (!isValidHttpsEndpoint(prepareEndpoint)) invalid.push("DENO_PREPARE_ENDPOINT");
-    if (!isPositiveSafeInteger(prepareThreshold)) {
-      invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
-    } else if (
-      isPositiveSafeInteger(values.MAX_INPUT_BYTES) &&
-      Number(prepareThreshold.trim()) > Number(values.MAX_INPUT_BYTES.trim())
-    ) {
-        invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
-    }
+  if (!missing.includes("DENO_PREPARE_ENDPOINT") && !isValidHttpsEndpoint(prepareEndpoint)) {
+    invalid.push("DENO_PREPARE_ENDPOINT");
+  }
+  if (
+    !missing.includes("DENO_PREPARE_THRESHOLD_BYTES") &&
+    (typeof prepareThreshold !== "string" || prepareThreshold.trim() !== "1")
+  ) {
+    invalid.push("DENO_PREPARE_THRESHOLD_BYTES");
   }
 
   if (Object.prototype.hasOwnProperty.call(values, "OCTG_EXPECTED_MAX_INPUT_BYTES")) {
@@ -98,14 +87,6 @@ function isValidHttpsEndpoint(value) {
   } catch {
     return false;
   }
-}
-
-function isPresent(value) {
-  return value !== undefined && !isEmptyString(value);
-}
-
-function isEmptyString(value) {
-  return typeof value === "string" && value.trim() === "";
 }
 
 function isPositiveSafeInteger(value) {
