@@ -20,6 +20,7 @@
 - Preserve legacy paths for Chat Completions, non-production prepare-disabled environments, and rollback.
 - In production, `DENO_PREPARE_ENDPOINT` and `DENO_PREPARE_THRESHOLD_BYTES` are mandatory, and the trimmed threshold string is exactly `"1"`.
 - Production validation must fail before the first remote mutation in `deploy-production`: D1 migration, Worker version upload, or Worker version deployment.
+- The valid-auth Preview Worker version used for post-deployment large-body acceptance is staged by the PR-only smoke workflow while the candidate pull request is open; its exact version ID is carried forward, and artifact staging is not Preview acceptance or a production-mutation gate.
 - The complete production prepare pair is passed explicitly to the Worker upload; never represent disabled prepare with an empty `--var` value.
 - For non-production environments, the prepare pair remains optional. Both absent disables prepare; a complete valid pair may use any positive safe integer no greater than `MAX_INPUT_BYTES`.
 - A valid declared raw body size above `MAX_INPUT_BYTES` is rejected by the Worker and its body is canceled before Deno dispatch.
@@ -32,6 +33,8 @@
 - **RG-001:** Task 4 and Task 5 preserve the approved rollout order: Deno prerequisite verification, complete production pair configuration, production validation/upload/deployment, isolated Preview canary, then production canary and representative peak. Preview acceptance is not introduced as a prerequisite for production configuration or deployment.
 - **RG-002:** Task 4 requires the operator runbook to carry Task 5's executable temporary-file, result assertion, telemetry parser, `wrangler tail`, and request-audit procedures. Task 5 applies explicit request-ID, mode, version, resource-stage, CPU-outcome, and audit assertions to Preview, production, peak, and rollback instead of treating a canary process exit code as acceptance.
 - **RG-003:** This header identifies the approved design spec, and `Requirement Coverage Review` maps each plan requirement to its design path and exact heading without adding a Preview-before-production gate requirement.
+- **RG-004:** Preview version artifact staging is now a separate pre-merge operation performed while the candidate pull request is open. It runs the existing PR-only `deno-version-smoke` workflow and records the exact valid-auth version ID before the candidate is merged. Task 5 Step 4 consumes that recorded ID after production deployment and no longer opens or updates a merged pull request. Artifact staging is ordinary PR smoke and is not large-body Preview acceptance or a production-mutation gate.
+- **RG-005:** The Preview version lookup now parses the Wrangler 4.120.0 JSON shape directly: the root must be an array, the tag must equal `annotations["workers/tag"]`, and the version ID must be the matching record's `id`. Zero or multiple tagged records and a non-UUID ID fail before the ID is used for Version Override.
 
 ---
 
@@ -471,16 +474,33 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   Replace the prepare-disabled production staging text in `docs/operations.md` with the rollout sequence from the approved design. Do not make Preview acceptance a prerequisite for setting production variables, merging the candidate, or allowing the production workflow to validate, upload, or deploy. The runbook order must be:
 
+  Before that normative sequence, document a separate **Preview artifact staging** procedure that runs while the candidate pull request is still open:
+
+  ```markdown
+  - Configure only the isolated Preview input-limit and prepare sources.
+  - Wait for the existing same-repository `Preview Smoke Test` run, including
+    `deno-version-smoke`, to finish successfully. The job uploads the
+    valid-auth version at 0% and restores the captured Preview version at 100%.
+  - Record the exact valid-auth Preview Worker version ID produced by the
+    `pr-<number>-deno-valid` tag; restoring traffic does not delete this
+    deployable version artifact.
+  - Treat this as ordinary PR smoke and artifact staging only. It is not the
+    approximately 74k-token large-body acceptance canary and it is not a gate
+    for production configuration, validation, upload, or deployment.
+  ```
+
+  The runbook must explicitly state that the exact staged version ID is carried forward after the candidate merge; Step 4 must not open or update a pull request or rely on a post-merge `pull_request` event. The normative runbook order must remain:
+
   ```markdown
   1. Independently deploy or verify the Deno `/prepare` service and its health/authentication behavior. This prerequisite is outside the Worker workflow's pre-mutation validation boundary.
- 2. Configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`.
- 3. Confirm the production validator runs before D1 migration, Worker version upload, and Worker version deployment, and that both prepare bindings are uploaded directly without empty placeholders.
- 4. Use the existing same-repository Preview Deno smoke to deploy a valid prepare-configured Preview Worker version at 0%, then target that exact version with Cloudflare Version Override for the large Responses canary. Keep Preview configuration and credentials isolated from production.
+  2. Configure the complete production pair with an HTTPS `/prepare` endpoint and trimmed threshold `"1"`, then let the authorized `master` push invoke `deploy-production`.
+  3. Confirm the production validator runs before D1 migration, Worker version upload, and Worker version deployment, and that both prepare bindings are uploaded directly without empty placeholders.
+ 4. After production deployment, target the exact valid-auth Preview Worker version ID staged while the candidate pull request was open with Cloudflare Version Override for the large Responses canary. Do not trigger a new Preview workflow or open/update a pull request here. Keep Preview configuration and credentials isolated from production.
  5. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require request-result, resource-stage, CPU-outcome, ordering, and bounded request-audit assertions for Preview, production, representative peak, and rollback. Treat the D1 row only as settlement evidence; it never decides quota availability.
  6. Run the production canary after the isolated Preview canary, then run the representative peak after concurrency 1 and 2. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
   ```
 
-  The runbook must include the executable temporary-file, canary-result, telemetry-parser, `wrangler tail`, and request-audit commands from Task 5 rather than replacing them with an unspecified instruction to "review telemetry." It must never print or persist the synthetic payload, client key, Deno authentication value, or upstream response body. Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
+  The runbook must include the executable Preview artifact-staging/version-lookup, temporary-file, canary-result, telemetry-parser, `wrangler tail`, and request-audit commands from Task 5 rather than replacing them with an unspecified instruction to "review telemetry." It must never print or persist the synthetic payload, client key, Deno authentication value, or upstream response body. Keep detailed routing/validation protocol facts in `SPEC.md`; the human-facing documents should link to it rather than reproduce the complete metadata and error-envelope contract.
 
 - [ ] **Step 4: Verify wording, links, and read-only scope**
 
@@ -505,12 +525,12 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
 **Files:**
 - No repository source or helper-script changes expected.
-- Temporary synthetic payloads, canary output, telemetry capture, SQL query text, and audit output: create outside the repository with mode `0600` and remove after use.
+- Temporary Preview version-list capture, synthetic payloads, canary output, telemetry capture, SQL query text, and audit output: create outside the repository with mode `0600` and remove after use.
 
 **Interfaces:**
-- Consumes: Tasks 1 through 4; the independently deployed Deno `/prepare` service; a same-repository Preview pull request; isolated Preview and production Wrangler credentials; and dedicated canary clients for each control plane.
+- Consumes: Tasks 1 through 4; the independently deployed Deno `/prepare` service; the exact valid-auth Preview Worker version staged by the same-repository pull request workflow while that pull request is open; isolated Preview and production Wrangler credentials; and dedicated canary clients for each control plane.
 - Produces: automated verification evidence; a safe production activation record; Preview and production request-ID-correlated acceptance evidence; and rollback evidence with no request content or credentials recorded.
-- Requires: `PREVIEW_PREPARE_VERSION_ID`, `PREVIEW_WORKER_NAME`, `PRODUCTION_WORKER_NAME`, `CANARY_D1_DATABASE`, and the intended Worker version are recorded as safe identifiers only. `CANARY_D1_DATABASE` selects audit evidence for the matching control plane; it is never a quota authority.
+- Requires: while the candidate pull request is open, `PREVIEW_PR_NUMBER`, `PREVIEW_RUN_ID`, and `PREVIEW_PREPARE_VERSION_ID` are recorded as safe identifiers only; `PREVIEW_WORKER_NAME`, `PRODUCTION_WORKER_NAME`, `CANARY_D1_DATABASE`, and the intended Worker version are also recorded as safe identifiers. `PREVIEW_PREPARE_VERSION_ID` is captured before the candidate is merged and is the only Preview Version Override target used by the large-body canary. `CANARY_D1_DATABASE` selects audit evidence for the matching control plane; it is never a quota authority.
 - Preserves: the independent Deno deployment workflow and the existing `/tokenize` route for legacy/rollback behavior.
 
   The following two shell functions are the complete, repository-free acceptance procedures used by the canary steps below. Define them in the protected operator shell before running the steps. They consume only the canary result file and the version-filtered `wrangler tail --format=json` capture; they do not print request bodies, client keys, or authentication values.
@@ -742,6 +762,44 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   Record only these safe facts: Deno deployment revision, health status, authenticated prepare status, the deployed `MAX_INPUT_BYTES` decimal value, and successful startup assertion status.
 
+  **Pre-staging before Step 3: create the Preview version artifact while the candidate pull request is open.** Configure only the isolated Preview `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` sources. Do not set `deno-production` variables. Identify the existing same-repository `Preview Smoke Test` run for the still-open candidate pull request, set `PREVIEW_RUN_ID` to that run, and wait for `deno-version-smoke` to pass. That job uploads the valid-auth Worker version at 0% and restores the captured Preview version at 100%; restoration does not delete the deployable artifact:
+
+  ```bash
+  set -euo pipefail
+  umask 077
+  : "${PREVIEW_PR_NUMBER:?set the still-open same-repository pull request number}"
+  : "${PREVIEW_WORKER_NAME:?set the isolated Preview Worker name}"
+  : "${PREVIEW_RUN_ID:?set the candidate's Preview Smoke Test run ID}"
+  : "${CLOUDFLARE_API_TOKEN:?load the isolated Preview API token without printing it}"
+  : "${CLOUDFLARE_ACCOUNT_ID:?set the isolated Preview account ID}"
+  gh run watch "$PREVIEW_RUN_ID" --exit-status
+
+  preview_versions_file="$(mktemp)"
+  trap 'rm -f "$preview_versions_file"' EXIT
+  PREVIEW_PREPARE_VERSION_TAG="pr-${PREVIEW_PR_NUMBER}-deno-valid"
+  ./node_modules/.bin/wrangler versions list \
+    --name "$PREVIEW_WORKER_NAME" \
+    --json > "$preview_versions_file"
+  PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_file" "$PREVIEW_PREPARE_VERSION_TAG" <<'NODE'
+  import { readFileSync } from "node:fs";
+
+  const [path, expectedTag] = process.argv.slice(2);
+  const versions = JSON.parse(readFileSync(path, "utf8"));
+  if (!Array.isArray(versions)) throw new Error("Wrangler versions list JSON must be an array");
+  const tagged = versions.filter((version) => version?.annotations?.["workers/tag"] === expectedTag);
+  if (tagged.length !== 1) throw new Error("expected exactly one tagged Preview Worker version");
+  const id = tagged[0]?.id;
+  if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error("Preview Worker version ID is not a UUID");
+  }
+  process.stdout.write(id);
+  NODE
+  )"
+  export PREVIEW_PREPARE_VERSION_ID
+  ```
+
+  This parser is intentionally aligned with the Wrangler `4.120.0` dependency locked in `package-lock.json`: `versions list --json` returns the recent version array, each version uses top-level `id`, and the upload tag is `annotations["workers/tag"]`. Because the command returns only the ten most recent deployable versions, record `PREVIEW_PREPARE_VERSION_ID` immediately after the successful smoke run and before the candidate is merged. A missing tag, multiple tagged records, a missing/non-string ID, or a non-UUID ID is a stop condition. This is ordinary PR smoke and artifact staging only; it is not the approximately 74k-token large-body Preview acceptance canary and it is not a gate for production configuration, validation, upload, or deployment. The exact recorded ID is carried forward to Step 4.
+
 - [ ] **Step 3: Configure and deploy the mandatory production pair before the Preview canary**
 
   Before production activation, record the currently compatible pre-prepare Worker version as `KNOWN_PREPARE_FREE_VERSION_ID` from the single 100% deployment. Do not expose credentials while doing so.
@@ -767,53 +825,11 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 
   The production pair and its deployment are intentionally before Step 4, matching the approved `## Rollout and Acceptance` sequence. Preview acceptance must not be described as a prerequisite for these production configuration or deployment mutations.
 
-- [ ] **Step 4: Deploy and identify an isolated Preview prepare candidate after production deployment**
+- [ ] **Step 4: Run the isolated Preview large-body acceptance after production deployment**
 
-  Configure only Preview's isolated `OCTG_PREVIEW_MAX_INPUT_BYTES`, `DENO_PREVIEW_PREPARE_ENDPOINT`, and `DENO_PREVIEW_PREPARE_THRESHOLD_BYTES` sources. Do not set `deno-production` variables. Open or update a same-repository pull request for the candidate, then wait for the existing `Preview Smoke Test` workflow's `deno-version-smoke` job to pass. That job deploys a valid-auth Deno Preview Worker version at 0% and restores the captured Preview version after its smoke checks.
+  Reuse the exact valid-auth Preview Worker version ID recorded by the pre-staging procedure while the candidate pull request was open. Do not open or update a pull request, trigger a new Preview workflow, or look up a replacement version after the candidate has been merged. Do not send the large canary to Preview's restored 100% base version.
 
-  Record the exact valid-auth Preview version by its existing tag, then use it only through Cloudflare Version Override. Do not send the large canary to Preview's restored 100% base version.
-
-  ```bash
-  set -euo pipefail
-  umask 077
-  : "${PREVIEW_PR_NUMBER:?set the same-repository pull request number}"
-  : "${PREVIEW_WORKER_NAME:?set the isolated Preview Worker name}"
-  : "${PREVIEW_RUN_ID:?set the Preview Smoke Test run ID}"
-  gh run watch "$PREVIEW_RUN_ID" --exit-status
-
-  preview_versions_file="$(mktemp)"
-  trap 'rm -f "$preview_versions_file"' EXIT
-  PREVIEW_PREPARE_VERSION_TAG="pr-${PREVIEW_PR_NUMBER}-deno-valid"
-  ./node_modules/.bin/wrangler versions list \
-    --name "$PREVIEW_WORKER_NAME" \
-    --json > "$preview_versions_file"
-  PREVIEW_PREPARE_VERSION_ID="$(node --input-type=module - "$preview_versions_file" "$PREVIEW_PREPARE_VERSION_TAG" <<'NODE'
-  import { readFileSync } from "node:fs";
-
-  const [path, tag] = process.argv.slice(2);
-  const ids = new Set();
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.forEach(visit);
-    if (value === null || typeof value !== "object") return;
-    const record = value;
-    if (record.tag === tag && typeof (record.version_id ?? record.id) === "string") {
-      ids.add(record.version_id ?? record.id);
-    }
-    Object.values(record).forEach(visit);
-  };
-  visit(JSON.parse(readFileSync(path, "utf8")));
-  if (ids.size !== 1) throw new Error("expected exactly one tagged Preview Worker version");
-  const [id] = ids;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-    throw new Error("Preview Worker version ID is not a UUID");
-  }
-  process.stdout.write(id);
-  NODE
-  )"
-  export PREVIEW_PREPARE_VERSION_ID
-  ```
-
-  A missing, non-unique, or non-UUID version ID fails Preview acceptance. Production pair configuration and deployment are completed in Step 3; do not proceed to the production canary until this Preview candidate and its assertions are complete.
+  A missing or non-unique version ID must already have failed during pre-staging, and the canary command below rejects any non-UUID ID before constructing the Version Override header. Production pair configuration and deployment are completed in Step 3, and this large-body Preview acceptance remains after that deployment. Do not proceed to the production canary until this Preview candidate and its assertions are complete.
 
   **Continue Step 4: Run the request-ID-correlated Preview Responses canary after production deployment**
 
@@ -1303,16 +1319,17 @@ The current behavior is intentionally captured by now-obsolete tests: malformed 
 | Non-production optional pair and legacy rollback paths remain available. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance` | Tasks 2 and 4 | Task 2 does not edit the runtime resolver; Task 4 documents the separate non-production contract and version rollback. |
 | Deno prerequisite, control-plane-local input-limit propagation, Deno source, and secrets remain unchanged. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `### Configuration`; `## Rollout and Acceptance`; `## Files in Scope` | Tasks 3 and 4 | Workflow/reference diff check is empty; secret-file assertions remain green. |
 | Public documentation is synchronized with the approved design. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Files in Scope` | Task 4 | Normative sections 9.4, 17, and 18 plus configuration, component, and operations documents receive the same production boundary and executable observation path. |
-| Deno prerequisite verification, complete production pair configuration, production validation/upload/deployment, isolated Preview canary, then production canary and representative peak. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance` | Tasks 4 and 5 | Task 4 documents the approved order; Task 5 executes production configuration/deployment in Step 3, isolated Preview evidence in Step 4, production canary in Step 5, and representative peak in Step 6. |
+| Deno prerequisite verification, complete production pair configuration, production validation/upload/deployment, isolated Preview canary, then production canary and representative peak. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance` | Tasks 4 and 5 | Task 5 stages the ordinary Preview version artifact while the candidate pull request is open, then executes production configuration/deployment in Step 3, large-body Preview evidence against the pre-staged exact version in Step 4, production canary in Step 5, and representative peak in Step 6. Artifact staging is not Preview acceptance or a production-mutation gate. |
+| The PR-only Preview workflow's valid-auth version is correlated from `pr-<number>-deno-valid` to one exact Worker version ID using the locked Wrangler JSON schema. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Rollout and Acceptance`; `## Testing` | Task 5 | Pre-staging parses the version array's `annotations["workers/tag"]` and top-level `id`, rejects zero/multiple tags and invalid UUIDs, and records the ID before the candidate merge. |
 | CPU mitigation is observable and independently rollbackable. `docs/superpowers/specs/2026-09-09-large-responses-prepare-design.md` — `## Observability`; `## Testing`; `## Rollout and Acceptance` | Task 5 | The complete telemetry parser asserts exact request IDs, prepared/legacy resource stages, quota/upstream ordering, Worker revision, and absence of `exceededCpu`; the bounded D1 query asserts completed settlement evidence; Step 7 verifies the legacy route on a known pre-prepare version. |
 
 ## Plan Self-Review
 
-**Spec coverage:** The header identifies the approved superpowers design separately from the repository's normative `SPEC.md`. The coverage table maps each design heading to an implementation task and executable evidence. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; and the approved production-then-Preview-then-acceptance rollout, canary, and rollback procedures are Task 5. No Deno service implementation task is included because the approved design marks it complete and identifies it as a read-only verification reference for this revision.
+**Spec coverage:** The header identifies the approved superpowers design separately from the repository's normative `SPEC.md`. The coverage table maps each design heading to an implementation task and executable evidence. The worker routing invariant is Task 1; production validator and threshold invariant is Task 2; pre-mutation workflow invariant is Task 3; required specification/documentation updates are Task 4; and the approved production-then-Preview-then-acceptance rollout, pre-merge artifact staging, canary, and rollback procedures are Task 5. No Deno service implementation task is included because the approved design marks it complete and identifies it as a read-only verification reference for this revision.
 
 **Placeholder scan:** This plan contains no deferred implementation markers or generic error-handling instructions. Every source modification names the exact file, behavior to replace, tests to add or remove, command to run, expected failure, and target implementation shape. Task 5's environment values are deliberately operator-supplied identifiers or secrets; its commands validate and never print them. The approved Deno host is intentionally supplied by the operator and is never committed.
 
-**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, a Version Override only in Preview, the existing `octg.canary.result` shape, request IDs, `octg.resource_stage` fields, the existing Worker invocation `outcome` values, and audit status without treating D1 as quota authority. The reusable shell procedures define the exact prepared/legacy modes and all step-specific inputs explicitly.
+**Type and interface consistency:** Task 1 uses the existing `DeclaredContentLength` discriminated union and reads `value` only in its `valid` variant. Tasks 2 and 3 use the same production variable names and the same trimmed `"1"` threshold contract. Task 4 documents that production-only constraint while preserving `resolveDenoRuntimeConfig` as the optional non-production runtime authority. Task 5 uses `/v1/responses`, a Version Override only in Preview, the existing PR-only smoke lifecycle for artifact staging, the Wrangler 4.120.0 version-array shape, the existing `octg.canary.result` shape, request IDs, `octg.resource_stage` fields, the existing Worker invocation `outcome` values, and audit status without treating D1 as quota authority. The reusable shell procedures define the exact prepared/legacy modes and all step-specific inputs explicitly; large-body Preview acceptance consumes the pre-staged exact version and does not trigger a post-merge workflow.
 
 ## Implementation Order
 
