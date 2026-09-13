@@ -74,6 +74,81 @@ function hasWranglerDeployKeepVars(runCommand) {
   });
 }
 
+function extractWorkflowJobs(workflow) {
+  const jobsIndex = workflow.search(/^jobs:\s*$/m);
+  if (jobsIndex < 0) return [];
+
+  const jobsWorkflow = workflow.slice(jobsIndex);
+  const jobMatches = [...jobsWorkflow.matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)];
+  return jobMatches.map((match, index) => {
+    const jobEnd = jobMatches[index + 1]?.index ?? jobsWorkflow.length;
+    const block = jobsWorkflow.slice(match.index, jobEnd);
+    return {
+      id: match[1],
+      needs: extractJobNeeds(block),
+      steps: extractWorkflowSteps(block),
+    };
+  });
+}
+
+function extractJobNeeds(jobBlock) {
+  const needsMatch = jobBlock.match(/^    needs:\s*(.*)$/m);
+  if (!needsMatch) return [];
+
+  const inlineNeeds = needsMatch[1].trim();
+  if (inlineNeeds) {
+    return inlineNeeds
+      .replace(/^\[|\]$/g, "")
+      .split(",")
+      .map((value) => value.trim().replace(/^['"]|['"]$/g, ""))
+      .filter(Boolean);
+  }
+
+  const needs = [];
+  const afterNeeds = jobBlock.slice(needsMatch.index + needsMatch[0].length);
+  for (const line of afterNeeds.split("\n")) {
+    if (/^ {4}\S/.test(line)) break;
+    const itemMatch = line.match(/^ {6}- ([A-Za-z0-9_-]+)\s*$/);
+    if (itemMatch) needs.push(itemMatch[1]);
+  }
+  return needs;
+}
+
+function extractWorkflowSteps(jobBlock) {
+  return [...jobBlock.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => {
+    const name = match[1].trim();
+    return { name, run: extractStepRun(jobBlock.slice(match.index), name) };
+  });
+}
+
+function assertRemoteMutationsFollowValidation(workflow, validationStepName, changeCommands) {
+  const jobs = extractWorkflowJobs(workflow);
+  const validationJobs = jobs.filter((job) =>
+    job.steps.some((step) => step.name === validationStepName)
+  );
+  assert.equal(validationJobs.length, 1, "Production configuration validation must exist in one job");
+
+  const validationJob = validationJobs[0];
+  const validationStepIndex = validationJob.steps.findIndex((step) => step.name === validationStepName);
+  for (const command of changeCommands) {
+    const changeJobs = jobs.filter((job) =>
+      job.steps.some((step) => typeof step.run === "string" && step.run.includes(command))
+    );
+    assert.equal(changeJobs.length, 1, `Production workflow must contain one job for ${command}`);
+
+    const changeJob = changeJobs[0];
+    const changeStepIndex = changeJob.steps.findIndex((step) =>
+      typeof step.run === "string" && step.run.includes(command)
+    );
+    const followsInSameJob = changeJob.id === validationJob.id && changeStepIndex > validationStepIndex;
+    const dependsOnValidationJob = changeJob.needs.includes(validationJob.id);
+    assert.ok(
+      followsInSameJob || dependsOnValidationJob,
+      `Production validation must precede ${command} in the same job or through needs: ${validationJob.id}`,
+    );
+  }
+}
+
 test("deploy-production workflow preserves remote environment variables using --keep-vars", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
@@ -109,18 +184,14 @@ test("deploy-production workflow sources all non-secret settings from GitHub Var
 test("deploy-production validates prepare configuration before every remote mutation", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
-  const validationIndex = workflow.indexOf("- name: Validate Production Deno tokenizer configuration");
-  assert.ok(validationIndex >= 0, "Production configuration validation step must exist");
-  for (const command of [
+  const validationStepName = "Validate Production Deno tokenizer configuration";
+  const changeCommands = [
     "wrangler d1 migrations apply",
     "wrangler versions upload",
     "wrangler versions deploy",
-  ]) {
-    assert.ok(
-      workflow.indexOf(command) > validationIndex,
-      `Production validation must precede ${command}`,
-    );
-  }
+  ];
+
+  assertRemoteMutationsFollowValidation(workflow, validationStepName, changeCommands);
 });
 
 test("deploy-production uploads the mandatory prepare pair directly", () => {
