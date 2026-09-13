@@ -256,8 +256,9 @@ type DeclaredContentLength =
   | { readonly kind: "malformed" }
   | { readonly kind: "valid"; readonly value: number };
 
-function parseDeclaredContentLength(value: string | null): DeclaredContentLength {
+export function parseDeclaredContentLength(value: string | null): DeclaredContentLength {
   if (value === null) return { kind: "absent" };
+  if (!/^[0-9]+$/.test(value)) return { kind: "malformed" };
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0
     ? { kind: "valid", value: parsed }
@@ -664,8 +665,7 @@ export async function handleProxy(
     }
 
     const usePrepare = endpoint === "responses" && denoPrepareConfig.kind === "enabled" &&
-      declared.kind !== "malformed" &&
-      (declared.kind === "absent" || declared.value > denoPrepareConfig.thresholdBytes);
+      (declared.kind !== "valid" || declared.value > denoPrepareConfig.thresholdBytes);
 
     if (usePrepare && denoPrepareConfig.kind === "enabled") {
       const prepareConfig = denoPrepareConfig;

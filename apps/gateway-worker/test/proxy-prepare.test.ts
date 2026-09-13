@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import type { PrepareMetadata } from "@octg/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseDeclaredContentLength } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
 
 const PREPARE_BINDINGS = [
@@ -412,13 +413,56 @@ describe("prepare routing", () => {
     expect(calls).toEqual(["tokenize", "upstream"]);
   });
 
-  it("uses the legacy Responses path for a malformed declared content length", async () => {
-    const { calls, fetchImpl } = stubLegacyResponses();
+  it("routes malformed Content-Length through prepare before Worker parsing", async () => {
+    // Given: prepare is enabled and the client supplies an unusable declared length.
+    const resourceInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const { calls } = stubPreparedResponses(JSON.stringify({
+      max_output_tokens: metadata.outputMarker,
+    }));
 
+    // When: a Responses request crosses the Worker route.
     const response = await responsesRequest({ "content-length": "not-a-number" });
 
+    // Then: Deno prepares the original stream before any legacy body processing occurs.
     expect(response.status).toBe(200);
-    expect(calls).toEqual(["tokenize", "upstream"]);
+    expect(calls).toEqual(["prepare", "upstream"]);
+    const resourceEvents = resourceInfo.mock.calls
+      .map(([event]) => event)
+      .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null);
+    expect(resourceEvents).toContainEqual(expect.objectContaining({
+      stage: "prepare",
+      phase: "finish",
+      outcome: "success",
+    }));
+    expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "body_read" }));
+    expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "parse" }));
+    expect(resourceEvents).not.toContainEqual(expect.objectContaining({ stage: "normalize" }));
+  });
+
+  it.each(["1e2", "0x10"] as const)(
+    "routes non-decimal Content-Length %j through prepare",
+    async (contentLength) => {
+      // Given: the prepare threshold is above every numeric coercion of the malformed values.
+      Object.defineProperty(env, "DENO_PREPARE_THRESHOLD_BYTES", { value: "1000", configurable: true });
+      const { calls } = stubPreparedResponses(JSON.stringify({
+        max_output_tokens: metadata.outputMarker,
+      }));
+
+      // When: a Responses request supplies a non-decimal declared length.
+      const response = await responsesRequest({ "content-length": contentLength });
+
+      // Then: the malformed header selects prepare instead of the legacy path.
+      expect(response.status).toBe(200);
+      expect(calls).toEqual(["prepare", "upstream"]);
+    },
+  );
+
+  it("classifies an empty Content-Length as malformed", () => {
+    // Given: an empty declared length reaches the parser.
+    const declared = parseDeclaredContentLength("");
+
+    // Then: the empty value is not treated as zero bytes.
+    expect(declared).toEqual({ kind: "malformed" });
   });
 
   it("cancels a declared oversized Responses body before contacting Deno", async () => {
