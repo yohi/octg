@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,16 +74,6 @@ function hasWranglerDeployKeepVars(runCommand) {
   });
 }
 
-function extractPrepareArgsScript(runCommand) {
-  if (!runCommand) return null;
-
-  const start = runCommand.indexOf("prepare_args=()");
-  const end = runCommand.indexOf("secrets_file=", start);
-  if (start < 0 || end < 0) return null;
-
-  return `set -euo pipefail\n${runCommand.slice(start, end)}`;
-}
-
 test("deploy-production workflow preserves remote environment variables using --keep-vars", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
@@ -98,10 +87,9 @@ test("deploy-production workflow preserves remote environment variables using --
   );
 });
 
-test("deploy-production workflow validates and injects non-secret Deno settings", () => {
+test("deploy-production validates prepare configuration before every remote mutation", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
-
   for (const variableName of [
     "MAX_INPUT_BYTES",
     "DENO_TOKENIZER_ENDPOINT",
@@ -117,125 +105,37 @@ test("deploy-production workflow validates and injects non-secret Deno settings"
     );
   }
 
-  const validationStep = extractStepRun(
-    workflow,
-    "Validate Production Deno tokenizer configuration",
-  );
-  assert.match(validationStep, /node scripts\/production-deno-config\.mjs/);
-  assert.match(workflow, /PRODUCTION_PREPARE_CONFIGURED: \$\{\{ vars\.DENO_PREPARE_ENDPOINT != '' \|\| vars\.DENO_PREPARE_THRESHOLD_BYTES != '' \}\}/);
-  assert.match(validationStep, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
-
-  const validationIndex = workflow.indexOf(
-    "- name: Validate Production Deno tokenizer configuration",
-  );
-  const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
-  assert.ok(validationIndex >= 0, "Production Deno validation step must exist");
-  assert.ok(
-    migrationIndex > validationIndex,
-    "Production Deno validation must run before D1 migrations",
-  );
-
-  const deployCommand = extractStepRun(workflow, "Deploy Worker");
-  assert.ok(deployCommand, "Deploy Worker step must contain a run command");
-  assert.match(deployCommand, /--keep-vars/);
-  for (const variableName of [
-    "MAX_INPUT_BYTES",
-    "DENO_TOKENIZER_ENDPOINT",
-    "DENO_TOKENIZER_THRESHOLD_BYTES",
-    "DENO_TOKENIZER_TIMEOUT_MS",
-    "DENO_PREPARE_ENDPOINT",
-    "DENO_PREPARE_THRESHOLD_BYTES",
+  const validationIndex = workflow.indexOf("- name: Validate Production Deno tokenizer configuration");
+  assert.ok(validationIndex >= 0, "Production configuration validation step must exist");
+  for (const command of [
+    "wrangler d1 migrations apply",
+    "wrangler versions upload",
+    "wrangler versions deploy",
   ]) {
-    assert.match(
-      deployCommand,
-      new RegExp(`--var "${variableName}:\\$\\{${variableName}\\}"`),
-      `Deploy Worker must pass ${variableName} explicitly to Wrangler`,
+    assert.ok(
+      workflow.indexOf(command) > validationIndex,
+      `Production validation must precede ${command}`,
     );
   }
+});
 
-  assert.match(deployCommand, /prepare_args=\(\)/);
-  assert.match(deployCommand, /unset DENO_PREPARE_ENDPOINT DENO_PREPARE_THRESHOLD_BYTES/);
-  assert.match(deployCommand, /--var "MAX_INPUT_BYTES:\$\{MAX_INPUT_BYTES\}"/);
-  const prepareCheckIndex = deployCommand.indexOf("Production prepare variables must be supplied together");
-  const prepareAppendIndex = deployCommand.indexOf('prepare_args+=(--var "DENO_PREPARE_ENDPOINT');
-  assert.ok(prepareCheckIndex >= 0 && prepareCheckIndex < prepareAppendIndex);
+test("deploy-production uploads the mandatory prepare pair directly", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const validationStep = extractStepRun(workflow, "Validate Production Deno tokenizer configuration");
+  const deployCommand = extractStepRun(workflow, "Deploy Worker");
+  assert.ok(validationStep, "Production configuration validation must have a run command");
+  assert.ok(deployCommand, "Deploy Worker must have a run command");
+  assert.match(validationStep, /node scripts\/production-deno-config\.mjs/);
+  assert.doesNotMatch(validationStep, /PRODUCTION_PREPARE_CONFIGURED|unset DENO_PREPARE_/);
+  assert.match(deployCommand, /--var "DENO_PREPARE_ENDPOINT:\$\{DENO_PREPARE_ENDPOINT\}"/);
+  assert.match(deployCommand, /--var "DENO_PREPARE_THRESHOLD_BYTES:\$\{DENO_PREPARE_THRESHOLD_BYTES\}"/);
+  assert.doesNotMatch(deployCommand, /prepare_args=\(\)|PRODUCTION_PREPARE_CONFIGURED|unset DENO_PREPARE_/);
 
   const denoWorkflow = readFileSync(join(root, ".github/workflows/deploy-deno-tokenizer.yml"), "utf8");
   assert.match(denoWorkflow, /MAX_INPUT_BYTES: \$\{\{ vars\.MAX_INPUT_BYTES \}\}/);
   assert.match(denoWorkflow, /MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
   assert.match(denoWorkflow, /OCTG_EXPECTED_MAX_INPUT_BYTES=\$\{maxInputBytes\}/);
-
-});
-
-test("deploy-production workflow only uploads a complete prepare pair", () => {
-  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
-  const workflow = readFileSync(workflowPath, "utf8");
-  const deployCommand = extractStepRun(workflow, "Deploy Worker");
-  const prepareArgsScript = extractPrepareArgsScript(deployCommand);
-
-  assert.ok(prepareArgsScript, "Deploy Worker must conditionally build prepare arguments");
-
-  for (const scenario of [
-    {
-      name: "both values absent",
-      endpoint: "",
-      threshold: "",
-      status: 0,
-      args: [],
-    },
-    {
-      name: "complete pair",
-      endpoint: "https://prepare.example/prepare",
-      threshold: "700000",
-      status: 0,
-      args: [
-        "--var",
-        "DENO_PREPARE_ENDPOINT:https://prepare.example/prepare",
-        "--var",
-        "DENO_PREPARE_THRESHOLD_BYTES:700000",
-      ],
-    },
-    {
-      name: "endpoint without threshold",
-      endpoint: "https://prepare.example/prepare",
-      threshold: "",
-      status: 2,
-      args: [],
-    },
-    {
-      name: "threshold without endpoint",
-      endpoint: "",
-      threshold: "700000",
-      status: 2,
-      args: [],
-    },
-  ]) {
-    const result = spawnSync(
-      "bash",
-      [
-        "-c",
-        `${prepareArgsScript}\nif ((\${#prepare_args[@]} > 0)); then printf '%s\\n' "\${prepare_args[@]}"; fi`,
-      ],
-      {
-        env: {
-          ...process.env,
-          DENO_PREPARE_ENDPOINT: scenario.endpoint,
-          DENO_PREPARE_THRESHOLD_BYTES: scenario.threshold,
-        },
-        encoding: "utf8",
-      },
-    );
-
-    assert.equal(result.status, scenario.status, scenario.name);
-    assert.deepEqual(
-      result.stdout
-        .trimEnd()
-        .split("\n")
-        .filter((line) => line === "--var" || line.startsWith("DENO_PREPARE_")),
-      scenario.args,
-      scenario.name,
-    );
-  }
 });
 
 test("deploy-production workflow synchronizes the Worker auth Secret safely", () => {
