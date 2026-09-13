@@ -273,9 +273,10 @@ Run the repository's protected telemetry parser and bounded request-audit query
 against those files. `assert_telemetry` must be run with `prepared` for Preview,
 production, and peak, and with `legacy` plus the retained provider for rollback.
 `assert_no_canary_secret_leak` and `assert_audit_completed` are the corresponding
-Task 5 assertions; all must exit successfully. The D1 query is settlement
-evidence only. See [SPEC.md](../SPEC.md) for the complete routing and validation
-contract.
+Task 5 assertions; all must exit successfully. The complete protected function
+definitions are in the [Task 5 acceptance procedures](./superpowers/plans/2026-09-12-large-responses-prepare-activation.md#task-5-verify-the-repository-and-execute-the-controlled-activation).
+The D1 query is settlement evidence only. See [SPEC.md](../SPEC.md) for the
+complete routing and validation contract.
 
 If rollback is required, use the known pre-prepare version and run the same
 protected canary procedure in legacy mode:
