@@ -584,6 +584,18 @@ Before rollback:
 
 Do not rewrite or remove an already applied Durable Object migration tag to make rollback easier.
 
+After restoring the known pre-prepare version, run the rollback-specific
+protected canary capture and execute all three acceptance assertions. Use the
+rollback temporary files and the retained legacy tokenization provider:
+
+```bash
+assert_telemetry "$rollback_canary_output" "$rollback_telemetry_output" \
+  "$KNOWN_PREPARE_FREE_VERSION_ID" "1,2" legacy \
+  "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
+assert_no_canary_secret_leak "$rollback_canary_output" "$rollback_telemetry_output"
+assert_audit_completed "$rollback_canary_output" "$rollback_audit_output" "$CANARY_D1_DATABASE"
+```
+
 After the TokenizerController migration has been applied, prefer a rollback
 target that still includes the compatible migration and binding. Rolling back
 only to avoid the migration can re-enable the Worker-local large-input BPE path
