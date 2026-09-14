@@ -291,17 +291,33 @@ See `docs/deno-tokenizer.md` for deployment and component-specific operational d
 
 ### 9.4 Responses prepare provider
 
-The Worker prepare pair is optional and all-or-nothing:
+The prepare pair has separate runtime and production semantics:
 
 - `DENO_PREPARE_ENDPOINT` is an HTTPS `/prepare` endpoint;
 - `DENO_PREPARE_THRESHOLD_BYTES` is a positive threshold no greater than
   `MAX_INPUT_BYTES`.
 
-Both absent disables prepare. A one-sided, invalid, or tokenizer-incompatible
-pair is a configuration error for Responses and does not alter Chat
-Completions behavior. A request with a valid declared body length above
-`MAX_INPUT_BYTES` is rejected before Deno; otherwise a large Responses request
-is sent to `/prepare` without reconstructing or logging the body.
+Outside production, both prepare variables absent disables prepare; a complete
+valid pair enables it; and a partial or invalid pair is a Responses-only
+configuration error.
+
+With prepare enabled, a missing or malformed `Content-Length` routes a
+Responses request to `/prepare`. A valid declared length above the threshold
+routes to `/prepare`; a valid declared length at or below the threshold retains
+the legacy path. A valid declared length above `MAX_INPUT_BYTES` is canceled and
+rejected before Deno dispatch.
+
+Production deployment requires both prepare variables. After surrounding
+whitespace is trimmed, `DENO_PREPARE_THRESHOLD_BYTES` must be exactly `"1"`.
+The validator must reject invalid production configuration before D1 migration,
+Worker version upload, or Worker version deployment, and the upload passes both
+values explicitly.
+
+A one-sided, invalid, or tokenizer-incompatible pair is a configuration error
+for Responses and does not alter Chat Completions behavior. A request with a
+valid declared body length above `MAX_INPUT_BYTES` is rejected before Deno;
+otherwise a large Responses request is sent to `/prepare` without reconstructing
+or logging the body.
 
 The Deno `/prepare` protocol exposes exactly these five validation codes:
 `invalid_body`, `non_text`, `max_tokens_conflict`, `input_too_large`, and
@@ -634,7 +650,8 @@ D1 audit writes are intentionally best effort on the request path. A failed audi
 - Secrets MUST not be committed to the repository.
 - Changing `OCTG_KEY_PEPPER` without re-hashing or reissuing client credentials invalidates existing key lookup.
 - A partial Deno tokenizer configuration is an error, not a request-time fallback condition.
-- Both prepare variables absent is disabled; a one-sided prepare pair is invalid and must not become empty Worker bindings.
+- Outside production, both prepare variables absent disables prepare; a complete valid pair enables it; and a partial or invalid pair is a Responses-only configuration error.
+- Production requires the complete prepare pair; empty, partial, or noncanonical values are invalid, and validation occurs before every Worker-side remote mutation.
 - Prepare-only invalidity affects Responses configuration, not the Chat Completions route.
 - Production and Preview input-limit sources are isolated; each Deno runtime receives a generated expected-value assertion from its own canonical limit.
 - Quota limits configured below the shared fallback allowance are valid operational ceilings.
@@ -660,12 +677,13 @@ confirms that the Worker does not report `exceededCpu`, the gateway has paired
 tokenization start/finish events, the TokenizerController has paired init/encode
 events, and a tokenizer failure reaches neither quota reservation nor upstream.
 
-Prepare acceptance additionally requires a Stage 1 deployment with prepare
-absent, authenticated `/health` and `/prepare` verification, sanitized
-approximately 74k-token Responses canaries at concurrency 1 and 2, and a
-resource-stage result with no `exceededCpu` outcome. A prepare rejection or
+Prepare acceptance additionally requires independent Deno `/prepare` health and
+authentication verification, mandatory-pair activation, sanitized
+approximately 74k-token Responses canaries at concurrency 1 and 2, `prepare`
+resource-stage telemetry, and no `exceededCpu` outcome. A prepare rejection or
 unavailable result must reach neither quota reservation nor upstream. Rollback
-must target a known Worker version that predates prepare and must repeat the
-Chat/Responses route checks.
+must target a known Worker version that predates prepare, require the legacy
+`body_read`/`parse`/`normalize` stages and no `prepare` stage, and must repeat
+the Chat/Responses route checks.
 
 The specification must be reviewed whenever those tests or externally visible contracts change.
