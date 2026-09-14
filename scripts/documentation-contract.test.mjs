@@ -81,6 +81,26 @@ test("canonical documentation retains tokenizer rollout and future-work boundari
   assert.match(roadmap, /TokenizerController sharding/);
 });
 
+test("canary runbook protects the Deno auth value and tail lifecycle", () => {
+  const operations = read("docs/operations.md");
+
+  assert.match(
+    operations,
+    /printf '%s\\0%s\\0%s\\0' "\$CANARY_BODY_MARKER" "\$OCTG_CANARY_CLIENT_KEY" "\$deno_auth_token"/,
+  );
+  assert.match(operations, /const \[marker, clientKey, denoAuthToken\]/);
+  assert.match(operations, /const secrets = \[marker, clientKey, denoAuthToken\]/);
+  assert.match(operations, /secrets\.some\(\(secret\) => capture\.includes\(secret\)\)/);
+  assert.match(operations, /assert_no_canary_secret_leak "\$preview_canary_output" "\$preview_telemetry_output" \\\n\s*"\$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN"/);
+  assert.match(operations, /assert_no_canary_secret_leak "\$production_canary_output" "\$production_telemetry_output" \\\n\s*"\$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"/);
+
+  assert.match(operations, /wait_for_tail_ready\(\)/);
+  assert.match(operations, /grep -Fq -- "\$ready_marker" "\$telemetry_output"/);
+  assert.match(operations, /--max-time 2/);
+  assert.match(operations, /trap 'if \[ -n "\$\{tail_pid:-\}" \]; then[\s\S]*?wait "\$tail_pid"[\s\S]*?tail_pid=""; fi; rm -f/);
+  assert.match(operations, /wait "\$tail_pid" \|\| true\ntail_pid=""/);
+});
+
 test("Preview configuration keeps its Deno control plane separate from Production", () => {
   const configuration = read("docs/configuration.md");
   const environmentTemplate = read(".env.example");

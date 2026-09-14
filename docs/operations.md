@@ -224,7 +224,7 @@ umask 077
   : "${PREVIEW_HEAD_SHA:?set the exact candidate pull request head SHA}"
   : "${PREVIEW_CONFIGURED_AT:?record the UTC time immediately after Preview variables were saved}"
   : "${PREVIEW_WORKER_NAME:?set the isolated Preview Worker name}"
-  : "${PREVIEW_RUN_ID:?set the candidate's Preview Smoke Test run ID}"
+  : "${PREVIEW_RUN_ID:?set the candidate pull request Preview Smoke Test run ID}"
   : "${CLOUDFLARE_API_TOKEN:?load the isolated Preview API token without printing it}"
   : "${CLOUDFLARE_ACCOUNT_ID:?set the isolated Preview account ID}"
   preview_pr_file="$(mktemp)"
@@ -360,6 +360,10 @@ NODE
 Define these protected acceptance helpers in the operator shell before running
 the canary blocks. They consume only protected capture files; credentials are
 passed to the leak check through standard input and never as process arguments.
+The third argument to `assert_no_canary_secret_leak` is the runtime shared-auth
+value for the same control plane: use `DENO_PREVIEW_TOKENIZER_AUTH_TOKEN` for
+Preview and `PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN` for Production and rollback.
+Do not use the separate `DENO_DEPLOY_TOKEN` management credential.
 
 ```bash
 assert_telemetry() {
@@ -499,26 +503,70 @@ NODE
 assert_no_canary_secret_leak() {
   local canary_output="$1"
   local telemetry_output="$2"
+  local deno_auth_token="${3-}"
 
-  printf '%s\0%s\0' "$CANARY_BODY_MARKER" "$OCTG_CANARY_CLIENT_KEY" |
+  printf '%s\0%s\0%s\0' "$CANARY_BODY_MARKER" "$OCTG_CANARY_CLIENT_KEY" "$deno_auth_token" |
     CANARY_OUTPUT="$canary_output" \
     TELEMETRY_OUTPUT="$telemetry_output" \
     node --input-type=module -e '
       import { readFileSync } from "node:fs";
 
-      const [marker, clientKey] = readFileSync(0, "utf8").split("\0");
-      if (marker === undefined || clientKey === undefined || marker.length === 0 || clientKey.length === 0) {
+      const [marker, clientKey, denoAuthToken] = readFileSync(0, "utf8").split("\0");
+      if ([marker, clientKey, denoAuthToken].some((secret) => secret === undefined || secret.length === 0)) {
         throw new Error("canary secret validation input is incomplete");
       }
+      const secrets = [marker, clientKey, denoAuthToken];
       const paths = [process.env.CANARY_OUTPUT, process.env.TELEMETRY_OUTPUT];
       if (paths.some((path) => typeof path !== "string")) {
         throw new Error("canary capture path is missing");
       }
       const captures = paths.map((path) => readFileSync(path, "utf8"));
-      if (captures.some((capture) => capture.includes(marker) || capture.includes(clientKey))) {
-        throw new Error("canary payload marker or client key appeared in protected capture");
+      if (captures.some((capture) => secrets.some((secret) => capture.includes(secret)))) {
+        throw new Error("canary marker, client key, or Deno shared auth appeared in protected capture");
       }
     '
+}
+
+build_tail_readiness_url() {
+  local target_url="$1"
+  local ready_marker="$2"
+
+  node --input-type=module - "$target_url" "$ready_marker" <<'NODE'
+const [targetUrl, readyMarker] = process.argv.slice(2);
+const url = new URL(targetUrl);
+url.searchParams.set("octg_tail_ready", readyMarker);
+process.stdout.write(url.toString());
+NODE
+}
+
+wait_for_tail_ready() {
+  local tail_pid="$1"
+  local telemetry_output="$2"
+  local ready_url="$3"
+  local ready_marker="$4"
+  local timeout_seconds="${5:-30}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    if grep -Fq -- "$ready_marker" "$telemetry_output"; then
+      return 0
+    fi
+    if ! kill -0 "$tail_pid" 2>/dev/null; then
+      wait "$tail_pid" 2>/dev/null || true
+      echo "wrangler tail exited before the readiness probe was observed" >&2
+      return 1
+    fi
+    curl --silent --output /dev/null \
+      --connect-timeout 2 --max-time 2 \
+      --request GET "$ready_url" || true
+    sleep 1
+  done
+
+  if grep -Fq -- "$ready_marker" "$telemetry_output"; then
+    return 0
+  fi
+  echo "wrangler tail readiness was not observed within ${timeout_seconds}s" >&2
+  return 1
 }
 
 assert_audit_completed() {
@@ -591,20 +639,29 @@ NODE
 ```
 
 For each canary, capture the version-filtered tail and canary results before
-asserting them:
+asserting them. The non-sensitive readiness probe is a GET with a unique query
+marker; its expected 404 response is irrelevant, and the canary starts only
+after that marker is observed in the JSON tail capture.
 
 ```bash
 canary_output="$(mktemp)"
 telemetry_output="$(mktemp)"
 audit_output="$(mktemp)"
-trap 'rm -f "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+tail_pid=""
+trap 'if [ -n "${tail_pid:-}" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; tail_pid=""; fi; rm -f "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+tail_ready_marker="octg_tail_ready_${RANDOM}_${RANDOM}"
+tail_ready_url="$(build_tail_readiness_url "$OCTG_CANARY_URL" "$tail_ready_marker")"
 ./node_modules/.bin/wrangler tail "$WORKER_NAME" \
   --format=json --version-id="$EXPECTED_WORKER_VERSION" >"$telemetry_output" 2>&1 &
 tail_pid=$!
+if ! wait_for_tail_ready "$tail_pid" "$telemetry_output" "$tail_ready_url" "$tail_ready_marker" 30; then
+  exit 1
+fi
 CANARY_PAYLOAD_PATH="$PAYLOAD_FILE" \
   npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
 kill "$tail_pid" 2>/dev/null || true
 wait "$tail_pid" || true
+tail_pid=""
 ```
 
 Run the protected telemetry parser and bounded request-audit query against those
@@ -622,7 +679,8 @@ base at 100% in the same protected shell on every exit path, and then runs:
 ```bash
 assert_telemetry "$preview_canary_output" "$preview_telemetry_output" \
   "$PREVIEW_PREPARE_VERSION_ID" "1,2" prepared ""
-assert_no_canary_secret_leak "$preview_canary_output" "$preview_telemetry_output"
+assert_no_canary_secret_leak "$preview_canary_output" "$preview_telemetry_output" \
+  "$DENO_PREVIEW_TOKENIZER_AUTH_TOKEN"
 assert_audit_completed "$preview_canary_output" "$preview_audit_output" "$PREVIEW_D1_DATABASE"
 ```
 
@@ -632,7 +690,8 @@ production version without Version Override:
 ```bash
 assert_telemetry "$production_canary_output" "$production_telemetry_output" \
   "$EXPECTED_PRODUCTION_WORKER_VERSION" "1,2" prepared ""
-assert_no_canary_secret_leak "$production_canary_output" "$production_telemetry_output"
+assert_no_canary_secret_leak "$production_canary_output" "$production_telemetry_output" \
+  "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"
 assert_audit_completed "$production_canary_output" "$production_audit_output" "$CANARY_D1_DATABASE"
 ```
 
@@ -641,7 +700,8 @@ The representative production peak runs only after concurrency 1 and 2 pass:
 ```bash
 assert_telemetry "$peak_canary_output" "$peak_telemetry_output" \
   "$EXPECTED_PRODUCTION_WORKER_VERSION" "1,2,${CANARY_PEAK_CONCURRENCY}" prepared ""
-assert_no_canary_secret_leak "$peak_canary_output" "$peak_telemetry_output"
+assert_no_canary_secret_leak "$peak_canary_output" "$peak_telemetry_output" \
+  "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"
 assert_audit_completed "$peak_canary_output" "$peak_audit_output" "$CANARY_D1_DATABASE"
 ```
 
@@ -696,7 +756,9 @@ canary_output="$(mktemp)"
 telemetry_output="$(mktemp)"
 audit_output="$(mktemp)"
 tail_pid=""
-trap 'if [ -n "$tail_pid" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+trap 'if [ -n "${tail_pid:-}" ]; then kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; tail_pid=""; fi; rm -f "$payload_file" "$canary_output" "$telemetry_output" "$audit_output"' EXIT
+tail_ready_marker="octg_tail_ready_${RANDOM}_${RANDOM}"
+tail_ready_url="$(build_tail_readiness_url "$OCTG_CANARY_URL" "$tail_ready_marker")"
 node --input-type=module - "$payload_file" "$CANARY_BODY_MARKER" <<'NODE'
 import { writeFileSync } from "node:fs";
 
@@ -716,13 +778,15 @@ NODE
   --format=json \
   --version-id="$KNOWN_PREPARE_FREE_VERSION_ID" >"$telemetry_output" 2>&1 &
 tail_pid=$!
-sleep 5
-kill -0 "$tail_pid"
+if ! wait_for_tail_ready "$tail_pid" "$telemetry_output" "$tail_ready_url" "$tail_ready_marker" 30; then
+  exit 1
+fi
 CANARY_PAYLOAD_PATH="$payload_file" \
   npm run canary:worker -- --env-file=admin.env --concurrency=1,2 | tee "$canary_output"
 sleep 10
 kill "$tail_pid"
 wait "$tail_pid" || true
+tail_pid=""
 ```
 
 Validate the exact rollback result set before parsing resource telemetry:
@@ -773,7 +837,8 @@ assert_telemetry \
   "1,2" \
   legacy \
   "$EXPECTED_LEGACY_TOKENIZATION_PROVIDER"
-assert_no_canary_secret_leak "$canary_output" "$telemetry_output"
+assert_no_canary_secret_leak "$canary_output" "$telemetry_output" \
+  "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN"
 assert_audit_completed "$canary_output" "$audit_output" "$CANARY_D1_DATABASE"
 ```
 
