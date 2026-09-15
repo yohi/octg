@@ -61,7 +61,7 @@ checked-in `wrangler.jsonc` の current defaults:
 | `QUOTA_LIMIT_STANDARD` | `1000000` | STANDARD operational ceiling |
 | `QUOTA_LIMIT_MINI` | `9950000` | MINI operational ceiling |
 | `MAX_INPUT_BYTES` | `1048576` | accepted input limit |
-| `MAX_IN_FLIGHT_REQUESTS` | `2` | pool/day in-flight limit |
+| `MAX_IN_FLIGHT_REQUESTS` | `3` | pool/day in-flight limit |
 | `IN_FLIGHT_LEASE_TTL_MS` | `120000` | lease TTL |
 | `IN_FLIGHT_LEASE_RENEWAL_MS` | `30000` | streaming renewal interval |
 
