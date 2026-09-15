@@ -67,7 +67,7 @@ Checked-in defaults live in `apps/gateway-worker/wrangler.jsonc`.
 | `QUOTA_LIMIT_STANDARD` | `1000000` | Operational STANDARD pool ceiling for one UTC day |
 | `QUOTA_LIMIT_MINI` | `9950000` | Operational MINI pool ceiling for one UTC day |
 | `MAX_INPUT_BYTES` | `1048576` | Maximum accepted raw/normalized input size before the hard tokenization ceiling |
-| `MAX_IN_FLIGHT_REQUESTS` | `2` | Maximum concurrent admitted requests in a pool/day controller |
+| `MAX_IN_FLIGHT_REQUESTS` | `3` | Maximum concurrent admitted requests in a pool/day controller |
 | `IN_FLIGHT_LEASE_TTL_MS` | `120000` | In-flight lease TTL; runtime enforces a 120 s minimum |
 | `IN_FLIGHT_LEASE_RENEWAL_MS` | `30000` | Streaming lease renewal interval |
 

@@ -142,6 +142,15 @@ test("Preview quota examples stay within the provider ceilings", () => {
   }
 });
 
+test("Worker admission allows the observed three-request burst", () => {
+  const productionConfig = ts.parseConfigFileTextToJson(
+    "wrangler.jsonc",
+    read("apps/gateway-worker/wrangler.jsonc"),
+  ).config;
+
+  assert.equal(productionConfig.vars.MAX_IN_FLIGHT_REQUESTS, "3");
+});
+
 test("all Markdown documentation keeps relative links resolvable", () => {
   const documentationFiles = markdownFiles(root);
   const unresolved = [];

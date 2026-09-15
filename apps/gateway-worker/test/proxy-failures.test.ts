@@ -335,12 +335,14 @@ describe("proxy failure paths", () => {
 
   it("rejects a saturated pool before upstream contact without consuming quota", async () => {
     const controller = stub();
-    const firstLease = await controller.acquireInFlight("occupied-one", 2);
-    const secondLease = await controller.acquireInFlight("occupied-two", 2);
+    const firstLease = await controller.acquireInFlight("occupied-one", 3);
+    const secondLease = await controller.acquireInFlight("occupied-two", 3);
+    const thirdLease = await controller.acquireInFlight("occupied-three", 3);
     expect(firstLease).toMatchObject({ ok: true, lease: { requestId: "occupied-one" } });
     expect(secondLease).toMatchObject({ ok: true, lease: { requestId: "occupied-two" } });
-    if (!firstLease.ok || !secondLease.ok) {
-      throw new TypeError("Expected both in-flight leases to be acquired.");
+    expect(thirdLease).toMatchObject({ ok: true, lease: { requestId: "occupied-three" } });
+    if (!firstLease.ok || !secondLease.ok || !thirdLease.ok) {
+      throw new TypeError("Expected all in-flight leases to be acquired.");
     }
     try {
       const before = await controller.getState();
@@ -364,6 +366,7 @@ describe("proxy failure paths", () => {
     } finally {
       await controller.releaseInFlight("occupied-one", firstLease.lease.generation);
       await controller.releaseInFlight("occupied-two", secondLease.lease.generation);
+      await controller.releaseInFlight("occupied-three", thirdLease.lease.generation);
     }
   });
 

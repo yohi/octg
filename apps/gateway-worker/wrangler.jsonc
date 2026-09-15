@@ -21,7 +21,7 @@
     "QUOTA_LIMIT_STANDARD": "1000000",
     "QUOTA_LIMIT_MINI": "9950000",
     "MAX_INPUT_BYTES": "1048576",
-    "MAX_IN_FLIGHT_REQUESTS": "2",
+    "MAX_IN_FLIGHT_REQUESTS": "3",
     "IN_FLIGHT_LEASE_TTL_MS": "120000",
     "IN_FLIGHT_LEASE_RENEWAL_MS": "30000",
     "OCTG_UPSTREAM_BASE_URL": "https://gateway.ai.cloudflare.com/v1/4bc6b4d26ae21d2b0d5bbb7ce91f1cda/octg-gateway/openai",
