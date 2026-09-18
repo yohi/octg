@@ -66,6 +66,11 @@ function replaceOneQuotedMarker(
   let batchStart = 0;
 
   while (i < combined.byteLength) {
+    if (combined[i] !== quotedMarker[0]) {
+      i++;
+      continue;
+    }
+
     // Try to find the full quoted marker starting at position i
     if (exactMatch(combined, i, quotedMarker)) {
       // Flush any batched non-matching bytes before the marker
