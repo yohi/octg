@@ -96,6 +96,22 @@ describe("replaceOutputMarker", () => {
     await expect(drainStream(replaceOutputMarker(body, MARKER, 42))).rejects.toThrow();
   });
 
+  it("skips marker prefix slicing for bytes that cannot start the marker", async () => {
+    let subarrayCalls = 0;
+    class CountingBytes extends Uint8Array<ArrayBuffer> {
+      override subarray(begin?: number, end?: number): Uint8Array<ArrayBuffer> {
+        subarrayCalls += 1;
+        return super.subarray(begin, end);
+      }
+    }
+    const chunk = new CountingBytes(new ArrayBuffer(10_000));
+    chunk.fill("x".charCodeAt(0));
+    const body = streamFromChunks([chunk]);
+
+    await expect(drainStream(replaceOutputMarker(body, MARKER, 42))).rejects.toThrow();
+    expect(subarrayCalls).toBe(1);
+  });
+
   it("throws on duplicate marker occurrences", async () => {
     const body = streamFromChunks([encode(`${QUOTED_MARKER} ${QUOTED_MARKER}`)]);
     await expect(drainStream(replaceOutputMarker(body, MARKER, 42))).rejects.toThrow();
