@@ -90,3 +90,46 @@ test("rejects a URL whose host is not in the exact allow-list", () => {
     /OCTG_CANARY_ALLOWED_HOSTS/,
   );
 });
+
+test("builds a byte-bounded Responses payload", () => {
+  const config = resolveCanaryConfig({
+    OCTG_CANARY_URL: "https://example.test/v1/responses",
+    OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+    CANARY_MODE: "responses",
+    CANARY_REQUEST_BYTES: "778240",
+  });
+  const payload = buildCanaryPayload(config);
+
+  assert.equal(Buffer.byteLength(payload), 778240);
+  assert.equal(JSON.parse(payload).max_output_tokens, 16);
+});
+
+test("requires the endpoint path to match the canary mode", () => {
+  assert.throws(() => resolveCanaryConfig({
+    OCTG_CANARY_URL: "https://example.test/v1/responses",
+    OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+    CANARY_MODE: "chat",
+  }), /CANARY_MODE/);
+  assert.throws(() => resolveCanaryConfig({
+    OCTG_CANARY_URL: "https://example.test/v1/chat/completions",
+    OCTG_CANARY_CLIENT_KEY: "octg_sk_test",
+    CANARY_MODE: "responses",
+  }), /CANARY_MODE/);
+});
+
+test("rejects invalid modes and request sizes without exposing values", () => {
+  for (const [mode, requestBytes] of [["invalid", "778240"], ["responses", "1048577"], ["responses", "1"]]) {
+    assert.throws(() => resolveCanaryConfig({
+      OCTG_CANARY_URL: "https://example.test/v1/responses",
+      OCTG_CANARY_CLIENT_KEY: "octg_sk_secret",
+      CANARY_MODE: mode,
+      CANARY_REQUEST_BYTES: requestBytes,
+    }), (error) => {
+      const message = formatConfigError(error);
+      assert.equal(message.includes(`mode=${mode}`), false);
+      assert.equal(message.includes(requestBytes), false);
+      assert.equal(message.includes("octg_sk_secret"), false);
+      return true;
+    });
+  }
+});

@@ -10,9 +10,12 @@ import { parseEnvFile as parseEnvironmentFile } from "./parse-env-file.mjs";
 export const DEFAULT_CANARY_CONCURRENCY = "1,2";
 export const DEFAULT_CANARY_TIMEOUT_MS = 120_000;
 export const DEFAULT_CANARY_ENV_FILE = "admin.env";
+export const DEFAULT_CANARY_MODE = "chat";
+export const DEFAULT_CANARY_REQUEST_BYTES = 778_240;
 
 const MAX_CANARY_CONCURRENCY = 64;
 const MAX_CANARY_TIMEOUT_MS = 2_147_483_647;
+const MAX_CANARY_REQUEST_BYTES = 1_048_576;
 const CANARY_ENV_NAMES = new Set([
   "OCTG_CANARY_URL",
   "OCTG_CANARY_ALLOWED_HOSTS",
@@ -20,6 +23,8 @@ const CANARY_ENV_NAMES = new Set([
   "CANARY_PAYLOAD_PATH",
   "CANARY_CONCURRENCY",
   "CANARY_REQUEST_TIMEOUT_MS",
+  "CANARY_MODE",
+  "CANARY_REQUEST_BYTES",
 ]);
 const canaryScript = fileURLToPath(new URL("./canary-worker-resource-limits.mjs", import.meta.url));
 const defaultInputText = "The quick brown fox jumps over the lazy dog.\n".repeat(7_400);
@@ -78,6 +83,11 @@ export function resolveCanaryConfig(env, overrides = {}) {
     throw new CanaryConfigError("invalid: OCTG_CANARY_ALLOWED_HOSTS");
   }
 
+  const mode = overrides.mode ?? env.CANARY_MODE ?? DEFAULT_CANARY_MODE;
+  if (mode !== "chat" && mode !== "responses") throw new CanaryConfigError("invalid: CANARY_MODE");
+  const expectedPath = mode === "responses" ? "/v1/responses" : "/v1/chat/completions";
+  if (url.pathname !== expectedPath) throw new CanaryConfigError("invalid: CANARY_MODE");
+
   const concurrency = overrides.concurrency ?? env.CANARY_CONCURRENCY ?? DEFAULT_CANARY_CONCURRENCY;
   const concurrencyValues = positiveIntegers("CANARY_CONCURRENCY", concurrency);
   if (!concurrencyValues.includes(1) || !concurrencyValues.includes(2)) {
@@ -90,17 +100,31 @@ export function resolveCanaryConfig(env, overrides = {}) {
     throw new CanaryConfigError("invalid: CANARY_REQUEST_TIMEOUT_MS");
   }
 
+  const requestBytesRaw = overrides.requestBytes ?? env.CANARY_REQUEST_BYTES ?? DEFAULT_CANARY_REQUEST_BYTES;
+  const requestBytes = Number(requestBytesRaw);
+  const responsesEnvelopeBytes = Buffer.byteLength(JSON.stringify({ model: "gpt-5", input: "", max_output_tokens: 16 }));
+  if (mode === "responses" && (!Number.isSafeInteger(requestBytes) || requestBytes < responsesEnvelopeBytes || requestBytes > MAX_CANARY_REQUEST_BYTES)) {
+    throw new CanaryConfigError("invalid: CANARY_REQUEST_BYTES");
+  }
+
   return {
     url: url.toString(),
     allowedHosts: allowedHosts.join(","),
     apiKey: env.OCTG_CANARY_CLIENT_KEY,
     concurrency: concurrencyValues.join(","),
     timeoutMs,
+    mode,
+    requestBytes,
     payloadPath: overrides.payloadPath ?? env.CANARY_PAYLOAD_PATH,
   };
 }
 
-export function buildCanaryPayload() {
+export function buildCanaryPayload(config = { mode: "chat" }) {
+  if (config.mode === "responses") {
+    const envelope = JSON.stringify({ model: "gpt-5", input: "", max_output_tokens: 16 });
+    const input = "a".repeat(config.requestBytes - Buffer.byteLength(envelope));
+    return JSON.stringify({ model: "gpt-5", input, max_output_tokens: 16 });
+  }
   return JSON.stringify({
     model: "gpt-5",
     messages: [{ role: "user", content: defaultInputText }],
@@ -151,7 +175,7 @@ async function payloadFile(config) {
   }
   const directory = await mkdtemp(join(tmpdir(), "octg-worker-canary-"));
   const path = join(directory, "payload.json");
-  await writeFile(path, buildCanaryPayload(), { encoding: "utf8", mode: 0o600 });
+  await writeFile(path, buildCanaryPayload(config), { encoding: "utf8", mode: 0o600 });
   return { path, directory };
 }
 
@@ -165,6 +189,8 @@ function runCanary(config, payloadPath) {
     CANARY_PAYLOAD_PATH: payloadPath,
     CANARY_CONCURRENCY: config.concurrency,
     CANARY_REQUEST_TIMEOUT_MS: String(config.timeoutMs),
+    CANARY_MODE: config.mode,
+    CANARY_REQUEST_BYTES: String(config.requestBytes),
   };
   return new Promise((resolveCode) => {
     const child = spawn(process.execPath, [canaryScript], { cwd: process.cwd(), env: childEnv, stdio: "inherit" });

@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 const MAX_CANARY_CONCURRENCY = 64;
 const MAX_CANARY_REQUEST_TIMEOUT_MS = 2_147_483_647;
+const MAX_CANARY_REQUEST_BYTES = 1_048_576;
 const MAX_RESPONSE_METADATA_BYTES = 16 * 1024;
 const OCTG_REQUEST_ID = /^req_[0-9A-HJKMNP-TV-Z]{26}$/;
 const SAFE_RESPONSE_VALUE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -128,9 +129,11 @@ export async function requestCanary({
   concurrency,
   ordinal,
   requestTimeoutMs,
+  mode,
   fetchImpl = fetch,
   now = () => performance.now(),
 }) {
+  if (mode !== "chat" && mode !== "responses") throw new TypeError("invalid canary mode");
   const startedAt = now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -148,6 +151,7 @@ export async function requestCanary({
     const responseBody = await readResponseBody(response);
     return {
       event: "octg.canary.result",
+      mode,
       concurrency,
       ordinal,
       outcome: "response",
@@ -163,6 +167,7 @@ export async function requestCanary({
       : "fetch_error";
     return {
       event: "octg.canary.result",
+      mode,
       concurrency,
       ordinal,
       outcome,
@@ -194,6 +199,11 @@ async function main() {
   ) {
     throw new TypeError("OCTG_CANARY_ALLOWED_HOSTS must contain exact host names");
   }
+
+  const mode = process.env.CANARY_MODE ?? "chat";
+  if (mode !== "chat" && mode !== "responses") throw new TypeError("CANARY_MODE must be chat or responses");
+  const expectedPath = mode === "responses" ? "/v1/responses" : "/v1/chat/completions";
+  if (url.pathname !== expectedPath) throw new TypeError("CANARY_MODE does not match endpoint");
   const allowedHostSet = new Set(allowedHosts);
   if (
     url.protocol !== "https:" ||
@@ -213,6 +223,12 @@ async function main() {
     throw new TypeError("CANARY_PAYLOAD_PATH must contain readable valid JSON");
   }
 
+  const requestBytes = Number(process.env.CANARY_REQUEST_BYTES ?? 778_240);
+  const envelopeBytes = new TextEncoder().encode(JSON.stringify({ model: "gpt-5", input: "", max_output_tokens: 16 })).byteLength;
+  if (mode === "responses" && (!Number.isSafeInteger(requestBytes) || requestBytes < envelopeBytes || requestBytes > MAX_CANARY_REQUEST_BYTES)) {
+    throw new TypeError("CANARY_REQUEST_BYTES is outside the allowed range");
+  }
+
   const concurrencies = parsePositiveSafeIntegers(
     "CANARY_CONCURRENCY",
     required("CANARY_CONCURRENCY"),
@@ -228,7 +244,7 @@ async function main() {
   for (const concurrency of concurrencies) {
     const results = await Promise.all(
       Array.from({ length: concurrency }, (_, ordinal) =>
-        requestCanary({ url, apiKey, payload, concurrency, ordinal, requestTimeoutMs }),
+        requestCanary({ url, apiKey, payload, concurrency, ordinal, requestTimeoutMs, mode }),
       ),
     );
     for (const result of results) console.log(JSON.stringify(result));
