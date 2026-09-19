@@ -89,6 +89,29 @@ describe("resource stage event contract", () => {
     }));
   });
 
+  it("accepts the prepared-prefix validation route without adding payload fields", () => {
+    const event: ResourceStageEvent = {
+      ...baseEvent,
+      stage: "prepare",
+      route: "error:prepared_prefix_invalid",
+      phase: "finish",
+      durationMs: 1,
+      outcome: "exception",
+      quotaReserved: true,
+      upstreamReached: false,
+    };
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    emitResourceStage(event);
+
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "prepare",
+      route: "error:prepared_prefix_invalid",
+      quotaReserved: true,
+      upstreamReached: false,
+    }));
+  });
+
   it("emits tokenizationProvider and tokenizationFailureCategory for Deno failures", () => {
     const event: ResourceStageEvent = {
       ...baseEvent,

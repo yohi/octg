@@ -64,8 +64,7 @@ import type { TokenizeResult } from "@octg/tokenizer-controller/contracts";
 import { assertNever } from "./exhaustiveness";
 import { workerVersionHeaders, type WorkerVersionMetadataLike } from "./version-metadata";
 import { prepareWithDeno } from "./deno-prepare-client";
-import { replaceOutputMarker } from "./prepared-body";
-import type { UpstreamTransport } from "./upstream";
+import { preflightPreparedOutput } from "./prepared-body";
 
 type Completion = RequestCompleteFields;
 const MIN_SAFE_IN_FLIGHT_LEASE_TTL_MS = 120_000;
@@ -1005,18 +1004,34 @@ export async function handleProxy(
         return rejectPrepareTimeout();
       }
 
-      // Build marker transform + observer, then call upstream
+      const preflight = await preflightPreparedOutput(
+        prepared.body,
+        prepareMetadata.outputMarker,
+        budget.maxOutputTokens,
+      );
+      if (preflight.kind === "invalid") {
+        await cancelPreparedBeforeUpstream("exception", {
+          route: "error:prepared_prefix_invalid",
+          quotaReserved: true,
+          upstreamReached: false,
+        });
+        await stub.release(requestId);
+        reservationState = "none";
+        await stub.releaseInFlight(requestId, inFlightLease!.generation);
+        inFlightAcquired = false;
+        inFlightLease = undefined;
+        completeAudit(ctx, env, requestId, auditInserted, { status: "failed", billingClass: "none" });
+        return errorResponse(errInternal(requestId));
+      }
+
+      // Observe the preflight replacement stream, then call upstream.
       const upstreamStartedAt = startResourceStage(env, requestId, "upstream");
       upstreamStageStartedAt = upstreamStartedAt;
       let upstream: Response;
       try {
-        const upstreamTransport: UpstreamTransport = (input, init) => {
-          upstreamAttempted = true;
-          return fetch(input, init);
-        };
-        const replacedBody = replaceOutputMarker(prepared.body, prepareMetadata.outputMarker, budget.maxOutputTokens);
-        const observed = observePreparedBody(replacedBody, prepared.cancel, finishPreparedTerminal);
+        const observed = observePreparedBody(preflight.body, preflight.cancel, finishPreparedTerminal);
         prepared = { ...prepared, body: observed.body, cancel: observed.cancel };
+        upstreamAttempted = true;
         upstream = await callUpstream(
           env,
           "/responses",
@@ -1030,7 +1045,6 @@ export async function handleProxy(
           },
           policy.cacheEnabled ? `octg:${auth.id}` : null,
           idempotencyKey,
-          upstreamTransport,
         );
       } catch (error) {
         finishResourceStage(
