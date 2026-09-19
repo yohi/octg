@@ -117,13 +117,19 @@ succeed:
 1. the body begins with `{"max_output_tokens":`;
 2. that first property contains the quoted marker from metadata and is followed
    by a comma;
-3. the quoted marker occurs exactly once in the complete retained prefix;
-4. the first property completes before the `512`-byte limit.
+3. the quoted marker bytes occur exactly once in the complete retained prefix;
+4. the first property's `completionOffset`, defined as the exclusive byte count
+   through the property and its terminating comma, satisfies
+   `completionOffset <= 512`. The 512th byte is therefore successful;
+   completion at byte 513 or later is unsuccessful.
 
-The returned stream emits the retained prefix with only that first marker
-replaced by the decimal resolved output budget, then emits any opaque suffix of
-the final preflight chunk and every later source chunk unchanged. It never
-searches, copies, or decodes bytes after the inspected prefix.
+The returned stream emits the retained prefix with the complete quoted marker
+replaced from its opening quote through its closing quote by the decimal
+resolved output budget bytes. The replacement has no JSON quotes, so the
+resulting JSON `max_output_tokens` property is a number, not a string. It then
+emits any opaque suffix of the final preflight chunk and every later source
+chunk unchanged. It never searches, copies, or decodes bytes after the
+inspected prefix.
 
 A missing, malformed, duplicate, or too-late marker is a pre-upstream contract
 failure. The proxy cancels the resolved prepare request, releases its
@@ -134,7 +140,8 @@ the same path.
 The `512`-byte limit is a protocol constant. Tests must cover the 511-, 512-,
 and 513-byte boundaries, a marker split across chunks, a duplicate marker in
 the retained prefix, a tail in the same input chunk, and a tail in a later
-chunk.
+chunk. A ready-stream test must parse the emitted body as JSON and assert that
+`max_output_tokens` has numeric type and equals the resolved output budget.
 
 ### 3. Free-Tier Request Flow
 

@@ -150,7 +150,7 @@ Expected: the current suites pass before the new regression assertions are added
   expect(await preflightPreparedOutput(duplicateWithinPrefix, MARKER, 42)).toEqual({ kind: "invalid" });
   ```
 
-  Add split-marker, malformed-first-property, source-read-error, same-chunk tail, later-chunk tail, destination-cancel, and reader-lock-release cases. For a ready body, assert the source is read only until the first property closes or until byte 512, and assert all unread chunks remain uninspected before downstream consumption.
+  Add split-marker, malformed-first-property, source-read-error, same-chunk tail, later-chunk tail, destination-cancel, and reader-lock-release cases. For a ready body, drain the returned stream, parse it as JSON, and assert `typeof parsed.max_output_tokens === "number"` and `parsed.max_output_tokens === 42`; this proves replacement removes both marker quotes. Assert the source is read only until the first property closes or until byte 512, and assert all unread chunks remain uninspected before downstream consumption.
 
 - [ ] **Step 2: Run the focused test and verify failure**
 
@@ -174,7 +174,7 @@ Expected: the current suites pass before the new regression assertions are added
   The implementation must:
 
   1. acquire the source reader once and collect at most 512 bytes;
-  2. locate the exact first-property marker and comma without decoding UTF-8;
+  2. locate the exact first-property quoted marker and comma without decoding UTF-8, and replace the marker bytes from opening quote through closing quote with decimal ASCII budget bytes;
   3. count all quoted marker occurrences in the complete retained prefix and require exactly one;
   4. construct a replacement stream from retained bytes plus the unread source;
   5. let the returned stream own a memoized `reader.cancel()` and `reader.releaseLock()` path;
@@ -320,12 +320,12 @@ Expected: the current suites pass before the new regression assertions are added
 
 **Interfaces:**
 - Exports: `verifyPrepareContract({ endpoint, token, maxInputBytes, fetchImpl }): Promise<true>`.
-- Validates: HTTPS endpoint without URL credentials, `/health`, `/prepare` status, bounded metadata, marker shape, first-property layout, and an at-most-512-byte inspected response prefix.
-- Throws: stable categories only: `endpoint_invalid`, `health_status`, `prepare_status`, `metadata_invalid`, `body_layout_invalid`, or `body_too_large`.
+- Validates: HTTPS endpoint without URL credentials, `/health`, `/prepare` status, bounded metadata, marker shape, first-property layout, and an at-most-512-byte inspected response prefix. `endpoint` is the full `/prepare` URL; derive `/health` by replacing only the final route component while preserving any path prefix (`/prepare` -> `/health`, `/api/prepare` -> `/api/health`). Do not use root-relative `new URL("/health", endpoint)` unless validation instead rejects path prefixes and documents an origin-only endpoint contract.
+- Throws: stable categories only: `endpoint_invalid`, `health_status`, `prepare_status`, `health_unavailable`, `prepare_unavailable`, `metadata_invalid`, `body_layout_invalid`, `body_too_large`, or `body_read_failed`.
 
 - [ ] **Step 1: Write failing probe tests**
 
-  Mock fetch and assert success plus each stable failure category. Use a token such as `secret-not-printed` and body text such as `body-not-printed`; assert neither occurs in a thrown message. Add a response whose marker completes at byte 513 and assert the reader is cancelled without scanning the opaque remainder.
+  Mock fetch and assert success plus each stable failure category. Verify that `https://example.test/prepare` probes `https://example.test/health` while `https://example.test/api/prepare` probes `https://example.test/api/health`, and keep those cases aligned with endpoint validation. Map fetch rejections, timeouts, and `AbortError` during the health request to `health_unavailable`, and the corresponding prepare failures to `prepare_unavailable`. Map `getReader()` and response-reader rejections to `body_read_failed`; retain `health_status` and `prepare_status` for HTTP status failures. Use a token such as `secret-not-printed` and body text such as `body-not-printed`; assert neither, nor sensitive URL query data, occurs in a thrown message. Add a response whose marker completes at byte 513 and assert the reader is cancelled without scanning the opaque remainder.
 
 - [ ] **Step 2: Run the focused test and verify failure**
 
@@ -335,7 +335,7 @@ Expected: the current suites pass before the new regression assertions are added
 
 - [ ] **Step 3: Implement the bounded probe**
 
-  Build `/health` from `new URL("/health", endpoint)`. POST a small static Responses body to the configured endpoint. Decode only the metadata header and inspect at most 512 response-body bytes. If a runtime chunk exceeds that bound, retain only its inspected slice and cancel the response after validation; do not decode, copy, or include its suffix in diagnostics. Validate the marker and exact first-property prefix using byte operations. On every response-body failure, cancel the reader once and omit raw endpoint query, token, and body from errors.
+  Derive the health URL by replacing only the final route component of the configured `/prepare` endpoint, preserving its origin and path prefix; never construct it with root-relative `new URL("/health", endpoint)` while path prefixes are accepted. POST a small static Responses body to the configured endpoint. Decode only the metadata header and inspect at most 512 response-body bytes. If a runtime chunk exceeds that bound, retain only its inspected slice and cancel the response after validation; do not decode, copy, or include its suffix in diagnostics. Validate the marker and exact first-property prefix using byte operations. Replace the complete quoted marker bytes, including the opening and closing quotes, with the decimal output budget bytes so the resulting `max_output_tokens` JSON property is numeric. Classify fetch and reader failures into the stable categories above, cancel every response-body reader once, and omit raw endpoint query, token, and body from errors.
 
 - [ ] **Step 4: Run probe tests**
 
@@ -405,7 +405,7 @@ Expected: the current suites pass before the new regression assertions are added
   assert.match(productionWorkflow, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
   ```
 
-  Assert the Deno workflow's production push trigger has no path filter, and the Worker workflow no longer has an independent `push` trigger. Assert the Deno workflow rejects `MAX_INPUT_BYTES` other than `1048576` before its `deno deploy env load` remote mutation, and its post-deploy contract probe occurs before the workflow reports success.
+  Assert the Deno workflow's production push trigger has no path filter, and the Worker workflow no longer has an independent `push` trigger. Assert the Worker workflow preserves the existing `concurrency` group and performs a current-`master` SHA lookup immediately before remote mutation; the lookup must compare `github.event.workflow_run.head_sha` with `refs/heads/master` and gate D1 migration, version upload, and version deployment when they differ. Assert the Deno workflow rejects `MAX_INPUT_BYTES` other than `1048576` before its `deno deploy env load` remote mutation, and its post-deploy contract probe occurs before the workflow reports success.
 
 - [ ] **Step 5: Run the workflow test and verify failure**
 
@@ -417,7 +417,7 @@ Expected: the current suites pass before the new regression assertions are added
 
 - [ ] **Step 6: Link workflows by immutable SHA**
 
-  Change the production Worker trigger to `workflow_run` for the Deno workflow. Add a job-level condition that only permits `push`-origin Deno runs on `master` with conclusion `success`. Check out `github.event.workflow_run.head_sha`. Remove the Deno workflow's production push path filter so it runs and deploys the exact Deno revision for every `master` commit. In the Deno workflow, require `MAX_INPUT_BYTES` to be exactly `1048576` before `deno deploy env load`. Keep pull-request path filters and fork-secret restrictions unchanged.
+  Change the production Worker trigger to `workflow_run` for the Deno workflow. Add a job-level condition that only permits `push`-origin Deno runs on `master` with conclusion `success`. Check out `github.event.workflow_run.head_sha`. Remove the Deno workflow's production push path filter so it runs and deploys the exact Deno revision for every `master` commit. Immediately before `Apply D1 migrations`, resolve the current remote `master` SHA and compare it with `github.event.workflow_run.head_sha`; if they differ, mark the workflow as skipped and gate every D1 migration, Worker version upload, and Worker version deployment step. Preserve the existing `concurrency` group and `cancel-in-progress` setting. In the Deno workflow, require `MAX_INPUT_BYTES` to be exactly `1048576` before `deno deploy env load`. Keep pull-request path filters and fork-secret restrictions unchanged.
 
   Add a post-deploy Deno `/health` and authenticated `/prepare` contract-probe step to the Deno workflow itself. Keep the Worker workflow probe before D1 migration as defense in depth.
 
