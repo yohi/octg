@@ -686,4 +686,33 @@ must target a known Worker version that predates prepare, require the legacy
 `body_read`/`parse`/`normalize` stages and no `prepare` stage, and must repeat
 the Chat/Responses route checks.
 
+### 18.1 Free-tier prepare rollout acceptance
+
+The prepare rollout acceptance procedure uses Responses canary mode with
+synthetic 778240-byte and 1048576-byte bodies at concurrency 1, concurrency 2,
+and the configured peak.
+
+The acceptance run MUST require all of the following:
+
+- no `exceededCpu` outcome;
+- a successful `prepare` resource stage;
+- Deno as the tokenization provider for the prepared route;
+- correct quota settlement in D1 for every successful request;
+- no `body_read`, `parse`, or `normalize` legacy body stages for the prepared
+  route.
+
+The rollback matrix MUST cover these three cases:
+
+- new Deno with old Worker: successful legacy routing;
+- old Deno with new Worker: pre-upstream fail-closed;
+- Worker rollback to a pre-prepare version: restored legacy routing.
+
+The operator MUST configure and test the platform-provided Deno allowance
+alert. When allowance telemetry is unavailable, the operator MUST record the
+prepare-unavailable-rate alert as the capacity signal.
+
+Only the following evidence MAY be retained: request IDs, revision IDs,
+resource stage outcomes, CPU/wall-time buckets, and safe `octg.canary.result`
+records. Prompt text, response bodies, markers, client keys, bearer tokens, and
+secrets MUST NOT be retained.
 The specification must be reviewed whenever those tests or externally visible contracts change.

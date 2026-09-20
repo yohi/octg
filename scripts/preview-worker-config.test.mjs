@@ -15,6 +15,7 @@ const baseConfig = {
     DENO_TOKENIZER_ENDPOINT: "https://production-tokenizer.example/tokenize",
     DENO_TOKENIZER_THRESHOLD_BYTES: "1",
     DENO_TOKENIZER_TIMEOUT_MS: "5000",
+    DENO_TOKENIZER_AUTH_TOKEN: "production-auth-secret",
     DENO_PREPARE_ENDPOINT: "https://production-tokenizer.example/prepare",
     DENO_PREPARE_THRESHOLD_BYTES: "1",
   },
@@ -289,3 +290,55 @@ test("rejects a Preview quota allocation over the provider ceiling", () => {
     /quota allocation/,
   );
 });
+
+test("omits the production Deno auth token from every generated Preview config", () => {
+  for (const config of [
+    buildPreviewWorkerConfig(baseConfig, validOptions),
+    buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      deno: {
+        endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+        thresholdBytes: "1",
+        timeoutMs: "5000",
+      },
+    }),
+  ]) {
+    assert.equal(config.vars.DENO_TOKENIZER_AUTH_TOKEN, undefined);
+    assert.equal(
+      JSON.stringify(config).includes(baseConfig.vars.DENO_TOKENIZER_AUTH_TOKEN),
+      false,
+    );
+  }
+});
+
+test("replaces the production input limit with the Preview input limit", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    maxInputBytes: "524288",
+  });
+
+  assert.equal(config.vars.MAX_INPUT_BYTES, "524288");
+  assert.equal(baseConfig.vars.MAX_INPUT_BYTES, "1048576");
+  assert.equal(JSON.stringify(config).includes(baseConfig.vars.MAX_INPUT_BYTES), false);
+});
+
+test("does not include production Deno or prepare endpoint values in the generated config", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    deno: {
+      endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+      thresholdBytes: "1",
+      timeoutMs: "5000",
+    },
+    prepare: {
+      endpoint: "https://preview-deno.test/prepare",
+      thresholdBytes: "700000",
+    },
+  });
+  const serialized = JSON.stringify(config);
+
+  assert.equal(serialized.includes(baseConfig.vars.DENO_TOKENIZER_ENDPOINT), false);
+  assert.equal(serialized.includes(baseConfig.vars.DENO_PREPARE_ENDPOINT), false);
+  assert.equal(serialized.includes("production-tokenizer.example"), false);
+});
+

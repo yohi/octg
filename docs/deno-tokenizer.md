@@ -244,6 +244,35 @@ A Deno canary should prove at least:
 
 Use representative synthetic text rather than production prompts.
 
+## Rollout safeguards
+
+The free-tier prepare rollout uses Responses canary mode with synthetic
+778240-byte and 1048576-byte bodies at concurrency 1, concurrency 2, and the
+configured peak.
+
+Acceptance requires:
+
+- no Worker `exceededCpu` outcome;
+- a successful `prepare` resource stage;
+- Deno as the tokenization provider for the prepared route;
+- correct quota settlement for every successful request;
+- no `body_read`, `parse`, or `normalize` legacy body stages for the prepared
+  route.
+
+The rollback matrix covers three cases:
+
+- new Deno with old Worker: successful legacy routing;
+- old Deno with new Worker: pre-upstream fail-closed;
+- Worker rollback to a pre-prepare version: restored legacy routing.
+
+Configure and test the platform-provided Deno allowance alert. When allowance
+telemetry is unavailable, record the prepare-unavailable-rate alert as the
+capacity signal.
+
+Retain only request IDs, revision IDs, resource stage outcomes, CPU/wall-time
+buckets, and safe `octg.canary.result` records. Do not retain prompt text,
+response bodies, markers, client keys, bearer tokens, or other secrets.
+
 ## Observability
 
 The Gateway Worker resource-stage telemetry includes tokenization details such as:

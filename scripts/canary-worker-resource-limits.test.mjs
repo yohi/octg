@@ -90,6 +90,33 @@ test("includes only the allowlisted mode in a safe result", async () => {
   assert.equal(Object.keys(result).includes("apiKey"), false);
 });
 
+test("safe response output contains the required fields without secrets", async () => {
+  const requestId = "req_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({
+      status: 200,
+      headers: new Headers({
+        "X-OCTG-Request-Id": requestId,
+        "X-OCTG-Route": "free_shared",
+        "X-OCTG-Worker-Version": "version-123",
+      }),
+      body: null,
+    }),
+    now: () => 0,
+  });
+
+  assert.equal(result.mode, "chat");
+  assert.equal(result.requestId, requestId);
+  assert.equal(result.status, 200);
+  assert.equal(result.durationMs, 0);
+  assert.equal(result.route, "free_shared");
+  assert.equal(result.workerVersion, "version-123");
+  assert.equal(Object.keys(result).includes("payload"), false);
+  assert.equal(Object.keys(result).includes("apiKey"), false);
+  assert.equal(JSON.stringify(result).includes(request.apiKey), false);
+});
+
 test("cancels oversized response bodies without parsing their metadata", async () => {
   let cancelled = false;
   let reads = 0;

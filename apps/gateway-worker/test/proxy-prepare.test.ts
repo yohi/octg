@@ -444,6 +444,8 @@ describe("prepare routing", () => {
       phase: "finish",
       outcome: "exception",
       route: "error:prepared_prefix_invalid",
+    }));
+    expect(resourceInfo).toHaveBeenCalledWith(expect.objectContaining({
       quotaReserved: true,
       upstreamReached: false,
     }));
@@ -487,21 +489,36 @@ describe("prepare routing", () => {
   });
 
   it("marks the reservation uncertain when transport throws after it starts", async () => {
+    // Given: the prepare stage succeeds but the upstream transport throws.
     const quota = standardQuota();
     const before = await quota.getState();
+    const resourceInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "https://deno.test/prepare") return preparedResponse();
       throw new TypeError("upstream transport failed");
     });
     vi.stubGlobal("fetch", fetchImpl);
 
+    // When: the request is proxied.
     const response = await responsesRequest();
 
+    // Then: the reservation becomes uncertain and the upstream stage records the
+    // post-upstream failure.
     expect(response.status).toBe(500);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     const after = await quota.getState();
     expect(after.reservedTokens).toBe(before.reservedTokens);
     expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
+    const upstreamFinishes = resourceInfo.mock.calls
+      .map(([event]) => event)
+      .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null)
+      .filter((event) => event.stage === "upstream" && event.phase === "finish");
+    expect(upstreamFinishes).toEqual([expect.objectContaining({
+      outcome: "exception",
+      route: "error:upstream_uncertain",
+      quotaReserved: true,
+      upstreamReached: true,
+    })]);
   });
 
   it("uses the legacy Responses path below the prepare threshold", async () => {

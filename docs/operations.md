@@ -212,6 +212,35 @@ The normative runbook order is:
 5. Capture `octg.canary.result` records and `wrangler tail --format=json --version-id <candidate-version>` output only in protected temporary files. Require request-result, resource-stage, CPU-outcome, ordering, and bounded request-audit assertions for Preview, production, representative peak, and rollback. Treat the D1 row only as settlement evidence; it never decides quota availability.
 6. Run the production canary after the isolated Preview canary, then run the representative peak after concurrency 1 and 2. For rollback, restore a known pre-prepare Worker version and require legacy `body_read`/`parse`/`normalize` stages, no `prepare` stage, the configured legacy tokenization provider, successful reservation/upstream completion, and completed settlement evidence.
 
+### Acceptance criteria
+
+The large Responses canary uses Responses canary mode with synthetic
+778240-byte and 1048576-byte bodies at concurrency 1, concurrency 2, and the
+configured peak.
+
+The runbook MUST require:
+
+- no `exceededCpu` outcome;
+- a successful `prepare` resource stage;
+- Deno as the tokenization provider for the prepared route;
+- correct quota settlement for every successful request;
+- no `body_read`, `parse`, or `normalize` legacy body stages for the prepared
+  route.
+
+The rollback matrix MUST cover:
+
+- new Deno with old Worker: successful legacy routing;
+- old Deno with new Worker: pre-upstream fail-closed;
+- Worker rollback to a pre-prepare version: restored legacy routing.
+
+Configure and test the platform-provided Deno allowance alert. When allowance
+telemetry is unavailable, record the prepare-unavailable-rate alert as the
+capacity signal.
+
+Retain only request IDs, revision IDs, resource stage outcomes, CPU/wall-time
+buckets, and safe `octg.canary.result` records. Do not retain prompt text,
+response bodies, markers, client keys, bearer tokens, or secrets.
+
 Use the following executable commands from the controlled acceptance procedure.
 They create protected temporary files and remove them after use; never print or
 persist the synthetic payload, client key, Deno authentication value, or
