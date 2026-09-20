@@ -27,7 +27,7 @@ const denoConfig = blockBetween(
   "      - name: Check Preview Deno health",
 );
 
-const denoValidation = blockBetween(
+blockBetween(
   "      - name: Validate Preview Deno configuration",
   "      - name: Prepare isolated Deno preview config",
 );
