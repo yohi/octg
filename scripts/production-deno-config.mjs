@@ -48,6 +48,14 @@ export function validateProductionDenoConfig(environment) {
     }
   }
 
+  const inputLimit = values[PRODUCTION_INPUT_LIMIT_VARIABLE_NAME];
+  if (
+    !missing.includes(PRODUCTION_INPUT_LIMIT_VARIABLE_NAME) &&
+    (typeof inputLimit !== "string" || inputLimit.trim() !== "1048576")
+  ) {
+    invalid.push(PRODUCTION_INPUT_LIMIT_VARIABLE_NAME);
+  }
+
   const prepareEndpoint = values.DENO_PREPARE_ENDPOINT;
   const prepareThreshold = values.DENO_PREPARE_THRESHOLD_BYTES;
   if (!missing.includes("DENO_PREPARE_ENDPOINT") && !isValidHttpsEndpoint(prepareEndpoint)) {
