@@ -547,6 +547,17 @@ Deno.test("prepare: returns 200 with normalized body and valid metadata", async 
   assertEquals(fixture.calls(), 1);
 });
 
+Deno.test("prepare: fails closed when an array-index key precedes the marker", async () => {
+  const fixture = createFixture();
+  const response = await fixture.handler(prepareRequest({
+    body: responsesBody({ extra: { "0": "unexpected" } }),
+  }));
+
+  assertEquals(response.status, 500);
+  assertEquals(await response.text(), "");
+  assertEquals(fixture.calls(), 1);
+});
+
 Deno.test("prepare: returns a minimal 500 response when the encoder fails", async () => {
   const encoder: ExactEncoder = {
     count: () => {

@@ -380,6 +380,9 @@ async function handlePrepare(
     const candidateBody = { max_output_tokens: candidate, ...withoutOutputLimit };
     const candidateSerialized = JSON.stringify(candidateBody);
     const markerJson = JSON.stringify(candidate);
+    if (!candidateSerialized.startsWith(`{"max_output_tokens":${markerJson},`)) {
+      return prepareInternalFailure();
+    }
     if (countOccurrences(candidateSerialized, markerJson) === 1) {
       outputMarker = candidate;
       serialized = candidateSerialized;
