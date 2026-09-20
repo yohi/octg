@@ -238,3 +238,119 @@ test("deploy-production workflow synchronizes the Worker auth Secret safely", ()
   const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
   assert.ok(secretIndex >= 0 && secretIndex < migrationIndex);
 });
+
+test("deploy-production is a reusable workflow with a trusted checkout", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const productionWorkflow = readFileSync(workflowPath, "utf8");
+
+  assert.match(productionWorkflow, /workflow_call:/);
+  assert.doesNotMatch(productionWorkflow, /workflow_run:/);
+  assert.match(productionWorkflow, /ref: master/);
+  assert.doesNotMatch(
+    productionWorkflow,
+    /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/,
+  );
+  assert.doesNotMatch(productionWorkflow, /\n  push:/);
+  assert.match(
+    productionWorkflow,
+    /concurrency:\n  group: octg-deployment\n  cancel-in-progress: false/,
+  );
+});
+
+test("deploy-deno-tokenizer calls production deployment after a successful master deploy", () => {
+  const denoWorkflow = readFileSync(
+    join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    denoWorkflow,
+    /deploy-production:\n\s+name: Deploy Production\n\s+needs: deploy\n\s+if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && needs\.deploy\.result == 'success'/,
+  );
+  assert.match(denoWorkflow, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
+  assert.match(denoWorkflow, /secrets: inherit/);
+});
+
+test("deploy-production gates remote mutations on the current master SHA", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const productionWorkflow = readFileSync(workflowPath, "utf8");
+  const gateName = "Require master alignment with the Deno revision";
+  const gateMarker = `- name: ${gateName}`;
+  const gateIndex = productionWorkflow.indexOf(gateMarker);
+  const migrationIndex = productionWorkflow.indexOf("- name: Apply D1 migrations");
+
+  assert.ok(gateIndex >= 0, "the workflow must resolve the current master SHA");
+  assert.ok(migrationIndex > gateIndex, "the SHA gate must precede D1 mutation");
+  assert.doesNotMatch(
+    productionWorkflow.slice(gateIndex + gateMarker.length, migrationIndex),
+    /\n\s{4,6}-\s+name:/,
+    "the SHA gate must be immediately before D1 mutation",
+  );
+  assert.match(
+    productionWorkflow,
+    /DENO_WORKFLOW_SHA: \$\{\{ github\.sha \}\}/,
+  );
+
+  const gateRun = extractStepRun(productionWorkflow, gateName);
+  assert.ok(gateRun, "the SHA gate must have a run command");
+  assert.match(gateRun, /git ls-remote origin refs\/heads\/master/);
+  assert.match(gateRun, /!= "\$DENO_WORKFLOW_SHA"/);
+  assert.match(gateRun, /skipped/);
+  assert.match(
+    productionWorkflow,
+    /- name: Apply D1 migrations\n\s+if: steps\.master_alignment\.outputs\.aligned == 'true'\n\s+run: .*wrangler d1 migrations apply/,
+  );
+  assert.match(
+    productionWorkflow,
+    /- name: Deploy Worker\n\s+if: steps\.master_alignment\.outputs\.aligned == 'true'\n\s+run:/,
+  );
+});
+
+test("deploy-production probes Deno before D1 mutation", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const productionWorkflow = readFileSync(workflowPath, "utf8");
+  const probeName = "Verify Deno prepare contract";
+  const probeIndex = productionWorkflow.indexOf(`- name: ${probeName}`);
+  const migrationIndex = productionWorkflow.indexOf("- name: Apply D1 migrations");
+
+  assert.ok(probeIndex >= 0 && probeIndex < migrationIndex);
+  assert.match(
+    extractStepRun(productionWorkflow, probeName) ?? "",
+    /node scripts\/verify-deno-prepare-contract\.mjs/,
+  );
+});
+
+test("deploy-deno-tokenizer deploys every master commit and probes its contract", () => {
+  const denoWorkflow = readFileSync(
+    join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
+    "utf8",
+  );
+  const pushStart = denoWorkflow.indexOf("  push:\n");
+  const pullRequestStart = denoWorkflow.indexOf("  pull_request:\n");
+  assert.ok(pushStart >= 0 && pullRequestStart > pushStart);
+
+  const pushTrigger = denoWorkflow.slice(pushStart, pullRequestStart);
+  assert.match(pushTrigger, /branches: \[master\]/);
+  assert.doesNotMatch(pushTrigger, /paths:/);
+
+  const runtimeSecretStep = extractStepRun(denoWorkflow, "Configure Deno tokenizer runtime Secret");
+  assert.ok(runtimeSecretStep, "the runtime Secret step must have a run command");
+  assert.match(runtimeSecretStep, /trim\(\) !== "1048576"/);
+  assert.ok(
+    runtimeSecretStep.indexOf('!== "1048576"') < runtimeSecretStep.indexOf("env load"),
+    "the canonical input-limit check must precede env load",
+  );
+
+  const deployIndex = denoWorkflow.indexOf("- name: Deploy\n");
+  const probeName = "Verify Deno prepare contract";
+  const probeIndex = denoWorkflow.indexOf(`- name: ${probeName}`);
+  assert.ok(probeIndex > deployIndex, "the contract probe must run after deployment");
+  assert.match(
+    extractStepRun(denoWorkflow, probeName) ?? "",
+    /node scripts\/verify-deno-prepare-contract\.mjs/,
+  );
+  assert.match(
+    denoWorkflow,
+    /DENO_TOKENIZER_AUTH_TOKEN: \$\{\{ secrets\.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN \}\}/,
+  );
+});

@@ -152,6 +152,20 @@ test("requires one positive safe-integer canonical input limit", () => {
   }
 });
 
+test("accepts only the canonical production input limit", () => {
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    MAX_INPUT_BYTES: " 1048576 ",
+  }), { valid: true, missing: [], invalid: [] });
+
+  for (const inputLimit of ["1048575", "1048577", "1", "1048576.0"]) {
+    assert.deepEqual(validateProductionDenoConfig({
+      ...completeProductionConfig,
+      MAX_INPUT_BYTES: inputLimit,
+    }), { valid: false, missing: [], invalid: ["MAX_INPUT_BYTES"] });
+  }
+});
+
 test("rejects non-HTTPS endpoints and URL credentials", () => {
   for (const endpoint of [
     "http://tokenizer.example/tokenize",

@@ -94,14 +94,16 @@ required_paths = [
   ".github/workflows/deploy-deno-tokenizer.yml",
 ]
 
-{"on.push" => push, "on.pull_request" => pull_request}.each do |name, trigger|
-  paths = trigger["paths"]
-  fail_contract("#{name}.paths must be a list") unless paths.is_a?(Array)
+pull_request_paths = pull_request["paths"]
+fail_contract("on.pull_request.paths must be a list") unless pull_request_paths.is_a?(Array)
 
-  missing_paths = required_paths - paths
-  unless missing_paths.empty?
-    fail_contract("#{name}.paths is missing: #{missing_paths.join(", ")}")
-  end
+missing_paths = required_paths - pull_request_paths
+unless missing_paths.empty?
+  fail_contract("on.pull_request.paths is missing: #{missing_paths.join(", ")}")
+end
+
+if push.key?("paths")
+  fail_contract("on.push.paths must be absent so every master commit deploys the Deno revision")
 end
 
 jobs = require_mapping(workflow["jobs"], "jobs")
@@ -215,6 +217,15 @@ end
 
 jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
+  if job.key?("uses")
+    unless job["uses"].is_a?(String) && !job["uses"].empty?
+      fail_contract("jobs.#{job_name}.uses must be a non-empty string")
+    end
+    if job.key?("steps")
+      fail_contract("jobs.#{job_name} must not define steps alongside uses")
+    end
+    next
+  end
   require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
     next unless step.is_a?(Hash)
     next if job_name == "deploy" && [
@@ -495,6 +506,8 @@ end
 
 jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
+  next if job.key?("uses")
+
   steps = require_steps(job, "jobs.#{job_name}")
   steps.each_with_index do |step, index|
     next unless step.is_a?(Hash)
