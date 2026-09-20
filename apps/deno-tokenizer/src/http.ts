@@ -376,7 +376,8 @@ async function handlePrepare(
   let serialized = "";
   for (let attempt = 0; attempt < maxMarkerAttempts; attempt += 1) {
     const candidate = generateMarker();
-    const { max_output_tokens: _sourceLimit, ...withoutOutputLimit } = upstreamBody;
+    const withoutOutputLimit = { ...upstreamBody };
+    delete withoutOutputLimit.max_output_tokens;
     const candidateBody = { max_output_tokens: candidate, ...withoutOutputLimit };
     const candidateSerialized = JSON.stringify(candidateBody);
     const markerJson = JSON.stringify(candidate);

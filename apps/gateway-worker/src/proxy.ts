@@ -45,7 +45,7 @@ import {
   type RequestCompleteFields,
 } from "./db";
 import { loadPolicy, loadRegistry } from "./policy";
-import { buildUpstreamBody, callUpstream, UpstreamConfigError } from "./upstream";
+import { buildUpstreamBody, callUpstream, UpstreamConfigError, type UpstreamTransport } from "./upstream";
 import { reserveFailClosed, type ReserveOutcome } from "./quota-reservation";
 import type { QuotaController } from "@octg/quota-controller";
 import type { Env } from "./index";
@@ -1031,7 +1031,10 @@ export async function handleProxy(
       try {
         const observed = observePreparedBody(preflight.body, preflight.cancel, finishPreparedTerminal);
         prepared = { ...prepared, body: observed.body, cancel: observed.cancel };
-        upstreamAttempted = true;
+        const upstreamTransport: UpstreamTransport = (input, init) => {
+          upstreamAttempted = true;
+          return fetch(input, init);
+        };
         upstream = await callUpstream(
           env,
           "/responses",
@@ -1045,6 +1048,7 @@ export async function handleProxy(
           },
           policy.cacheEnabled ? `octg:${auth.id}` : null,
           idempotencyKey,
+          upstreamTransport,
         );
       } catch (error) {
         finishResourceStage(

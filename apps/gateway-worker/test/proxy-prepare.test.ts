@@ -369,6 +369,39 @@ describe("prepare routing", () => {
     }
   });
 
+  it("releases the reservation when upstream request setup fails before transport", async () => {
+    const originalBaseUrl = Object.getOwnPropertyDescriptor(env, "OCTG_UPSTREAM_BASE_URL");
+    const quota = standardQuota();
+    const before = await quota.getState();
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("https://deno.test/prepare");
+      return preparedResponse();
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    Object.defineProperty(env, "OCTG_UPSTREAM_BASE_URL", {
+      value: {
+        endsWith: () => true,
+        toString: () => {
+          throw new TypeError("invalid upstream URL");
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const response = await responsesRequest();
+
+      expect(response.status).toBe(500);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      const after = await quota.getState();
+      expect(after.reservedTokens).toBe(before.reservedTokens);
+      expect(after.uncertainTokens).toBe(before.uncertainTokens);
+    } finally {
+      if (originalBaseUrl === undefined) Reflect.deleteProperty(env, "OCTG_UPSTREAM_BASE_URL");
+      else Object.defineProperty(env, "OCTG_UPSTREAM_BASE_URL", originalBaseUrl);
+    }
+  });
+
   it("releases the reservation and lease before upstream when the prepared prefix is invalid", async () => {
     const quota = standardQuota();
     const before = await quota.getState();
