@@ -376,9 +376,14 @@ async function handlePrepare(
   let serialized = "";
   for (let attempt = 0; attempt < maxMarkerAttempts; attempt += 1) {
     const candidate = generateMarker();
-    const candidateBody = { ...upstreamBody, max_output_tokens: candidate };
+    const withoutOutputLimit = { ...upstreamBody };
+    delete withoutOutputLimit.max_output_tokens;
+    const candidateBody = { max_output_tokens: candidate, ...withoutOutputLimit };
     const candidateSerialized = JSON.stringify(candidateBody);
     const markerJson = JSON.stringify(candidate);
+    if (!candidateSerialized.startsWith(`{"max_output_tokens":${markerJson},`)) {
+      return prepareInternalFailure();
+    }
     if (countOccurrences(candidateSerialized, markerJson) === 1) {
       outputMarker = candidate;
       serialized = candidateSerialized;

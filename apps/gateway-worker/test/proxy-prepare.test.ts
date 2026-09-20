@@ -74,7 +74,7 @@ function responsesRequest(headers: HeadersInit = {}): Promise<Response> {
   });
 }
 
-function preparedResponse(body = JSON.stringify({ max_output_tokens: metadata.outputMarker })): Response {
+function preparedResponse(body = JSON.stringify({ max_output_tokens: metadata.outputMarker, model: "gpt-5" })): Response {
   return new Response(body, {
     status: 200,
     headers: {
@@ -101,11 +101,26 @@ function stubPreparedResponses(body: string): {
   readonly calls: string[];
   readonly fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>;
 } {
+  // Normalize the stub body so the first JSON property is always the generated marker
+  // and the object has at least one trailing property (the preflight expects a comma).
+  let preparedBody = body;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const { max_output_tokens: _, ...rest } = parsed;
+      preparedBody = JSON.stringify({
+        max_output_tokens: metadata.outputMarker,
+        ...(Object.keys(rest).length > 0 ? rest : { model: "gpt-5" }),
+      });
+    }
+  } catch {
+    // leave non-JSON bodies unchanged
+  }
   const calls: string[] = [];
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     if (String(input) === "https://deno.test/prepare") {
       calls.push("prepare");
-      return preparedResponse(body);
+      return preparedResponse(preparedBody);
     }
     calls.push("upstream");
     await new Response(init?.body).text();
@@ -354,27 +369,113 @@ describe("prepare routing", () => {
     }
   });
 
-  it("marks the reservation uncertain when the resolved body is missing its marker", async () => {
+  it("releases the reservation when upstream request setup fails before transport", async () => {
+    const originalBaseUrl = Object.getOwnPropertyDescriptor(env, "OCTG_UPSTREAM_BASE_URL");
     const quota = standardQuota();
     const before = await quota.getState();
-    const { calls, fetchImpl } = stubPreparedResponses(JSON.stringify({ max_output_tokens: 64 }));
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("https://deno.test/prepare");
+      return preparedResponse();
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+    Object.defineProperty(env, "OCTG_UPSTREAM_BASE_URL", {
+      value: {
+        endsWith: () => true,
+        toString: () => {
+          throw new TypeError("invalid upstream URL");
+        },
+      },
+      configurable: true,
+    });
+
+    try {
+      const response = await responsesRequest();
+
+      expect(response.status).toBe(500);
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      const after = await quota.getState();
+      expect(after.reservedTokens).toBe(before.reservedTokens);
+      expect(after.uncertainTokens).toBe(before.uncertainTokens);
+    } finally {
+      if (originalBaseUrl === undefined) Reflect.deleteProperty(env, "OCTG_UPSTREAM_BASE_URL");
+      else Object.defineProperty(env, "OCTG_UPSTREAM_BASE_URL", originalBaseUrl);
+    }
+  });
+
+  it("releases the reservation and lease before upstream when the prepared prefix is invalid", async () => {
+    const quota = standardQuota();
+    const before = await quota.getState();
+    const calls: string[] = [];
+    let cancelCount = 0;
+    const resourceInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const preparedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ max_output_tokens: 64 })));
+      },
+      cancel() {
+        cancelCount += 1;
+      },
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "https://deno.test/prepare") {
+        calls.push("prepare");
+        return preparedStreamResponse(metadata, preparedBody);
+      }
+      calls.push("upstream");
+      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchImpl);
 
     const response = await responsesRequest();
 
     expect(response.status).toBe(500);
-    expect(calls).toEqual(["prepare", "upstream"]);
+    expect(calls).toEqual(["prepare"]);
+    expect(cancelCount).toBe(1);
     const after = await quota.getState();
     expect(after.reservedTokens).toBe(before.reservedTokens);
-    expect(after.uncertainTokens).toBeGreaterThan(before.uncertainTokens);
+    expect(after.uncertainTokens).toBe(before.uncertainTokens);
+    const leaseCheck = await quota.acquireInFlight("prepared-prefix-invalid-lease-check", 1, 120_000);
+    expect(leaseCheck.ok).toBe(true);
+    if (leaseCheck.ok) {
+      await quota.releaseInFlight("prepared-prefix-invalid-lease-check", leaseCheck.lease.generation);
+    }
+    expect(resourceInfo).toHaveBeenCalledWith(expect.objectContaining({
+      stage: "prepare",
+      phase: "finish",
+      outcome: "exception",
+      route: "error:prepared_prefix_invalid",
+      quotaReserved: true,
+      upstreamReached: false,
+    }));
   });
 
-  it("marks the reservation uncertain when the resolved body repeats its marker", async () => {
+  it("marks the reservation uncertain when the prepared replacement stream fails after upstream begins", async () => {
     const quota = standardQuota();
     const before = await quota.getState();
-    const { calls, fetchImpl } = stubPreparedResponses(JSON.stringify({
-      max_output_tokens: metadata.outputMarker,
-      duplicate: metadata.outputMarker,
-    }));
+    const calls: string[] = [];
+    let sourcePulls = 0;
+    const preparedBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sourcePulls += 1;
+        if (sourcePulls === 1) {
+          controller.enqueue(new TextEncoder().encode(
+            `{"max_output_tokens":${JSON.stringify(metadata.outputMarker)},`,
+          ));
+          return;
+        }
+        controller.error(new Error("prepared replacement stream failed"));
+      },
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === "https://deno.test/prepare") {
+        calls.push("prepare");
+        return preparedStreamResponse(metadata, preparedBody);
+      }
+      calls.push("upstream");
+      await new Response(init?.body).text();
+      return new Response(JSON.stringify({ usage: { total_tokens: 21 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchImpl);
 
     const response = await responsesRequest();
 

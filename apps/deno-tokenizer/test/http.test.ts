@@ -511,7 +511,7 @@ Deno.test("prepare: accepts application/json with charset=utf-8", async () => {
 
 Deno.test("prepare: returns 200 with normalized body and valid metadata", async () => {
   const fixture = createFixture();
-  const requestBody = responsesBody({});
+  const requestBody = responsesBody({ maxOutputTokens: 64 });
   const response = await fixture.handler(prepareRequest({ body: requestBody }));
 
   assertEquals(response.status, 200);
@@ -525,7 +525,7 @@ Deno.test("prepare: returns 200 with normalized body and valid metadata", async 
   assertEquals(metadata.opaqueInputBytes, 0);
   assertEquals(metadata.messageCount, 1);
   assertEquals(metadata.estimationPath, "exact_bpe");
-  assertEquals(metadata.maxOutputTokens, 4096);
+  assertEquals(metadata.maxOutputTokens, 64);
   assertEquals(metadata.stream, false);
   assertEquals(metadata.isToolUse, false);
   assertEquals(metadata.estimatedInputTokens, 7 + 4 + 3); // baseTokenCount + messageCount*4 + 3
@@ -534,8 +534,27 @@ Deno.test("prepare: returns 200 with normalized body and valid metadata", async 
 
   const serialized = await response.text();
   assertEquals(countOccurrences(serialized, JSON.stringify(metadata.outputMarker)), 1);
-  const parsed = JSON.parse(serialized);
+  const parsed = JSON.parse(serialized) as Record<string, unknown>;
+  assertEquals(Object.keys(parsed)[0], "max_output_tokens");
   assertEquals(parsed.max_output_tokens, metadata.outputMarker);
+  assertEquals(
+    serialized.startsWith(
+      `{"max_output_tokens":${JSON.stringify(metadata.outputMarker)},`,
+    ),
+    true,
+  );
+  assertEquals(serialized.split(JSON.stringify(metadata.outputMarker)).length - 1, 1);
+  assertEquals(fixture.calls(), 1);
+});
+
+Deno.test("prepare: fails closed when an array-index key precedes the marker", async () => {
+  const fixture = createFixture();
+  const response = await fixture.handler(prepareRequest({
+    body: responsesBody({ extra: { "0": "unexpected" } }),
+  }));
+
+  assertEquals(response.status, 500);
+  assertEquals(await response.text(), "");
   assertEquals(fixture.calls(), 1);
 });
 

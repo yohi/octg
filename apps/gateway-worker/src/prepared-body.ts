@@ -117,6 +117,269 @@ function flattenParts(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+export const PREPARED_BODY_PREFIX_BYTES = 512;
+
+export type PreparedOutputPreflight =
+  | {
+      readonly kind: "ready";
+      readonly body: ReadableStream<Uint8Array>;
+      readonly cancel: () => Promise<void>;
+    }
+  | { readonly kind: "invalid" };
+
+type FirstPropertyState =
+  | "prefix"
+  | "marker"
+  | "after-marker"
+  | "done"
+  | "invalid";
+
+interface FirstPropertyParser {
+  state: FirstPropertyState;
+  prefixOffset: number;
+  markerOffset: number;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unexpected prepared body parser state: ${value}`);
+}
+
+function consumeFirstPropertyByte(
+  parser: FirstPropertyParser,
+  byte: number,
+  firstPropertyPrefix: Uint8Array,
+  quotedMarker: Uint8Array,
+): void {
+  switch (parser.state) {
+    case "prefix": {
+      const expected = firstPropertyPrefix[parser.prefixOffset];
+      if (expected === undefined || byte !== expected) {
+        parser.state = "invalid";
+        return;
+      }
+      parser.prefixOffset += 1;
+      if (parser.prefixOffset === firstPropertyPrefix.byteLength) parser.state = "marker";
+      return;
+    }
+    case "marker": {
+      const expected = quotedMarker[parser.markerOffset];
+      if (expected === undefined || byte !== expected) {
+        parser.state = "invalid";
+        return;
+      }
+      parser.markerOffset += 1;
+      if (parser.markerOffset === quotedMarker.byteLength) parser.state = "after-marker";
+      return;
+    }
+    case "after-marker":
+      parser.state = byte === 0x2c ? "done" : "invalid";
+      return;
+    case "done":
+      return;
+    case "invalid":
+      return;
+    default:
+      return assertNever(parser.state);
+  }
+}
+
+function countExactOccurrences(bytes: Uint8Array, needle: Uint8Array): number {
+  if (needle.byteLength === 0 || needle.byteLength > bytes.byteLength) return 0;
+  let count = 0;
+  for (let offset = 0; offset + needle.byteLength <= bytes.byteLength; offset += 1) {
+    if (exactMatch(bytes, offset, needle)) count += 1;
+  }
+  return count;
+}
+
+function replaceExactOccurrence(
+  bytes: Uint8Array,
+  needle: Uint8Array,
+  replacement: Uint8Array,
+): Uint8Array {
+  let matchOffset: number | undefined;
+  for (let offset = 0; offset + needle.byteLength <= bytes.byteLength; offset += 1) {
+    if (exactMatch(bytes, offset, needle)) {
+      matchOffset = offset;
+      break;
+    }
+  }
+  if (matchOffset === undefined) return bytes;
+
+  const before = bytes.subarray(0, matchOffset);
+  const after = bytes.subarray(matchOffset + needle.byteLength);
+  const result = new Uint8Array(before.byteLength + replacement.byteLength + after.byteLength);
+  result.set(before, 0);
+  result.set(replacement, before.byteLength);
+  result.set(after, before.byteLength + replacement.byteLength);
+  return result;
+}
+
+/**
+ * Validate and prepare the bounded prefix of a Deno prepare response.
+ *
+ * The returned stream owns the source reader after a successful preflight.
+ * Invalid prefixes release the reader without canceling the source so the
+ * caller can perform the prepare request's single cancellation.
+ */
+export async function preflightPreparedOutput(
+  body: ReadableStream<Uint8Array>,
+  marker: string,
+  outputTokens: number,
+): Promise<PreparedOutputPreflight> {
+  const reader = body.getReader();
+  const encoder = new TextEncoder();
+  const firstPropertyPrefix = encoder.encode('{"max_output_tokens":');
+  const quotedMarker = encoder.encode(JSON.stringify(marker));
+  const replacement = encoder.encode(String(outputTokens));
+  const prefix = new Uint8Array(PREPARED_BODY_PREFIX_BYTES);
+  const parser: FirstPropertyParser = {
+    state: "prefix",
+    prefixOffset: 0,
+    markerOffset: 0,
+  };
+  let prefixLength = 0;
+  let sameChunkTail: Uint8Array = new Uint8Array(0);
+  let readerReleased = false;
+
+  const releaseReader = (): void => {
+    if (readerReleased) return;
+    readerReleased = true;
+    reader.releaseLock();
+  };
+
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) {
+        releaseReader();
+        return { kind: "invalid" };
+      }
+
+      const chunk = result.value;
+      let chunkOffset = 0;
+      while (chunkOffset < chunk.byteLength && parser.state !== "done") {
+        if (prefixLength === PREPARED_BODY_PREFIX_BYTES) {
+          releaseReader();
+          return { kind: "invalid" };
+        }
+        const byte = chunk[chunkOffset];
+        if (byte === undefined) {
+          releaseReader();
+          return { kind: "invalid" };
+        }
+        prefix[prefixLength] = byte;
+        prefixLength += 1;
+        chunkOffset += 1;
+        consumeFirstPropertyByte(parser, byte, firstPropertyPrefix, quotedMarker);
+        if (parser.state === "invalid") {
+          releaseReader();
+          return { kind: "invalid" };
+        }
+      }
+
+      if (parser.state !== "done") {
+        if (prefixLength === PREPARED_BODY_PREFIX_BYTES) {
+          releaseReader();
+          return { kind: "invalid" };
+        }
+        continue;
+      }
+
+      const retainedChunkBytes = Math.min(
+        chunk.byteLength - chunkOffset,
+        PREPARED_BODY_PREFIX_BYTES - prefixLength,
+      );
+      if (retainedChunkBytes > 0) {
+        prefix.set(chunk.subarray(chunkOffset, chunkOffset + retainedChunkBytes), prefixLength);
+        prefixLength += retainedChunkBytes;
+        chunkOffset += retainedChunkBytes;
+      }
+      sameChunkTail = chunk.subarray(chunkOffset);
+      break;
+    }
+  } catch (error) {
+    releaseReader();
+    throw error;
+  }
+
+  const retainedPrefix = prefix.subarray(0, prefixLength);
+  if (countExactOccurrences(retainedPrefix, quotedMarker) !== 1) {
+    releaseReader();
+    return { kind: "invalid" };
+  }
+  const transformedPrefix = replaceExactOccurrence(retainedPrefix, quotedMarker, replacement);
+  let sourceReader: ReadableStreamDefaultReader<Uint8Array> | undefined = reader;
+  let cancellation: Promise<void> | undefined;
+  let queuedPrefix: Uint8Array | undefined = transformedPrefix;
+  let queuedTail: Uint8Array | undefined = sameChunkTail.byteLength === 0 ? undefined : sameChunkTail;
+  let canceled = false;
+
+  const cancelSource = (): Promise<void> => {
+    if (cancellation !== undefined) return cancellation;
+    const activeReader = sourceReader;
+    if (activeReader === undefined) {
+      cancellation = Promise.resolve();
+      return cancellation;
+    }
+    canceled = true;
+    sourceReader = undefined;
+    cancellation = Promise.resolve()
+      .then(() => activeReader.cancel())
+      .catch(() => undefined)
+      .finally(releaseReader);
+    return cancellation;
+  };
+
+  const replacementBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (canceled) {
+        controller.close();
+        return;
+      }
+      if (queuedPrefix !== undefined) {
+        const chunk = queuedPrefix;
+        queuedPrefix = undefined;
+        controller.enqueue(chunk);
+        return;
+      }
+      if (queuedTail !== undefined) {
+        const chunk = queuedTail;
+        queuedTail = undefined;
+        controller.enqueue(chunk);
+        return;
+      }
+
+      const activeReader = sourceReader;
+      if (activeReader === undefined) {
+        controller.close();
+        return;
+      }
+      try {
+        const result = await activeReader.read();
+        if (result.done) {
+          sourceReader = undefined;
+          releaseReader();
+          controller.close();
+          return;
+        }
+        controller.enqueue(result.value);
+      } catch (error) {
+        if (sourceReader === activeReader) {
+          sourceReader = undefined;
+          releaseReader();
+        }
+        controller.error(error);
+      }
+    },
+    cancel() {
+      return cancelSource();
+    },
+  });
+
+  return { kind: "ready", body: replacementBody, cancel: cancelSource };
+}
+
 /**
  * Replace exactly one quoted occurrence of the prepare marker in a stream
  * with the decimal output token count.

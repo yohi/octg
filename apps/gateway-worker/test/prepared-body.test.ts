@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { replaceOutputMarker } from "../src/prepared-body";
+import {
+  preflightPreparedOutput,
+  replaceOutputMarker,
+  type PreparedOutputPreflight,
+} from "../src/prepared-body";
 
 function streamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
@@ -34,6 +38,214 @@ const QUOTED_MARKER = JSON.stringify(MARKER); // "octg_prepare_..." with quotes
 function encode(str: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
+
+interface CountedSource {
+  readonly body: ReadableStream<Uint8Array>;
+  readonly reads: () => number;
+  readonly cancellations: () => number;
+}
+
+function countedSource(chunks: readonly Uint8Array[], error?: Error): CountedSource {
+  let nextChunk = 0;
+  let readCount = 0;
+  let cancellationCount = 0;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        readCount += 1;
+        if (error !== undefined) {
+          controller.error(error);
+          return;
+        }
+        const chunk = chunks[nextChunk];
+        if (chunk === undefined) {
+          controller.close();
+          return;
+        }
+        nextChunk += 1;
+        controller.enqueue(chunk);
+        if (nextChunk === chunks.length) controller.close();
+      },
+      cancel() {
+        cancellationCount += 1;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return {
+    body,
+    reads: () => readCount,
+    cancellations: () => cancellationCount,
+  };
+}
+
+const FIRST_PROPERTY_PREFIX = `{"max_output_tokens":`;
+
+function firstProperty(marker: string): Uint8Array {
+  return encode(`${FIRST_PROPERTY_PREFIX}${JSON.stringify(marker)},`);
+}
+
+function fullPreparedBody(marker: string): Uint8Array {
+  return encode(`${FIRST_PROPERTY_PREFIX}${JSON.stringify(marker)},"model":"test"}`);
+}
+
+function markerForFirstPropertyCompletion(byteNumber: number): string {
+  const markerLength = byteNumber - encode(FIRST_PROPERTY_PREFIX).byteLength - 3;
+  return "m".repeat(markerLength);
+}
+
+async function parsePreparedBody(result: PreparedOutputPreflight): Promise<Record<string, unknown>> {
+  expect(result.kind).toBe("ready");
+  if (result.kind !== "ready") throw new Error("expected a ready prepared body");
+  const bytes = await drainStream(result.body);
+  return JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+}
+
+async function assertPreparedBody(result: PreparedOutputPreflight): Promise<void> {
+  const parsed = await parsePreparedBody(result);
+  expect(typeof parsed.max_output_tokens).toBe("number");
+  expect(parsed.max_output_tokens).toBe(42);
+}
+
+describe("preflightPreparedOutput", () => {
+  it("replaces the marker in a valid body and stops reading after the first property", async () => {
+    const source = countedSource([firstProperty(MARKER), encode(`"model":"test"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(1);
+    await assertPreparedBody(result);
+  });
+
+  it("accepts a first property that closes at byte 511", async () => {
+    const marker = markerForFirstPropertyCompletion(511);
+    const source = countedSource([firstProperty(marker), encode(`"model":"test"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, marker, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(1);
+    await assertPreparedBody(result);
+  });
+
+  it("accepts a first property that closes at byte 512", async () => {
+    const marker = markerForFirstPropertyCompletion(512);
+    const source = countedSource([firstProperty(marker), encode(`"model":"test"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, marker, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(1);
+    await assertPreparedBody(result);
+  });
+
+  it("rejects a first property that closes at byte 513 without reading later chunks", async () => {
+    const marker = markerForFirstPropertyCompletion(513);
+    const source = countedSource([firstProperty(marker), encode(`"model":"test"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, marker, 42);
+
+    expect(result).toEqual({ kind: "invalid" });
+    expect(source.reads()).toBe(1);
+    expect(source.cancellations()).toBe(0);
+  });
+
+  it("rejects duplicate quoted markers retained in the prefix", async () => {
+    const source = countedSource([
+      encode(`${FIRST_PROPERTY_PREFIX}${JSON.stringify(MARKER)},"other":${JSON.stringify(MARKER)}}`),
+    ]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toEqual({ kind: "invalid" });
+    expect(source.cancellations()).toBe(0);
+  });
+
+  it("accepts a marker split across source chunks", async () => {
+    const quotedMarker = JSON.stringify(MARKER);
+    const split = Math.floor(quotedMarker.length / 2);
+    const source = countedSource([
+      encode(`${FIRST_PROPERTY_PREFIX}${quotedMarker.slice(0, split)}`),
+      encode(`${quotedMarker.slice(split)},"model":"test"}`),
+    ]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(2);
+    await assertPreparedBody(result);
+  });
+
+  it("rejects a malformed first property and releases the source lock without canceling", async () => {
+    const source = countedSource([encode(`{"other":${JSON.stringify(MARKER)},"model":"test"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toEqual({ kind: "invalid" });
+    expect(source.cancellations()).toBe(0);
+    const reader = source.body.getReader();
+    reader.releaseLock();
+  });
+
+  it("propagates a source read error without canceling the source", async () => {
+    const sourceError = new Error("source read failed");
+    const source = countedSource([], sourceError);
+
+    await expect(preflightPreparedOutput(source.body, MARKER, 42)).rejects.toThrow("source read failed");
+
+    expect(source.cancellations()).toBe(0);
+    const reader = source.body.getReader();
+    reader.releaseLock();
+  });
+
+  it("preserves the unread tail from the same source chunk", async () => {
+    const source = countedSource([fullPreparedBody(MARKER)]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(1);
+    await assertPreparedBody(result);
+  });
+
+  it("does not read a later tail chunk until the replacement stream is consumed", async () => {
+    const source = countedSource([firstProperty(MARKER), encode(`"model":"later"}`)]);
+
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result).toMatchObject({ kind: "ready" });
+    expect(source.reads()).toBe(1);
+    await assertPreparedBody(result);
+    expect(source.reads()).toBe(2);
+  });
+
+  it("memoizes destination cancellation and releases the source reader", async () => {
+    const source = countedSource([firstProperty(MARKER), encode(`"model":"test"}`)]);
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result.kind).toBe("ready");
+    if (result.kind !== "ready") throw new Error("expected a ready prepared body");
+    await Promise.all([result.body.cancel(), result.cancel()]);
+    await result.cancel();
+
+    expect(source.cancellations()).toBe(1);
+    const reader = source.body.getReader();
+    reader.releaseLock();
+  });
+
+  it("releases the source reader lock when a ready body is canceled", async () => {
+    const source = countedSource([firstProperty(MARKER)]);
+    const result = await preflightPreparedOutput(source.body, MARKER, 42);
+
+    expect(result.kind).toBe("ready");
+    if (result.kind !== "ready") throw new Error("expected a ready prepared body");
+    await result.cancel();
+
+    const reader = source.body.getReader();
+    reader.releaseLock();
+  });
+});
 
 describe("replaceOutputMarker", () => {
   it("replaces a single quoted marker in one chunk", async () => {

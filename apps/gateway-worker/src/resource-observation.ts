@@ -30,6 +30,7 @@ export type ResourceStageRoute =
   | "reject:tokenization_concurrency"
   | "error:tokenizer_unavailable"
   | "error:pre_upstream"
+  | "error:prepared_prefix_invalid"
   | "error:upstream_uncertain"
   | "error:arithmetic_error";
 
