@@ -1062,7 +1062,7 @@ export async function handleProxy(
               ? "error:pre_upstream"
               : "error:upstream_uncertain",
             quotaReserved: true,
-            upstreamReached: false,
+            upstreamReached: error instanceof UpstreamConfigError ? false : upstreamAttempted,
           },
         );
         upstreamStageStartedAt = undefined;
