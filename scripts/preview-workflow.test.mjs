@@ -37,6 +37,7 @@ test("DO-only Preview config removes all Deno and prepare bindings", () => {
     "DENO_TOKENIZER_ENDPOINT",
     "DENO_TOKENIZER_THRESHOLD_BYTES",
     "DENO_TOKENIZER_TIMEOUT_MS",
+    "DENO_TOKENIZER_AUTH_TOKEN",
     "DENO_PREPARE_ENDPOINT",
     "DENO_PREPARE_THRESHOLD_BYTES",
   ]) {
@@ -46,7 +47,6 @@ test("DO-only Preview config removes all Deno and prepare bindings", () => {
       `Preview config must delete ${name}`,
     );
   }
-  assert.equal(doOnlyConfig.includes("DENO_TOKENIZER_AUTH_TOKEN"), false);
 });
 
 test("DO-only Preview config maps the isolated input limit", () => {
