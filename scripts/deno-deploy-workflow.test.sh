@@ -217,6 +217,15 @@ end
 
 jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
+  if job.key?("uses")
+    unless job["uses"].is_a?(String) && !job["uses"].empty?
+      fail_contract("jobs.#{job_name}.uses must be a non-empty string")
+    end
+    if job.key?("steps")
+      fail_contract("jobs.#{job_name} must not define steps alongside uses")
+    end
+    next
+  end
   require_steps(job, "jobs.#{job_name}").each_with_index do |step, index|
     next unless step.is_a?(Hash)
     next if job_name == "deploy" && [
@@ -497,6 +506,8 @@ end
 
 jobs.each do |job_name, raw_job|
   job = require_mapping(raw_job, "jobs.#{job_name}")
+  next if job.key?("uses")
+
   steps = require_steps(job, "jobs.#{job_name}")
   steps.each_with_index do |step, index|
     next unless step.is_a?(Hash)
