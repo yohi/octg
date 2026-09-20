@@ -248,7 +248,11 @@ test("deploy-production is triggered only by a successful master Deno workflow r
   assert.match(productionWorkflow, /github\.event\.workflow_run\.event == 'push'/);
   assert.match(productionWorkflow, /github\.event\.workflow_run\.head_branch == 'master'/);
   assert.match(productionWorkflow, /conclusion == 'success'/);
-  assert.match(productionWorkflow, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
+  assert.match(productionWorkflow, /ref: master/);
+  assert.doesNotMatch(
+    productionWorkflow,
+    /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/,
+  );
   assert.doesNotMatch(productionWorkflow, /\n  push:/);
   assert.match(
     productionWorkflow,
