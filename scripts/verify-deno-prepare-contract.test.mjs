@@ -119,16 +119,53 @@ function standardFetch(prepare, calls, prepareEndpoint = endpoint) {
   };
 }
 
+function serializeError(value, seen = new WeakSet()) {
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+
+  const ownProperties = {};
+  for (const property of Object.getOwnPropertyNames(value)) {
+    if (property === "cause") continue;
+    ownProperties[property] = serializeError(value[property], seen);
+  }
+  return {
+    message: value.message,
+    stack: value.stack,
+    cause: Object.prototype.hasOwnProperty.call(value, "cause")
+      ? serializeError(value.cause, seen)
+      : undefined,
+    ownProperties,
+  };
+}
+
 async function assertCategory(operation, category, sensitiveValues = []) {
   await assert.rejects(operation, (error) => {
     assert.ok(error instanceof Error);
     assert.equal(error.message, category);
+    const serializedError = JSON.stringify(serializeError(error));
     for (const sensitiveValue of sensitiveValues) {
-      assert.equal(error.message.includes(sensitiveValue), false);
+      assert.equal(serializedError.includes(sensitiveValue), false);
     }
     return true;
   });
 }
+
+test("assertCategory rejects sensitive values outside the error message", async () => {
+  const error = new Error("body_read_failed");
+  error.stack = `${error.stack}\n${token}`;
+  error.cause = new Error(bodyText);
+  error.extra = querySecret;
+
+  await assert.rejects(
+    assertCategory(
+      Promise.reject(error),
+      "body_read_failed",
+      [token, bodyText, querySecret],
+    ),
+    assert.AssertionError,
+  );
+});
 
 test("probes health and prepare successfully and preserves a path prefix", async () => {
   for (const prepareEndpoint of [endpoint, "https://example.test/api/prepare"]) {

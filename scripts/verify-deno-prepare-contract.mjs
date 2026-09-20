@@ -232,28 +232,6 @@ function countExactOccurrences(bytes, needle) {
   return count;
 }
 
-function replaceExactOccurrence(bytes, needle, replacement) {
-  let matchOffset = -1;
-  for (let offset = 0; offset + needle.byteLength <= bytes.byteLength; offset += 1) {
-    if (bytesEqual(bytes, offset, needle)) {
-      matchOffset = offset;
-      break;
-    }
-  }
-  if (matchOffset < 0) return undefined;
-
-  const result = new Uint8Array(
-    bytes.byteLength - needle.byteLength + replacement.byteLength,
-  );
-  result.set(bytes.subarray(0, matchOffset), 0);
-  result.set(replacement, matchOffset);
-  result.set(
-    bytes.subarray(matchOffset + needle.byteLength),
-    matchOffset + replacement.byteLength,
-  );
-  return result;
-}
-
 function validateInspectedPrefix(prefix, marker, bounded) {
   const firstProperty = encoder.encode('{"max_output_tokens":');
   const quotedMarker = encoder.encode(JSON.stringify(marker));
@@ -286,49 +264,10 @@ function validateInspectedPrefix(prefix, marker, bounded) {
     return "body_layout_invalid";
   }
 
-  const replacement = encoder.encode(String(PROBE_OUTPUT_BUDGET));
-  const transformed = replaceExactOccurrence(prefix, quotedMarker, replacement);
-  if (transformed === undefined) return "body_layout_invalid";
-
-  const expectedNumericPrefix = new Uint8Array(
-    firstProperty.byteLength + replacement.byteLength + 1,
-  );
-  expectedNumericPrefix.set(firstProperty, 0);
-  expectedNumericPrefix.set(replacement, firstProperty.byteLength);
-  expectedNumericPrefix[firstProperty.byteLength + replacement.byteLength] = 0x2c;
-  return bytesStartWith(transformed, expectedNumericPrefix) ? true : "body_layout_invalid";
+  return true;
 }
 
-async function inspectResponseBody(body, marker) {
-  let reader;
-  try {
-    reader = body?.getReader();
-  } catch {
-    throw probeFailure("body_read_failed");
-  }
-  if (
-    reader === null ||
-    typeof reader !== "object" ||
-    typeof reader.read !== "function" ||
-    typeof reader.cancel !== "function"
-  ) {
-    throw probeFailure("body_read_failed");
-  }
-
-  let cancellation;
-  let cancelFailed = false;
-  const cancelOnce = () => {
-    if (cancellation !== undefined) return cancellation;
-    cancellation = Promise.resolve()
-      .then(() => reader.cancel())
-      .catch(() => {
-        cancelFailed = true;
-        return undefined;
-      });
-    return cancellation;
-  };
-
-  let validationError;
+async function readBoundedPrefix(reader) {
   try {
     const prefix = new Uint8Array(PREPARE_BODY_INSPECTION_BYTES);
     let prefixLength = 0;
@@ -363,8 +302,45 @@ async function inspectResponseBody(body, marker) {
       }
     }
 
-    const inspected = prefix.subarray(0, prefixLength);
-    const result = validateInspectedPrefix(inspected, marker, bounded);
+    return { prefix: prefix.subarray(0, prefixLength), bounded };
+  } catch (error) {
+    throw isProbeFailure(error) ? error : probeFailure("body_read_failed");
+  }
+}
+
+async function inspectResponseBody(body, marker) {
+  let reader;
+  try {
+    reader = body?.getReader();
+  } catch {
+    throw probeFailure("body_read_failed");
+  }
+  if (
+    reader === null ||
+    typeof reader !== "object" ||
+    typeof reader.read !== "function" ||
+    typeof reader.cancel !== "function"
+  ) {
+    throw probeFailure("body_read_failed");
+  }
+
+  let cancellation;
+  let cancelFailed = false;
+  const cancelOnce = () => {
+    if (cancellation !== undefined) return cancellation;
+    cancellation = Promise.resolve()
+      .then(() => reader.cancel())
+      .catch(() => {
+        cancelFailed = true;
+        return undefined;
+      });
+    return cancellation;
+  };
+
+  let validationError;
+  try {
+    const { prefix, bounded } = await readBoundedPrefix(reader);
+    const result = validateInspectedPrefix(prefix, marker, bounded);
     if (result !== true) throw probeFailure(result);
   } catch (error) {
     validationError = isProbeFailure(error) ? error : probeFailure("body_read_failed");
