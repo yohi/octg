@@ -239,15 +239,12 @@ test("deploy-production workflow synchronizes the Worker auth Secret safely", ()
   assert.ok(secretIndex >= 0 && secretIndex < migrationIndex);
 });
 
-test("deploy-production is triggered only by a successful master Deno workflow run", () => {
+test("deploy-production is a reusable workflow with a trusted checkout", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const productionWorkflow = readFileSync(workflowPath, "utf8");
 
-  assert.match(productionWorkflow, /workflow_run:/);
-  assert.match(productionWorkflow, /workflows: \[Deploy Deno Tokenizer\]/);
-  assert.match(productionWorkflow, /github\.event\.workflow_run\.event == 'push'/);
-  assert.match(productionWorkflow, /github\.event\.workflow_run\.head_branch == 'master'/);
-  assert.match(productionWorkflow, /conclusion == 'success'/);
+  assert.match(productionWorkflow, /workflow_call:/);
+  assert.doesNotMatch(productionWorkflow, /workflow_run:/);
   assert.match(productionWorkflow, /ref: master/);
   assert.doesNotMatch(
     productionWorkflow,
@@ -258,6 +255,20 @@ test("deploy-production is triggered only by a successful master Deno workflow r
     productionWorkflow,
     /concurrency:\n  group: octg-deployment\n  cancel-in-progress: false/,
   );
+});
+
+test("deploy-deno-tokenizer calls production deployment after a successful master deploy", () => {
+  const denoWorkflow = readFileSync(
+    join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    denoWorkflow,
+    /deploy-production:\n\s+name: Deploy Production\n\s+needs: deploy\n\s+if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && needs\.deploy\.result == 'success'/,
+  );
+  assert.match(denoWorkflow, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
+  assert.match(denoWorkflow, /secrets: inherit/);
 });
 
 test("deploy-production gates remote mutations on the current master SHA", () => {
@@ -277,7 +288,7 @@ test("deploy-production gates remote mutations on the current master SHA", () =>
   );
   assert.match(
     productionWorkflow,
-    /DENO_WORKFLOW_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/,
+    /DENO_WORKFLOW_SHA: \$\{\{ github\.sha \}\}/,
   );
 
   const gateRun = extractStepRun(productionWorkflow, gateName);

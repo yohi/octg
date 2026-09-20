@@ -260,3 +260,10 @@ jobs:
           DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
           MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
         run: node scripts/verify-deno-prepare-contract.mjs
+
+  deploy-production:
+    name: Deploy Production
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.deploy.result == 'success'
+    uses: ./.github/workflows/deploy-production.yml
+    secrets: inherit
