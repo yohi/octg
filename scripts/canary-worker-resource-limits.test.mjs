@@ -16,6 +16,7 @@ const request = {
   concurrency: 1,
   ordinal: 0,
   requestTimeoutMs: 100,
+  mode: "chat",
 };
 
 const canaryConfig = {
@@ -61,6 +62,32 @@ test("waits for the response body before measuring duration", async () => {
   assert.equal(result.outcome, "response");
   assert.equal(result.durationMs, 100);
   assert.equal(bodyConsumed, true);
+});
+
+test("includes only the allowlisted mode in a safe result", async () => {
+  const result = await requestCanary({
+    ...request,
+    fetchImpl: async () => ({ status: 200, headers: new Headers(), body: null }),
+    now: () => 0,
+  });
+
+  assert.deepEqual(result, {
+    event: "octg.canary.result",
+    mode: "chat",
+    concurrency: 1,
+    ordinal: 0,
+    outcome: "response",
+    status: 200,
+    durationMs: 0,
+    requestId: null,
+    route: null,
+    workerVersion: null,
+    responseErrorType: null,
+    responseErrorCode: null,
+    responseErrorParam: null,
+  });
+  assert.equal(Object.keys(result).includes("payload"), false);
+  assert.equal(Object.keys(result).includes("apiKey"), false);
 });
 
 test("cancels oversized response bodies without parsing their metadata", async () => {
