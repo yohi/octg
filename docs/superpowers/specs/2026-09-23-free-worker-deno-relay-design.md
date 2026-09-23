@@ -257,10 +257,25 @@ The evidence MUST include all of the following:
 - Request payload buckets of 123 KiB, 174 KiB, approximately 700 KiB, and
   exactly 1 MiB; cover both `stream=true` and `stream=false` in every bucket
   with at least 100 valid authenticated invocations per size/mode combination.
-- The decision, activation, renewal, and terminal callback invocations under a
-  representative bounded workload, measured separately from ingress. The
-  workload includes bounded JSON parsing, credential verification, and the
-  representative Durable Object RPC sequence for each callback class.
+- The decision callback invocation, measured separately from ingress, runs this
+  bounded workload: service bearer validation; bounded JSON parsing; signed
+  ingress-context verification; registry/policy lookup equivalent; model
+  classification; token-budget calculation; reservation; in-flight acquisition;
+  and a durable authorize-equivalent DO operation.
+- The activation callback invocation, measured separately from ingress, runs:
+  service bearer validation; grant-credential verification; grant, reservation,
+  and lease-generation validation; and an atomic `authorized -> attempted`
+  equivalent DO operation.
+- The renewal callback invocation, measured separately from ingress, runs:
+  service bearer validation; grant-credential verification; attempted-state,
+  expiry and lease-generation validation; and a lease-renewal-equivalent DO
+  operation.
+- The terminal callback invocation, measured separately from ingress, runs:
+  service bearer validation; grant-credential verification; grant-state
+  validation; a quota settle/uncertain-equivalent mutation; and a lease-release /
+  grant-terminalization-equivalent DO operation.
+- Task 0's callback harness is disposable and outside the repository. It MUST
+  NOT create production source, modules, routes, or callbacks.
 - At least 100 successful invocations per payload-size/stream-mode combination
   and at least 100 invocations per callback class. Report sample count and per-invocation CPU
   distribution (minimum, p50, p90, p95, p99, maximum), ingress/callback
@@ -353,11 +368,18 @@ SHA-256(clientId || NUL || exact UTF-8 Idempotency-Key); raw keys and client
 credentials are never carried in the signed context. Ingress context lifetime
 is at most 60 seconds. Issuance must precede body forwarding.
 
-If an Idempotency-Key is present on ingress, Deno hashes the exact forwarded
-header value with the signed clientId and compares it to `idempotencyKeyHash`
-before the decision callback; mismatch is `invalid_context`. Deno forwards the
-unchanged key to Gateway B only after allow and activation. When absent, no
-Idempotency-Key is added upstream.
+Deno transports the exact Idempotency-Key value unchanged and MUST NOT use
+signed context claims as authority before the decision callback. It sends the
+opaque context and exact key (or its absence) to the decision callback; Worker
+verifies the context and returns allow plus grant only after successful
+verification. After allow, Deno decodes that same Worker-verified context
+payload and computes `null` when the key is absent, otherwise the defined hash
+from its `clientId` and the exact forwarded key. It compares this value with
+signed `idempotencyKeyHash`; mismatch, including absent/present disagreement,
+is rejected before activation. Deno makes a best-effort terminal `release`,
+does not call Gateway B, and returns internal `invalid_context`, which Worker
+maps to public `500 internal_error`. When the key was absent, no Idempotency-Key
+is added upstream.
 
 All identifiers are non-empty ASCII strings: requestId is the existing OCTG
 request identifier generated as `req_${ulid()}` (30 ASCII bytes, matching
@@ -448,7 +470,12 @@ or upstream credential.
   used:safe integer,remaining:safe integer,resetAt:string,route:"responses"}`.
   It MUST NOT contain grant credentials, service
   secrets, signed context, nonce, client key, request body, prompt, or upstream
-  credential. Worker validates it before constructing OCTG public headers.
+  credential. `route: "responses"` is an internal protocol endpoint
+  discriminator used only to validate the metadata; it is not the public
+  `X-OCTG-Route` value. On a successful complimentary relay response, Worker
+  constructs public headers with the existing route `free_shared`, equivalent
+  to `buildOctgHeaders({ requestId, quota, route: "free_shared" })`. Never copy
+  internal `"responses"` into `X-OCTG-Route`.
 
 Deno ingress rejection/failure responses use HTTP status mapped from the
 `RelayErrorCode` table below, `Content-Type: application/json`, and the exact
@@ -475,8 +502,8 @@ claims: `version:1`, `audience:"octg-worker-relay"`,
 `issuedAtMs`, `expiresAtMs`. No `kid` or algorithm negotiation is accepted.
 `model`, `pool`, and `admissionUtcDay` are set by Worker from authoritative
 policy/quota resolution after Deno submits request metadata; they are not copied
-from Deno metadata or the ingress context. Keys are environment-unique, at
-least 32 random bytes, and compared using constant-time verification. Plan interfaces are exactly
+from Deno metadata or the ingress context. Keys are environment-unique, exactly
+32 random bytes, and compared using constant-time verification. Plan interfaces are exactly
 `signRelayGrantCredential(claims: RelayGrantCredentialV1, key: Uint8Array): Promise<string>` and
 `verifyRelayGrantCredential(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number):
 Promise<RelayGrantCredentialV1 | undefined>`; context signing uses the same
@@ -553,6 +580,18 @@ them to public `500 internal_error`.
 Once response headers are sent, terminate the stream on later failure; never
 replace it with a new error response.
 
+### Public Responses relay selection order
+
+The public Responses handler uses this exact order: (1) authenticate the
+external client; (2) validate public `Idempotency-Key`; (3) resolve relay
+configuration; (4) when `endpoint === "responses"` and relay is enabled, enter
+the relay path; (5) only when relay is disabled, resolve and validate legacy
+Deno tokenizer and `/prepare` configuration; (6) continue to the legacy prepare
+or legacy normal path. Relay configuration and legacy `/prepare` configuration
+are independent. Invalid legacy tokenizer/prepare configuration MUST NOT reject
+an enabled relay request. Once the relay path is selected, relay failure never
+falls back to legacy forwarding.
+
 ### Atomic quota lifecycle and reconciliation
 
 Extract `applyQuotaLifecycleTransition(storage, requestId, transition)` as a
@@ -587,8 +626,9 @@ cannot cause any quota transition after reconciliation.
 
 ## Traceability and rollout gate
 
-The Plan tasks map every requirement as follows: CPU gate and evidence are the
-precondition to every task; Task 1 owns all wire types/bounds/errors; Task 2
+The Plan tasks map every requirement as follows: Task 0 is the sole pre-gate
+task and owns CPU feasibility measurement/evidence; CPU Gate PASS is a
+precondition to Tasks 1–8. Task 1 owns all wire types/bounds/errors; Task 2
 owns grant state, transaction seam, lease and reconciliation; Task 3 owns
 credential primitives and environment validation; Task 4 owns Worker
 callbacks, authorization and same-DO routing; Task 5 owns Deno ingress,
