@@ -70,13 +70,22 @@ Deno -> Worker callback -> QuotaController: terminal usage or uncertainty
 
 Worker authenticates the external client, validates the Idempotency-Key and
 public request route, and passes the original request body to Deno once.
-The internal context contains a random request ID, environment identifier,
-client ID, idempotency-key identity, issue and expiry times, and a unique
-nonce. It does not contain the client key or upstream credentials. The Worker
-authenticates Deno with an environment-specific service secret and signs the
-context with a separate environment-specific key; Deno authenticates all
-callback calls. Both sides validate the audience, route, expiry and context
-version. Endpoint configuration is pinned to the corresponding environment.
+The internal context contains the existing OCTG request ID, environment
+identifier, client ID, idempotency-key identity, issue and expiry times, and a
+unique nonce. It does not contain the client key or upstream credentials. The
+Worker authenticates Deno with an environment-specific service secret and signs
+the context with a separate environment-specific key. Deno authenticates all
+callback calls. Only Worker holds the context HMAC key: it signs ingress
+contexts and grant credentials, verifies ingress contexts on decision callbacks,
+and verifies grant credentials on activation, renewal and terminal callbacks.
+Deno does not verify or sign either token. It checks only the context header's
+transport size and syntax bounds and forwards the opaque token unchanged to the
+decision callback. A successful allow response proves to Deno that Worker
+verified that exact context. Only after allow, Deno may decode the context as
+non-authoritative data for bounded relay/upstream metadata such as request ID
+and client ID; it must not use unverified claims for quota, policy, model, pool,
+admission-day, or target selection. Deno transports the grant credential opaquely in its callbacks.
+Endpoint configuration is pinned to the corresponding environment.
 The short-lived ingress context is validated only when creating the decision;
 long-running renewal and terminal callbacks use a separate grant-bound
 credential whose expiry covers the maximum supported request duration. A
@@ -146,8 +155,11 @@ reparsing its SSE stream.
 For a non-stream response Deno reports terminal usage, then returns the
 upstream response. For a stream, Deno forwards the SSE bytes and reports
 final usage when the upstream stream terminates. Worker forwards the Deno
-response as a byte stream with the existing OCTG request, quota and version
-headers; it never decodes the whole response to settle quota. Audit creation
+response as a byte stream with the existing OCTG request and quota headers and
+constructs public version headers from
+`workerVersionHeaders(env.CF_VERSION_METADATA)` in the ingress Worker; the Deno
+metadata does not carry a Worker version. Worker never decodes the whole
+response to settle quota. Audit creation
 and completion are best effort and cannot authorize a request or block a DO
 state transition. Public errors remain mapped by Worker; internal errors do
 not disclose prompts, response content, signed contexts or credentials.
@@ -228,7 +240,11 @@ callback invocations and the original ingress invocation.
 ## Pre-implementation CPU Feasibility Gate (BLOCKING)
 
 Task 1 through Task 8 in the implementation plan MUST NOT start until this gate
-is PASS. The gate measures the exact Free-plan runtime and deployment class used
+is PASS. Task 0, the isolated Free-plan CPU Capability Spike defined in the
+Plan, is the sole activity permitted before PASS. It is not production source
+implementation and must not create production routes, callbacks, or relay
+modules. Remote deployment and runtime measurement for Task 0 still require the
+user's explicit authorization. The gate measures the exact Free-plan runtime and deployment class used
 by the intended Worker, not a local emulator, Paid Worker, or synthetic
 microbenchmark. Record the dated Worker revision, runtime/plan, test harness,
 and raw aggregate results without request bodies or credentials.
@@ -239,12 +255,14 @@ The evidence MUST include all of the following:
   and transfers its body to Deno exactly once, without cloning, buffering,
   parsing, or transforming it.
 - Request payload buckets of 123 KiB, 174 KiB, approximately 700 KiB, and
-  exactly 1 MiB; cover both stream settings and at least one valid authenticated
-  client request per bucket.
+  exactly 1 MiB; cover both `stream=true` and `stream=false` in every bucket
+  with at least 100 valid authenticated invocations per size/mode combination.
 - The decision, activation, renewal, and terminal callback invocations under a
-  representative bounded workload, measured separately from ingress.
-- At least 100 successful invocations per payload bucket and at least 100
-  invocations per callback class. Report sample count and per-invocation CPU
+  representative bounded workload, measured separately from ingress. The
+  workload includes bounded JSON parsing, credential verification, and the
+  representative Durable Object RPC sequence for each callback class.
+- At least 100 successful invocations per payload-size/stream-mode combination
+  and at least 100 invocations per callback class. Report sample count and per-invocation CPU
   distribution (minimum, p50, p90, p95, p99, maximum), ingress/callback
   `exceededCpu` counts, and each distribution's tail margin to the 10 ms limit.
 - A documented pass threshold: zero `exceededCpu`; p99 CPU at or below 8 ms
@@ -257,7 +275,10 @@ cannot meet the threshold. On failure, do not begin Tasks 1–8: redesign ingres
 architecture if ingress fails, or reduce/reassign callback responsibility if
 any callback class fails; rerun the complete gate after the redesign. Missing
 samples, unavailable Free runtime, or incomplete telemetry are **BLOCKED**, not
-PASS. Store the evidence and explicit PASS decision in the review record before
+PASS. If Task 0 fails, do not begin production implementation; return to this Design
+and revise the architecture. Record no measurements until actually observed.
+Until then the status remains `BLOCKED pending CPU feasibility evidence`.
+Store the evidence and explicit PASS decision in the review record before
 changing this document's status to implementation-ready.
 
 ## Normative relay contract (v1)
@@ -276,7 +297,6 @@ to one environment and are never shared between Preview and Production:
 | `OCTG_RELAY_CALLBACK_ORIGIN` | HTTPS origin only, no path other than `/`, query, fragment, or userinfo; fixed Worker origin for the same environment. |
 | `OCTG_RELAY_SERVICE_AUTH_TOKEN` | Deno-to-Worker callback bearer secret. |
 | `OCTG_RELAY_INGRESS_AUTH_TOKEN` | Worker-to-Deno ingress bearer secret. |
-| `OCTG_RELAY_CONTEXT_HMAC_KEY` | Environment-unique base64url-no-padding encoding of exactly 32 random bytes for ingress context and grant credentials. |
 | `OCTG_RELAY_GATEWAY_B_BASE_URL` | Fixed HTTPS Gateway B `/openai` base URL; not client-selectable. |
 | `OCTG_RELAY_GATEWAY_B_TOKEN` | Gateway B Run token. |
 | `MAX_INPUT_BYTES` | Exactly `1048576` for this release. |
@@ -284,7 +304,9 @@ to one environment and are never shared between Preview and Production:
 | `OCTG_RELAY_LEASE_TTL_MS` | Exactly `120000`. |
 | `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` | Exactly `30000`; four renewals per lease TTL. |
 
-Worker relay configuration is enabled only when all `OCTG_RELAY_*` Worker
+Worker alone stores `OCTG_RELAY_CONTEXT_HMAC_KEY`, an environment-unique
+base64url-no-padding encoding of exactly 32 random bytes. It is never configured
+in Deno. Worker relay configuration is enabled only when all `OCTG_RELAY_*` Worker
 bindings are present and valid: `OCTG_RELAY_ENVIRONMENT`,
 `OCTG_RELAY_INGRESS_ENDPOINT`, `OCTG_RELAY_INGRESS_AUTH_TOKEN`,
 `OCTG_RELAY_SERVICE_AUTH_TOKEN`, and `OCTG_RELAY_CONTEXT_HMAC_KEY`. The endpoint
@@ -337,8 +359,11 @@ before the decision callback; mismatch is `invalid_context`. Deno forwards the
 unchanged key to Gateway B only after allow and activation. When absent, no
 Idempotency-Key is added upstream.
 
-All identifiers are non-empty ASCII strings: requestId is a UUID (36 bytes),
-grantId is a UUID (36 bytes), nonce is 43-character base64url encoding of 32
+All identifiers are non-empty ASCII strings: requestId is the existing OCTG
+request identifier generated as `req_${ulid()}` (30 ASCII bytes, matching
+`req_[0-9A-HJKMNP-TV-Z]{26}`); it is not a UUID and relay does not introduce a
+separate request identity. grantId is a UUID
+(36 bytes), nonce is 43-character base64url encoding of 32
 random bytes, and leaseGeneration is a UUID (36 bytes). clientId is 1–128
 UTF-8 bytes; model is 1–256 UTF-8 bytes; idempotencyKeyHash is null or exactly
 64 lowercase hexadecimal characters. Times are safe integer Unix epoch
@@ -386,7 +411,27 @@ or upstream credential.
   responses and map to public `500 internal_error`.
 - Activation request/response: request
   `{version:1,grantId:string,leaseGeneration:string}`; response
-  `{version:1,activated:boolean,code:RelayErrorCode|null}`.
+  `{version:1,activated:boolean,code:ActivationDenialCode|null}`. `activated:true`
+  requires `code:null`; `activated:false` requires one of the listed denial
+  codes. Any other shape or code is malformed and is treated as `unknown` by
+  Deno. The Deno-local activation result is exactly
+  `| {kind:"activated"} | {kind:"denied",code:ActivationDenialCode}
+  | {kind:"unknown"}` where
+  `ActivationDenialCode = "environment_mismatch" | "grant_not_found" |
+  "grant_expired" | "grant_replayed" | "grant_terminalized" | "lease_lost"`.
+  Worker returns a denial code only when its activation operation definitively
+  did not transition the grant to `attempted`; a transport failure, malformed
+  response, or lost acknowledgement is `unknown`. The denial action mapping is
+  exact: `environment_mismatch` -> no terminal callback (wrong environment);
+  `grant_not_found` -> no quota/grant action (no matching grant exists);
+  `grant_expired` -> no terminal callback (the expired authorized grant is
+  released atomically by the DO); `lease_lost` -> terminal `release` (Worker
+  proved activation did not occur and the grant is still authorized);
+  `grant_replayed` -> terminal `uncertain` best effort (activation may already
+  have occurred; never release); `grant_terminalized` -> no action (the grant
+  is already terminal). `unknown` -> terminal `uncertain` best effort. None of
+  these paths calls Gateway B. Only `activated` permits the single upstream
+  request.
 - Renewal request/response: request
   `{version:1,grantId:string,leaseGeneration:string}`; response
   `{version:1,renewed:boolean,code:RelayErrorCode|null}`. Each successful
@@ -400,8 +445,8 @@ or upstream credential.
   post-activation termination is `uncertain`, never release.
 - `RelayResponseMetaV1` is exactly
   `{version:1,requestId:string,pool:"STANDARD"|"MINI",limit:safe integer,
-  used:safe integer,remaining:safe integer,resetAt:string,route:"responses",
-  workerVersion:string|null}`. It MUST NOT contain grant credentials, service
+  used:safe integer,remaining:safe integer,resetAt:string,route:"responses"}`.
+  It MUST NOT contain grant credentials, service
   secrets, signed context, nonce, client key, request body, prompt, or upstream
   credential. Worker validates it before constructing OCTG public headers.
 
@@ -442,12 +487,18 @@ The grant credential is minted only after durable authorization. It expires at
 `issuedAtMs + 3,900,000` (one-hour maximum request duration plus five-minute
 callback grace); the grant's authorization expiry is `issuedAtMs +
 3,600,000`. No decision envelope controls TTL. Every callback verifies all
-claims against the durable grant, request entry, and environment. Worker maps
-`pool` to `STANDARD|MINI` and `admissionUtcDay` to the canonical name
-`quota:{POOL}:{YYYY-MM-DD}`, then resolves that name in the environment's own
-`QUOTA_CONTROLLER` namespace. Deno cannot nominate a namespace, name, or object
-ID. This guarantees late callbacks across UTC midnight use the admission day's
-same DO.
+claims against the durable grant, request entry, and environment. For the decision callback, Worker verifies the ingress context, loads the
+authoritative registry and policy, validates Deno metadata, classifies the model
+and pool authoritatively, and derives the server-side admission UTC day. It
+resolves the QuotaController DO from that authoritative pool and day; the
+ingress context contains neither value and cannot route the decision. After
+grant issuance, activation, renewal and terminal callbacks reconstruct the same
+DO only from the Worker-verified signed grant credential's `pool` and
+`admissionUtcDay`. Worker maps `pool` to `STANDARD|MINI` and `admissionUtcDay`
+to the canonical name `quota:{POOL}:{YYYY-MM-DD}`, then resolves that name in
+the environment's own `QUOTA_CONTROLLER` namespace. Deno cannot nominate a
+namespace, name, or object ID. This guarantees late callbacks across UTC
+midnight use the admission day's same DO.
 
 The DO grant record stores the immutable credential claim bindings,
 `authorizationExpiresAtMs` (issuedAt + 3,600,000), state, terminal
