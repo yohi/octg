@@ -2,7 +2,10 @@
 
 ## Status and scope
 
-- Design approved: 2026-09-23; implementation pending.
+- Design approved: 2026-09-23; **BLOCKED pending CPU feasibility evidence**.
+- Implementation status: not authorized to start until the Pre-implementation CPU
+  Feasibility Gate below passes. No qualifying evidence is recorded in this
+  repository as of this revision; do not invent or infer measurements.
 - Constraint: Cloudflare Workers Paid is not an option. Deno may hold the
   upstream AI Gateway credential and perform upstream forwarding.
 - This is a follow-up to the implemented bounded-prefix approach in
@@ -221,6 +224,331 @@ bucket, stage, grant state and DO terminal state, without body, prompt,
 response, nonce, signature, client key or API token. Correlate the two legs
 through an opaque request ID and measure CPU independently on both Worker
 callback invocations and the original ingress invocation.
+
+## Pre-implementation CPU Feasibility Gate (BLOCKING)
+
+Task 1 through Task 8 in the implementation plan MUST NOT start until this gate
+is PASS. The gate measures the exact Free-plan runtime and deployment class used
+by the intended Worker, not a local emulator, Paid Worker, or synthetic
+microbenchmark. Record the dated Worker revision, runtime/plan, test harness,
+and raw aggregate results without request bodies or credentials.
+
+The evidence MUST include all of the following:
+
+- The Worker receives a representative authenticated `/v1/responses` request
+  and transfers its body to Deno exactly once, without cloning, buffering,
+  parsing, or transforming it.
+- Request payload buckets of 123 KiB, 174 KiB, approximately 700 KiB, and
+  exactly 1 MiB; cover both stream settings and at least one valid authenticated
+  client request per bucket.
+- The decision, activation, renewal, and terminal callback invocations under a
+  representative bounded workload, measured separately from ingress.
+- At least 100 successful invocations per payload bucket and at least 100
+  invocations per callback class. Report sample count and per-invocation CPU
+  distribution (minimum, p50, p90, p95, p99, maximum), ingress/callback
+  `exceededCpu` counts, and each distribution's tail margin to the 10 ms limit.
+- A documented pass threshold: zero `exceededCpu`; p99 CPU at or below 8 ms
+  (at least 2 ms margin); maximum observed CPU below 10 ms; no payload bucket or
+  callback class may be omitted or pooled to hide a failing tail.
+
+The gate is **FAIL** if any invocation exceeds 10 ms, p99 exceeds 8 ms, any
+`exceededCpu` event occurs, or the representative one-pass ingress itself
+cannot meet the threshold. On failure, do not begin Tasks 1–8: redesign ingress
+architecture if ingress fails, or reduce/reassign callback responsibility if
+any callback class fails; rerun the complete gate after the redesign. Missing
+samples, unavailable Free runtime, or incomplete telemetry are **BLOCKED**, not
+PASS. Store the evidence and explicit PASS decision in the review record before
+changing this document's status to implementation-ready.
+
+## Normative relay contract (v1)
+
+This section is the single internal wire and state contract. The implementation
+plan MUST reproduce it without changing names, limits, semantics, or ownership.
+
+### Runtime configuration and environment isolation
+
+The Deno relay requires all of these exact environment keys; values are scoped
+to one environment and are never shared between Preview and Production:
+
+| Key | Meaning |
+| --- | --- |
+| `OCTG_RELAY_ENVIRONMENT` | Exactly `preview` or `production`; must match the Worker binding. |
+| `OCTG_RELAY_CALLBACK_ORIGIN` | HTTPS origin only, no path other than `/`, query, fragment, or userinfo; fixed Worker origin for the same environment. |
+| `OCTG_RELAY_SERVICE_AUTH_TOKEN` | Deno-to-Worker callback bearer secret. |
+| `OCTG_RELAY_INGRESS_AUTH_TOKEN` | Worker-to-Deno ingress bearer secret. |
+| `OCTG_RELAY_CONTEXT_HMAC_KEY` | Environment-unique base64url-no-padding encoding of exactly 32 random bytes for ingress context and grant credentials. |
+| `OCTG_RELAY_GATEWAY_B_BASE_URL` | Fixed HTTPS Gateway B `/openai` base URL; not client-selectable. |
+| `OCTG_RELAY_GATEWAY_B_TOKEN` | Gateway B Run token. |
+| `MAX_INPUT_BYTES` | Exactly `1048576` for this release. |
+| `OCTG_RELAY_MAX_REQUEST_DURATION_MS` | Exactly `3600000` (one hour). |
+| `OCTG_RELAY_LEASE_TTL_MS` | Exactly `120000`. |
+| `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` | Exactly `30000`; four renewals per lease TTL. |
+
+Worker relay configuration is enabled only when all `OCTG_RELAY_*` Worker
+bindings are present and valid: `OCTG_RELAY_ENVIRONMENT`,
+`OCTG_RELAY_INGRESS_ENDPOINT`, `OCTG_RELAY_INGRESS_AUTH_TOKEN`,
+`OCTG_RELAY_SERVICE_AUTH_TOKEN`, and `OCTG_RELAY_CONTEXT_HMAC_KEY`. The endpoint
+must be HTTPS and environment-pinned. Deno starts the relay endpoint only when
+all keys in the table are present and valid. A partial or invalid configuration
+is a startup/configuration failure (`500 internal_error`); it MUST NOT silently
+disable authentication, mix environments, or fall back to the legacy route.
+`OCTG_RELAY_ENABLED` is exactly `true` to enable and `false` to disable; absent
+means disabled, and any other value is invalid. When true, missing or partial
+relay config fails closed; it never silently switches to the legacy route.
+Existing legacy `/prepare` configuration is independent.
+
+### Methods, headers, content and bounds
+
+All relay ingress and callback routes accept **POST only** and require
+`Content-Type: application/json` (case-insensitive media type, optional
+`charset=utf-8` only). Other methods return `405` with `Allow: POST`; any other
+content type returns `400 invalid_request`.
+
+| Direction / purpose | Exact route or header | Limit / rule |
+| --- | --- | --- |
+| Worker → Deno ingress | `POST /relay/v1/responses`; `Authorization: Bearer <OCTG_RELAY_INGRESS_AUTH_TOKEN>`; `X-OCTG-Relay-Context: <compact-context-token>`; optional `Idempotency-Key: <original value>` | Raw request body at most 1,048,576 bytes; context header at most 4,096 ASCII bytes; Idempotency-Key at most 255 UTF-8 bytes; content type is inherited as `application/json`. No other client headers are forwarded. |
+| Deno → Worker callbacks | `POST /internal/relay/v1/{decision,activation,renewal,terminal}`; `Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>` | JSON request and response body at most 8,192 bytes; context or grant credential header at most 4,096 ASCII bytes. |
+| Deno → Worker callback identity | `X-OCTG-Relay-Context` on decision; `X-OCTG-Relay-Grant` on activation, renewal, terminal | Never put either credential in the JSON body, logs, or public response. |
+| Deno → Worker ingress response | `X-OCTG-Relay-Response-Meta` | Base64url without padding of UTF-8 JSON; decoded JSON at most 2,048 bytes; header at most 2,800 ASCII bytes. |
+
+Both service tokens are 32–256 printable ASCII bytes without whitespace; each
+complete `Authorization` header is at most 263 ASCII bytes. HMAC keys are
+exactly 32 random bytes. All non-body headers in the table are ASCII and are
+subject to the listed per-header byte limit. Relay error-envelope bodies are
+at most 8,192 bytes.
+
+The signed `RelayContextV1` claims are exactly `version`, `audience`,
+`environment`, `route`, `requestId`, `clientId`, `idempotencyKeyHash`, `nonce`,
+`issuedAtMs`, and `expiresAtMs`. Values:
+`version=1`, `audience="octg-deno-relay"`, `route="responses"`, environment
+`preview|production`. The ingress context intentionally excludes model, pool,
+and quota day: Worker cannot safely learn those without parsing/buffering the
+streamed input. Following Deno metadata callback, Worker resolves the
+authoritative model, pool, and admission UTC day and binds them in the durable
+grant and grant credential.
+`idempotencyKeyHash` is `null` when absent, otherwise lowercase hex
+SHA-256(clientId || NUL || exact UTF-8 Idempotency-Key); raw keys and client
+credentials are never carried in the signed context. Ingress context lifetime
+is at most 60 seconds. Issuance must precede body forwarding.
+
+If an Idempotency-Key is present on ingress, Deno hashes the exact forwarded
+header value with the signed clientId and compares it to `idempotencyKeyHash`
+before the decision callback; mismatch is `invalid_context`. Deno forwards the
+unchanged key to Gateway B only after allow and activation. When absent, no
+Idempotency-Key is added upstream.
+
+All identifiers are non-empty ASCII strings: requestId is a UUID (36 bytes),
+grantId is a UUID (36 bytes), nonce is 43-character base64url encoding of 32
+random bytes, and leaseGeneration is a UUID (36 bytes). clientId is 1–128
+UTF-8 bytes; model is 1–256 UTF-8 bytes; idempotencyKeyHash is null or exactly
+64 lowercase hexadecimal characters. Times are safe integer Unix epoch
+milliseconds, `issuedAtMs <= nowMs`, and expiry is strictly greater than now
+when verified. Context expiry MUST be no more than 60,000 ms after issue.
+
+Both signed context and grant credentials use the same compact representation:
+`base64url-no-padding(UTF8(RFC8785(claims))) + "." +
+base64url-no-padding(HMAC-SHA-256(key, purpose || 0x00 || canonicalPayload))`.
+Context purpose is ASCII `octg-relay-context-v1`; grant purpose is
+`octg-relay-grant-v1`. Tokens contain exactly two segments; reject padding,
+non-canonical JSON, duplicate keys, unknown claims, non-canonical base64url,
+oversize tokens, and additional segments. Worker interfaces are exactly
+`signRelayContext(context: RelayContextV1, key: Uint8Array): Promise<string>`
+and `verifyRelayContext(token: string, key: Uint8Array,
+expectedEnvironment: RelayEnvironment, nowMs: number):
+Promise<RelayContextV1 | undefined>`.
+
+### Callback and response envelopes
+
+All JSON objects reject unknown fields, missing required fields, duplicate JSON
+keys, invalid ranges, and invalid UTF-8. Raw request bodies are decoded by
+`parseRelayJsonBody(bytes: Uint8Array, maxBytes: number): unknown` using fatal
+UTF-8 decoding and a parser that detects duplicate object keys before the
+envelope-specific `parseRelay*` validator runs; malformed input throws only
+`RelayProtocolError("invalid_request")`, never a raw parser detail. No callback may supply a DO name, DO
+object ID, URL, environment override, quota pool override, client credential,
+or upstream credential.
+
+- Decision request: `{version:1, metadata:RelayRequestMetaV1}` where metadata
+  has exactly `model:string`, `estimatedInputTokens:safe non-negative integer`,
+  `maxOutputTokens:safe non-negative integer`, `inputBytes:integer 0..1048576`,
+  `rawBodyBytes:integer 0..1048576`, `isToolUse:boolean`, and `stream:boolean`.
+  Request header carries `X-OCTG-Relay-Context`.
+- Decision response: reject is
+  `{version:1,kind:"reject",code:RelayErrorCode,status:integer}`. Allow is
+  `{version:1,kind:"allow",grantId:string,leaseGeneration:string,
+  maxOutputTokens:safe non-negative integer,
+  cacheEnabled:boolean,quota:RelayQuotaSnapshotV1}`. Quota snapshot has exactly
+  `pool:"STANDARD"|"MINI",limit,used,remaining` as safe non-negative
+  integers and `resetAt:string` RFC3339 UTC. The grant credential is returned
+  only in `X-OCTG-Relay-Grant` response header, never in the envelope.
+  A reject status MUST equal the single status assigned to that code by the
+  public mapping below; mismatched code/status pairs are invalid internal
+  responses and map to public `500 internal_error`.
+- Activation request/response: request
+  `{version:1,grantId:string,leaseGeneration:string}`; response
+  `{version:1,activated:boolean,code:RelayErrorCode|null}`.
+- Renewal request/response: request
+  `{version:1,grantId:string,leaseGeneration:string}`; response
+  `{version:1,renewed:boolean,code:RelayErrorCode|null}`. Each successful
+  renewal extends the lease by exactly `OCTG_RELAY_LEASE_TTL_MS`; Deno renews
+  every exactly `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` while upstream is active.
+- Terminal request: `{version:1,grantId:string,leaseGeneration:string,
+  outcome:"settle"|"uncertain"|"release",totalTokens:safe non-negative
+  integer|null}`. `settle` requires integer totalTokens; other outcomes require
+  null. Response is `{version:1,accepted:boolean,state:RelayGrantState,
+  code:RelayErrorCode|null}`. `release` is legal only before activation;
+  post-activation termination is `uncertain`, never release.
+- `RelayResponseMetaV1` is exactly
+  `{version:1,requestId:string,pool:"STANDARD"|"MINI",limit:safe integer,
+  used:safe integer,remaining:safe integer,resetAt:string,route:"responses",
+  workerVersion:string|null}`. It MUST NOT contain grant credentials, service
+  secrets, signed context, nonce, client key, request body, prompt, or upstream
+  credential. Worker validates it before constructing OCTG public headers.
+
+Deno ingress rejection/failure responses use HTTP status mapped from the
+`RelayErrorCode` table below, `Content-Type: application/json`, and the exact
+`RelayInternalErrorV1` body; successful upstream responses preserve upstream
+status/body/allowed headers and carry `X-OCTG-Relay-Response-Meta`. A decision
+callback with a policy/quota rejection is still HTTP 200 with
+`RelayDecisionV1.kind="reject"`; Deno translates that result to the specified
+public OCTG status/code envelope, never 503. Callback transport status is 200
+for valid callback envelopes (including business rejection), 400 for malformed
+envelope/context, 401 for invalid internal service auth, 405 for a non-POST
+method, 409 for replay or terminal conflict, 413 for body-size violation, and
+500 for internal failure.
+Deno treats any non-200 callback transport response as internal relay failure;
+Worker translates internal auth/transport failures to public `500
+internal_error`.
+
+### Credentials, authorization and DO routing
+
+`RelayGrantCredentialV1` uses the compact token representation above, with
+grant purpose, and UTF-8 canonical JSON (RFC 8785) containing exactly these
+claims: `version:1`, `audience:"octg-worker-relay"`,
+`environment`, `route:"responses"`, `requestId`, `grantId`, `nonce`, `clientId`,
+`idempotencyKeyHash`, `model`, `pool`, `admissionUtcDay`, `leaseGeneration`,
+`issuedAtMs`, `expiresAtMs`. No `kid` or algorithm negotiation is accepted.
+`model`, `pool`, and `admissionUtcDay` are set by Worker from authoritative
+policy/quota resolution after Deno submits request metadata; they are not copied
+from Deno metadata or the ingress context. Keys are environment-unique, at
+least 32 random bytes, and compared using constant-time verification. Plan interfaces are exactly
+`signRelayGrantCredential(claims: RelayGrantCredentialV1, key: Uint8Array): Promise<string>` and
+`verifyRelayGrantCredential(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number):
+Promise<RelayGrantCredentialV1 | undefined>`; context signing uses the same
+canonical serialization and HMAC primitive with its exact context purpose
+defined above. `RelayEnvironment` is exactly `"preview" | "production"`.
+
+The grant credential is minted only after durable authorization. It expires at
+`issuedAtMs + 3,900,000` (one-hour maximum request duration plus five-minute
+callback grace); the grant's authorization expiry is `issuedAtMs +
+3,600,000`. No decision envelope controls TTL. Every callback verifies all
+claims against the durable grant, request entry, and environment. Worker maps
+`pool` to `STANDARD|MINI` and `admissionUtcDay` to the canonical name
+`quota:{POOL}:{YYYY-MM-DD}`, then resolves that name in the environment's own
+`QUOTA_CONTROLLER` namespace. Deno cannot nominate a namespace, name, or object
+ID. This guarantees late callbacks across UTC midnight use the admission day's
+same DO.
+
+The DO grant record stores the immutable credential claim bindings,
+`authorizationExpiresAtMs` (issuedAt + 3,600,000), state, terminal
+report/fingerprint, and retention deadline. The credential's `expiresAtMs`
+remains issuedAt + 3,900,000. The state union is
+`authorized|attempted|settled|released|uncertain|reconciled_consumed|reconciled_unused`.
+Only `authorized -> attempted` permits upstream fetch. Activation atomically
+checks reservation exists and is unresolved, grant is authorized and unexpired,
+all immutable bindings match, and the in-flight lease exists and has the exact
+generation. `attempted` cannot activate again. A credential cannot mutate
+quota after reconciliation or terminalization.
+
+Terminal transitions are exact: `authorized -> released` only for a proven
+pre-activation failure; `authorized -> uncertain` for an unconfirmed activation
+result (retain reservation, remove lease); `attempted -> settled|uncertain`;
+`uncertain -> settled|uncertain` (a trustworthy late usage report may settle an
+uncertain quota entry); no state permits release after activation may have
+occurred. An exact terminal report replay returns the saved result, while a
+conflicting report fails `grant_terminalized`. Renewal is accepted only in
+`attempted` before authorization expiry. If an attempted grant is observed
+expired during renewal or terminal processing, atomically transition it to
+`uncertain` and release only the concurrency lease; keep its reservation. A
+credential-valid trustworthy terminal report may then settle that uncertain
+entry during the five-minute credential grace. After credential expiry, all
+callbacks are rejected.
+
+### Stable failures and public mapping
+
+`RelayErrorCode` is exactly:
+`invalid_request | invalid_context | unauthorized_service | environment_mismatch |
+client_disabled | model_requires_paid | model_not_allowed | request_too_large |
+insufficient_quota | worker_concurrency_exceeded | duplicate_idempotency_key | grant_not_found |
+grant_expired | grant_replayed | grant_terminalized | lease_lost | upstream_error |
+upstream_timeout | upstream_invalid_response | internal_error`.
+
+Internal error envelope is exactly
+`{version:1,error:{code:RelayErrorCode}}`; it contains no
+free-form message or sensitive detail. Mapping at the Worker public
+`/v1/responses` boundary preserves existing OCTG status/code pairs: validation
+`400 invalid_request`; external client authentication performed before relay
+`401 invalid_api_key`; disabled client `403 client_disabled`;
+`model_requires_paid` and `model_not_allowed` are `403`
+with their existing codes; request size is `413 request_too_large`; quota is
+`429 insufficient_quota`; concurrency is `429 worker_concurrency_exceeded`;
+idempotency collision is `409 duplicate_idempotency_key`; all internal auth,
+configuration, callback, lease-lost, malformed relay, upstream transport, and
+unknown-reserve failures map to `500 internal_error` unless public headers have
+already been sent. Upstream non-2xx status/body remains the existing public
+upstream response contract, not an internal relay error. Deno never maps policy
+or quota decisions to 503. Internal callback failures use HTTP 500; Worker maps
+them to public `500 internal_error`.
+Once response headers are sent, terminate the stream on later failure; never
+replace it with a new error response.
+
+### Atomic quota lifecycle and reconciliation
+
+Extract `applyQuotaLifecycleTransition(storage, requestId, transition)` as a
+transaction-scoped helper in `quota-lifecycle.ts`. It owns loading the request
+entry, pool counters, unresolved counters, applying the named settle,
+mark-uncertain, release, or reconcile mutation, validating legal source states,
+and writing all affected records. It MUST NOT open its own transaction.
+`QuotaLifecycle.settle`, `markUncertain`, `release`, and `reconcileRequest` each
+call it inside their existing `ctx.storage.transaction()`. `finishRelay()`
+calls the same helper from one `ctx.storage.transaction()` that also checks and
+writes RelayGrant and lease state. Consumes: storage, immutable DO identity,
+request ID, transition and bounded terminal data. Produces: canonical quota
+entry/pool/unresolved state plus RelayGrant terminal state, committed together
+or not at all. No read-then-write split across transactions is permitted.
+
+Reconciliation in `consumed` or `unused` disposition terminalizes any grant in
+the same transaction to `reconciled_consumed` or `reconciled_unused`, stores the
+reconciliation disposition as its terminal fingerprint, and removes/releases
+the lease. Late terminal reports, including an otherwise identical report, are
+rejected `grant_terminalized`; conflicting reports are rejected identically
+and cannot alter quota. Renewal and activation after reconciliation are
+rejected `grant_terminalized`. An expired `authorized` grant can never activate
+and is transitioned to `released` with reservation and lease release in one
+transaction. An expired `attempted` grant is transitioned to `uncertain`,
+retaining reservation and releasing only its concurrency lease. A terminal
+grant returns its stored result only for the exact same terminal report
+fingerprint while its credential remains valid; a different report is
+`grant_terminalized`. Keep grant records for 45 days after `admissionUtcDay`
+ends; cleanup is DO-local and may delete only terminal records after that
+retention period. A test MUST prove that a pre-reconciliation credential
+cannot cause any quota transition after reconciliation.
+
+## Traceability and rollout gate
+
+The Plan tasks map every requirement as follows: CPU gate and evidence are the
+precondition to every task; Task 1 owns all wire types/bounds/errors; Task 2
+owns grant state, transaction seam, lease and reconciliation; Task 3 owns
+credential primitives and environment validation; Task 4 owns Worker
+callbacks, authorization and same-DO routing; Task 5 owns Deno ingress,
+configuration and upstream forwarding; Task 6 owns renewal, usage and terminal
+reporting; Task 7 owns public Responses integration/metadata/status mapping;
+Task 8 owns cross-runtime fault tests, config/deployment/docs/rollback and
+rollout verification. Component ownership, credential ownership, environments,
+routes, names and error semantics MUST match the Plan verbatim.
+
+Canary remains a post-implementation rollout gate and does not replace the
+pre-implementation CPU gate. Rollout is blocked until both gates pass.
 
 ## Design risks to validate before implementation
 

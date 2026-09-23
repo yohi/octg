@@ -12,6 +12,8 @@
 
 **Spec:** [Free-Worker Responses Relay Through Deno](../specs/2026-09-23-free-worker-deno-relay-design.md).
 
+**Execution status: BLOCKED pending CPU feasibility evidence.** The Pre-implementation CPU Feasibility Gate in the Design is a hard prerequisite to every task below. The repository currently records no passing evidence. Do not start Task 1–8 until the evidence and explicit PASS decision are recorded; missing evidence is not a pass.
+
 ## Global Constraints
 
 - Cloudflare Workers Paid is not an option; the per-HTTP-invocation Free CPU allowance is 10 ms.
@@ -22,6 +24,7 @@
 - Never log client keys, signing or service secrets, nonces, prompts, request/response bodies or Gateway B credentials.
 - Avoid touching the existing untracked `deno.lock` unless ownership is explicitly established.
 - Git commits, remote deployment and production mutations require separate explicit authorization; task completion does not authorize them.
+- Every Task completion boundary is local and does not itself authorize a Git commit. Commit only after explicit authorization for that commit; never push as part of a task without explicit push authorization.
 
 ---
 
@@ -29,15 +32,17 @@
 
 | File | Responsibility |
 | --- | --- |
-| `packages/shared/src/relay.ts` | Wire envelopes, strict parsers and size bounds for context, decision, activation, renewal, terminal report. |
+| `packages/shared/src/relay.ts` | Exact v1 wire types, stable error union, strict parsers and byte bounds from the Design's Normative relay contract. |
 | `packages/shared/src/index.ts` | Export the relay contract. |
-| `apps/gateway-worker/src/relay-auth.ts` | Sign and verify contexts; authenticate Deno callbacks without leaking tokens. |
+| `packages/shared/src/relay-credential.ts` | Shared canonical JSON, compact HMAC token sign/verify and bearer-token comparison primitives used by both runtimes. |
+| `apps/gateway-worker/src/relay-auth.ts` | Worker-facing credential adapters and relay config validation; delegates cryptographic primitives to shared package. |
 | `apps/gateway-worker/src/relay-callback.ts` | Bounded callback routing and DO/policy orchestration; no client body processing. |
 | `apps/gateway-worker/src/relay-client.ts` | One-pass client-body relay and Deno response mapping. |
 | `apps/gateway-worker/src/index.ts` | Register callback before public routes; extend `Env` with isolated relay configuration. |
 | `apps/gateway-worker/src/proxy.ts` | Opt-in Responses routing before legacy prepare branch; leave Chat and legacy intact. |
-| `durable-objects/quota-controller/src/relay-grant.ts` | Transactional, one-use grant and terminal-state logic. |
-| `durable-objects/quota-controller/src/quota-controller.ts` | Export grant operations and coordinate with existing reservation and lease. |
+| `durable-objects/quota-controller/src/relay-grant.ts` | Durable grant claims, one-use transitions, exact-repeat terminal replay and retention cleanup. |
+| `durable-objects/quota-controller/src/quota-controller.ts` | Grant operations and server-side pool/day DO identity; no Deno-supplied DO identifier. |
+| `durable-objects/quota-controller/src/quota-lifecycle.ts` | `applyQuotaLifecycleTransition(storage, requestId, transition)` transaction-scoped mutation helper used by legacy lifecycle and relay. |
 | `apps/deno-tokenizer/src/relay.ts` | Bounded input preparation, decision/activation callbacks and Gateway B request. |
 | `apps/deno-tokenizer/src/relay-usage.ts` | Bounded SSE/JSON usage extraction without changing client bytes. |
 | `apps/deno-tokenizer/src/http.ts`, `src/config.ts`, `src/main.ts` | Versioned endpoint and environment-specific configuration. |
@@ -45,13 +50,28 @@
 | `.github/workflows/deploy-deno-tokenizer.yml`, `.github/workflows/deploy-production.yml`, `scripts/production-deno-config.mjs` | Same-revision, Deno-first rollout and safe configuration checks. |
 | `SPEC.md`, `docs/deno-tokenizer.md`, `docs/operations.md`, `docs/configuration.md` | Normative contract, operational rollout, configuration ownership. |
 
-Fix wire names in Task 1; later tasks consume those names without renaming them. Keep each new TS module focused and below the repository's 250-LOC guidance where feasible. Existing oversized modules should gain only routing glue, not another full state machine.
+The Design's **Normative relay contract (v1)** is authoritative for every name, field, limit, state, mapping and ownership rule below. Task 1 reproduces that complete normative contract as shared wire types and parsers; later tasks consume those names without renaming them. Keep each new TS module focused and below the repository's 250-LOC guidance where feasible. Existing oversized modules should gain only routing glue, not another full state machine.
+
+## Blocking prerequisite: Pre-implementation CPU Feasibility Gate
+
+Before any task, run the Free-plan runtime spike exactly as defined in the Design. Evidence must cover one-pass authenticated ingress at 123 KiB, 174 KiB, approximately 700 KiB and 1 MiB, both stream modes, and representative decision/activation/renewal/terminal callbacks. Each payload bucket and callback class needs at least 100 invocations. Record per-invocation min/p50/p90/p95/p99/max CPU, sample count, tail margin against 10 ms, and `exceededCpu` count. PASS requires zero `exceededCpu`, p99 at most 8 ms, max below 10 ms, and no omitted bucket/class. A failed ingress requires ingress redesign; a failed callback class requires callback responsibility redesign. Re-run the full gate after redesign. Until evidence and explicit PASS are recorded, status remains `BLOCKED pending CPU feasibility evidence`, Tasks 1–8 remain not-started, and no implementation commit is permitted.
+
+## Task dependencies and TDD/commit order
+
+The CPU gate precedes every task. After it passes: Task 1 precedes Tasks 2 and 3; Tasks 2 and 3 both precede Task 4; Tasks 1, 3 and 4 precede Task 5; Task 5 precedes Task 6; Tasks 1, 3, 4, 5 and 6 precede Task 7; Tasks 1–7 precede Task 8. Tasks 2 and 3 may proceed independently after Task 1. Within each task, follow this exact sequence: (1) RED command, (2) expected RED, (3) minimum GREEN implementation, (4) GREEN command, (5) expected GREEN, (6) only then necessary refactor and rerun GREEN, (7) completion boundary, (8) commit message usable only if the user explicitly authorized that commit. No task instructs push.
 
 ## Task 1: Define and test the bounded relay contract
 
 **Files:** Create `packages/shared/src/relay.ts`, `packages/shared/test/relay.test.ts`; modify `packages/shared/src/index.ts`.
 
-**Interfaces:** `RelayContextV1 = { version: 1; environment: "production" | "preview"; audience: "octg-deno-relay"; requestId: string; clientId: string; idempotencyKey?: string; nonce: string; issuedAtMs: number; expiresAtMs: number }`. `RelayMetadataV1 = { model: string; estimatedInputTokens: number; maxOutputTokens: number; inputBytes: number; rawBodyBytes: number; isToolUse: boolean; stream: boolean }`. `RelayDecisionV1 = { kind: "reject"; status: number; code: string } | { kind: "allow"; maxOutputTokens: number; generation: string; grantId: string; grantCredential: string; pool: "standard" | "mini"; cacheEnabled: boolean; quota: QuotaSnapshot }`. `RelayTerminalV1 = { kind: "settle"; totalTokens: number; inputTokens?: number; outputTokens?: number } | { kind: "uncertain" } | { kind: "release" }`. Expose `parseRelayContext`, `parseRelayMetadata`, `parseRelayDecision`, `parseRelayTerminal` with signatures `(value: unknown) => RespectiveType | undefined`; reject extra fields, invalid numeric ranges and oversized strings. Use the existing `QuotaSnapshot` export rather than a second quota shape; `grantCredential` is secret and never logged.
+**Consumes:** Design Normative relay contract, exact v1 routes/headers/envelopes/error mapping.
+**Produces:** `RelayEnvironment`, `RelayGrantState`, `RelayContextV1`, `RelayGrantCredentialV1`, `RelayRequestMetaV1`, `RelayQuotaSnapshotV1`, `RelayDecisionV1`, `RelayActivationV1`, `RelayRenewalV1`, `RelayTerminalV1`, `RelayResponseMetaV1`, `RelayErrorCode`, `RelayInternalErrorV1`, `RelayProtocolError`; `parseRelayJsonBody(bytes: Uint8Array, maxBytes: number): unknown` plus strict parsers for each body envelope. Grant credential is carried only in `X-OCTG-Relay-Grant`, not in the allow envelope.
+
+**Exact contract to encode:** `RelayContextV1` has the Design's exact claims and ingress lifetime; `RelayRequestMetaV1` fields and limits are exactly the Design's decision request. Decision reject/allow, activation, renewal, terminal, `RelayResponseMetaV1`, `RelayErrorCode`, internal error envelope, method/content-type rules, exact header names, and ingress/callback/header byte limits MUST match the Normative relay contract verbatim. `parseRelayJsonBody` enforces the byte limit, fatal UTF-8 and duplicate-key rejection before each strict envelope parser; all parsers reject unknown fields, invalid ranges, and over-limit UTF-8 byte lengths. `RelayResponseMetaV1` contains no credentials or request content. Do not introduce alternate shapes or aliases.
+
+Contract checklist for this task: POST only; JSON content type; Worker ingress `Authorization: Bearer <ingress token>` plus `X-OCTG-Relay-Context`, and optional unchanged `Idempotency-Key` <=255 UTF-8 bytes; callbacks `Authorization: Bearer <service token>` and grant callbacks also `X-OCTG-Relay-Grant`; response metadata `X-OCTG-Relay-Response-Meta` containing unpadded base64url JSON. Ingress body <=1,048,576 bytes; context/grant header <=4,096 ASCII bytes; callback request/response body <=8,192 bytes; metadata JSON <=2,048 decoded bytes and metadata header <=2,800 ASCII bytes; bearer Authorization header <=263 ASCII bytes; service token 32–256 printable ASCII bytes; HMAC key base64url decodes to exactly 32 bytes. Decision request, reject/allow response, activation, renewal, terminal request/response, metadata response, internal error, every named error code and every public status mapping are exactly the shapes/tables in Design sections "Callback and response envelopes" and "Stable failures and public mapping". No extra headers, envelope fields or status remapping may be invented.
+
+Exact callback routes are `POST /internal/relay/v1/decision`, `/activation`, `/renewal`, `/terminal`; Deno ingress is `POST /relay/v1/responses`. Context claims are exactly version/audience/environment/route/requestId/clientId/idempotencyKeyHash/nonce/issuedAtMs/expiresAtMs. Grant claims add grantId/model/pool/admissionUtcDay/leaseGeneration and have the grant audience. Decision request is `{version:1,metadata:RelayRequestMetaV1}`; decision response is either `{version:1,kind:"reject",code,status}` or `{version:1,kind:"allow",grantId,leaseGeneration,maxOutputTokens,cacheEnabled,quota}` with the grant only in `X-OCTG-Relay-Grant`; reject status must match the exact code mapping. Activation, renewal and terminal envelopes and `RelayResponseMetaV1` fields are copied exactly from the Design. Stable errors are the complete `RelayErrorCode` union; internal failures use `{version:1,error:{code}}`. Public mapping preserves `400 invalid_request`, external-client `401 invalid_api_key`, `403 client_disabled|model_requires_paid|model_not_allowed`, `409 duplicate_idempotency_key`, `413 request_too_large`, `429 insufficient_quota|worker_concurrency_exceeded`, and internal relay failures `500 internal_error`. Deno config keys are exactly `OCTG_RELAY_ENVIRONMENT`, `OCTG_RELAY_CALLBACK_ORIGIN`, `OCTG_RELAY_SERVICE_AUTH_TOKEN`, `OCTG_RELAY_INGRESS_AUTH_TOKEN`, `OCTG_RELAY_CONTEXT_HMAC_KEY`, `OCTG_RELAY_GATEWAY_B_BASE_URL`, `OCTG_RELAY_GATEWAY_B_TOKEN`, `MAX_INPUT_BYTES`, `OCTG_RELAY_MAX_REQUEST_DURATION_MS`, `OCTG_RELAY_LEASE_TTL_MS`, `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS`; Worker keys and fixed values/partial configuration semantics are exactly those in the Design. `OCTG_RELAY_ENABLED=true` requires complete valid Worker config; `false` or absent disables relay; any other value is invalid. Lease TTL/cadence are fixed config (120,000/30,000 ms), never decision fields.
 
 - [ ] Add failing tests for each accepted envelope and for version mismatch, extra keys, negative or non-integer usage, oversized metadata, wrong environment and malformed grant. Example: `expect(parseRelayMetadata({ model: "openai/test", estimatedInputTokens: -1 })).toBeUndefined()`.
 - [ ] Run `npm test -w packages/shared -- relay.test.ts`; expect the missing parser test to fail.
@@ -90,16 +110,21 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   }
   ```
 - [ ] Run `npm test -w packages/shared -- relay.test.ts` and `npm run typecheck -w packages/shared`; expect pass.
+- [ ] **Completion boundary:** Shared v1 contract/types/parsers match the Design exactly; focused tests and typecheck pass; no Worker, Deno, DO or workflow behavior is implemented in this task.
+- [ ] **Commit only if explicitly authorized:** `feat: relayのwire contractを定義`
 
 ## Task 2: Make grants durable, single-use and terminal transitions atomic
 
 **Files:** Create `durable-objects/quota-controller/src/relay-grant.ts`, `durable-objects/quota-controller/test/relay-grant.test.ts`; modify `durable-objects/quota-controller/src/quota-controller.ts`.
 
-**Interfaces:** `type RelayGrant = { grantId: string; generation: string; state: "authorized" | "attempted" | "settled" | "released" | "uncertain"; expiresAtMs: number; terminal?: RelayTerminalV1 }`. `authorizeRelay(requestId, grantId, generation, expiresAtMs): Promise<{ ok: boolean }>` (reserved request and matching live lease required); `activateRelay(requestId, grantId, generation): Promise<{ ok: boolean }>` (one atomic `authorized -> attempted` transition); `finishRelay(requestId, grantId, generation, report: RelayTerminalV1): Promise<{ ok: boolean; state: "settled" | "released" | "uncertain" }>` (idempotent exact-repeat only). Store grant state and terminal report alongside the reservation in DO storage. `release` is valid only while grant is definitely `authorized`; after `attempted`, only `settle` or `uncertain` is accepted. Persist expiry; expired `authorized` grants cannot activate and remain visible until explicitly released or reconciled.
+**Consumes:** Task 1 wire unions; existing request entry, pool state, unresolved counters and in-flight lease store.
+**Produces:** `RelayGrant` with every immutable credential claim plus exact state union from Design; `authorizeRelay`, `activateRelay`, `finishRelay`; `applyQuotaLifecycleTransition(storage, requestId, transition)` in `quota-lifecycle.ts`.
+
+`applyQuotaLifecycleTransition` is the only quota lifecycle mutation seam. It receives an open transaction-scoped storage handle, validates legal source state, mutates request entry/pool/unresolved counters, and returns the canonical outcome; it never opens a transaction. Existing `QuotaLifecycle.settle`, `markUncertain`, `release`, and `reconcileRequest` must call it from their own `ctx.storage.transaction()`. `finishRelay()` performs grant validation, the helper call, lease transition, and grant terminal write inside the same `ctx.storage.transaction()`. Activation in one transaction verifies reservation exists and remains unresolved, grant is authorized, all immutable bindings match, grant is unexpired, and live lease generation matches. This requires modifying `quota-lifecycle.ts`, `relay-grant.ts`, and `quota-controller.ts`; no read-then-mutate split is allowed.
 
 - [ ] Write a failing DO test that reserves, acquires a lease, authorizes a grant, calls `activateRelay` concurrently twice, and asserts exactly one `ok: true`; include wrong generation, missing reservation, expired grant, release-before-activation, post-activation release rejection, duplicate identical terminal and conflicting terminal cases. Example: `expect((await Promise.all([stub.activateRelay(id, grant, gen), stub.activateRelay(id, grant, gen)])).filter(x => x.ok)).toHaveLength(1)`.
 - [ ] Run `npm test -w apps/gateway-worker -- relay-grant.test.ts`; the gateway Vitest config includes quota-controller tests. Expect missing methods to fail.
-- [ ] Implement storage transactions and call existing `QuotaLifecycle` operations through a state transition that cannot race with grant state. Avoid a separate non-transactional `get -> settle` sequence; refactor the lifecycle to share a storage transaction if necessary. Couple lease-generation validation to the same transaction.
+- [ ] Implement `applyQuotaLifecycleTransition` and route existing `settle`, `markUncertain`, `release`, `reconcileRequest` through it. Implement `finishRelay` and activation as single `ctx.storage.transaction()` operations using the same storage handle. Legal terminal transitions are exactly those in Design: authorized release only for proven pre-activation failure; authorized uncertain for ambiguous activation; attempted settle/uncertain; uncertain settle/uncertain; never release after activation may have occurred. Renewal is only valid for attempted grants before authorization expiry. Reconciliation atomically terminalizes any grant as `reconciled_consumed` or `reconciled_unused`, records disposition, and removes its lease. Identical terminal report retries return saved result only for callback-terminal grants; after reconciliation all terminal reports, renewal and activation return `grant_terminalized`. Expired authorized grants atomically release reservation/lease; expired attempted grants become uncertain and release only the lease; a trustworthy terminal usage report may settle that uncertain entry during the five-minute credential grace. Keep terminal grants 45 days after admission UTC day ends; cleanup deletes only expired terminal grant records.
 
   ```ts
   return this.ctx.storage.transaction(async (storage) => {
@@ -112,16 +137,18 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   });
   ```
 - [ ] Run `npm test -w apps/gateway-worker -- relay-grant.test.ts` and `npm run typecheck -w durable-objects/quota-controller`; expect pass.
+- [ ] **Completion boundary:** Tests prove transactional quota/grant/lease atomicity, every source/terminal state rule, reconciliation terminalization and stale-credential non-mutation; focused tests/typecheck pass.
+- [ ] **Commit only if explicitly authorized:** `feat: quota DOでrelay grantを原子的に管理`
 
 ## Task 3: Authenticate relay context and internal callbacks
 
-**Files:** Create `apps/gateway-worker/src/relay-auth.ts`, `apps/gateway-worker/test/relay-auth.test.ts`; modify `apps/gateway-worker/src/index.ts` for optional relay environment bindings.
+**Files:** Create `packages/shared/src/relay-credential.ts`, `packages/shared/test/relay-credential.test.ts`, `apps/gateway-worker/src/relay-auth.ts`, `apps/gateway-worker/test/relay-auth.test.ts`; modify `packages/shared/src/index.ts` and `apps/gateway-worker/src/index.ts` for exports/environment bindings.
 
-**Interfaces:** `signRelayContext(context: RelayContextV1, key: string): Promise<string>`; `verifyRelayContext(token: string, key: string, environment: RelayContextV1["environment"], nowMs: number): Promise<RelayContextV1 | undefined>`; `verifyRelayServiceAuth(header: string | null, secret: string): Promise<boolean>`. Use WebCrypto HMAC-SHA256, constant-time comparison for service tokens and a bounded serialized context, separate secrets for context signing and callback service authentication. Configure `OCTG_RELAY_ENVIRONMENT`, `OCTG_RELAY_CONTEXT_KEY`, `OCTG_RELAY_SERVICE_TOKEN`, `DENO_RELAY_ENDPOINT`, `OCTG_RELAY_ENABLED`; absent or partial configuration disables relay and must not affect legacy route. Validate HTTPS fixed endpoint and reject credential-bearing URLs. Mint a distinct grant-bound callback credential at successful decision; unlike the ingress context it remains valid through the configured maximum request duration. After terminal state it only permits the DO to return an identical stored terminal result until expiry, never another transition.
+**Interfaces:** `packages/shared/src/relay-credential.ts` exports the exact sign/verify context and grant credential interfaces specified in the Design plus constant-time bearer verification. `apps/gateway-worker/src/relay-auth.ts` exports `resolveRelayConfig(env)` and Worker adapters. Use canonical JSON, compact base64url, HMAC-SHA-256 with purpose-separated inputs and constant-time MAC comparison, exactly as the Design defines. This task implements authentication/credential primitives and pure config validation only. Deno imports these shared primitives in Task 5 to validate ingress context before parsing/forwarding. Exact Worker/Deno env keys, partial-config behavior, fixed HTTPS origins and ingress/grant TTLs are specified in the Design. Callback behavior and grant state transitions belong to Tasks 2 and 4, not this task.
 
-- [ ] Write failing tests for valid production context and wrong audience, expired/future timestamps, wrong signature, preview replay in production, missing/partial config and non-HTTPS endpoints. Verify that a terminal callback can use the grant credential after the ingress context expires and that an identical terminal retry returns the stored result, but renewal or a conflicting report fails. Example: `expect(await verifyRelayContext(previewToken, prodKey, "production", now)).toBeUndefined()`.
+- [ ] Write failing unit tests only for credential/context sign+verify primitives and pure config validation: claims round-trip; wrong version/audience/environment/purpose/signature; expired/future times; malformed/non-canonical/oversized token; missing/partial env keys; wrong endpoint scheme. Do not test callback routes, activation, terminal replay, or renewal behavior here. Example: `expect(await verifyRelayGrantCredential(previewToken, prodKey, "production", now)).toBeUndefined()`.
 - [ ] Run `npm test -w apps/gateway-worker -- relay-auth.test.ts`; expect missing exports.
-- [ ] Implement signing/verifying and `resolveRelayConfig(env)` with bounded TTL; ensure errors expose stable categories only. The Worker should not leak an internal token or signature in log fields or response bodies.
+- [ ] Implement signing/verifying and `resolveRelayConfig(env)` with exact keys and fixed TTL policy from the Design; partial/invalid enabled config returns invalid, not disabled. Never leak token, payload or signature.
 
   ```ts
   const signature = await crypto.subtle.sign("HMAC", signingKey, encodedContext);
@@ -129,12 +156,14 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   // Reject an ingress context when expiresAtMs <= nowMs or environment differs.
   ```
 - [ ] Run focused test and `npm run typecheck -w apps/gateway-worker`; expect pass.
+- [ ] **Completion boundary:** Only crypto/context/config primitives exist and their unit tests/typecheck pass; no callback routing or grant lifecycle behavior is included.
+- [ ] **Commit only if explicitly authorized:** `feat: relay credentialの署名検証を追加`
 
 ## Task 4: Add Worker decision, activation, renewal and terminal callbacks
 
 **Files:** Create `apps/gateway-worker/src/relay-callback.ts`, `apps/gateway-worker/test/relay-callback.test.ts`; modify `apps/gateway-worker/src/index.ts`, `apps/gateway-worker/src/policy.ts` only if a reusable policy helper is required.
 
-**Interfaces:** `handleRelayCallback(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>` handles `POST /internal/relay/v1/decision`, `/activation`, `/renewal`, `/terminal`; each request carries authenticated service header and bounded JSON envelopes. Decision verifies the short-lived signed ingress context; subsequent calls verify the separate grant-bound credential and the stored DO grant. Decision uses existing `classifyModel`, `loadRegistry`, `loadPolicy`, `resolveTokenBudget`, `reserveFailClosed`, `acquireInFlight` and `authorizeRelay`, using the UTC day bound when the request ID is first admitted. Activation/renewal/terminal address the same DO and stored grant; no callback accepts arbitrary DO name or supplied upstream URL. Maintain a durable nonce-to-request binding before accepting a second decision callback; exact repeats return a stored decision only before activation, conflicting repeats reject.
+**Interfaces:** `handleRelayCallback(request, env, ctx)` handles only exact POST callback routes/envelopes from the Design, enforcing the 8,192-byte bound, service auth, content type and error envelope. Decision verifies context and uses existing policy/model/quota checks; it resolves the DO from signed `pool + admissionUtcDay` in the bound environment namespace. Activation/renewal/terminal verify `X-OCTG-Relay-Grant` and compare every claim to the stored grant. No callback accepts a supplied DO identifier. Duplicate decisions are idempotent only for byte-identical context+metadata before activation; conflicting duplicates reject. Policy/quota/validation rejections preserve exact code and mapped status; they are never flattened to 503.
 
 - [ ] Write failing tests for callback auth, wrong method/path, oversized JSON, wrong environment, model/tool rejection, quota rejection, unknown reserve, admission rejection, duplicate decision and lost grant ACK; assert no `fetch` to Gateway B before successful activation. Example: `expect(await callback(duplicateDecision)).toMatchObject({ status: 409 })` for a conflicting nonce/metadata.
 - [ ] Run `npm test -w apps/gateway-worker -- relay-callback.test.ts`; expect the decision route to return 404.
@@ -147,39 +176,48 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   );
   if (reserved.kind === "unknown") {
     await stub.markReserveOutcomeUnknown(context.requestId);
-    return new Response(null, { status: 503 });
+    return relayInternalError(500, "internal_error");
   }
   // On reserved.ok, acquireInFlight -> authorizeRelay; otherwise reject.
   // Never send an allow decision before all three operations have succeeded.
   ```
 - [ ] Run focused tests and `npm run typecheck -w apps/gateway-worker`; expect pass.
+- [ ] **Completion boundary:** Four callbacks, strict auth/schema/size/error contracts and server-derived same-DO routing are covered by tests; Deno does not yet call them.
+- [ ] **Commit only if explicitly authorized:** `feat: Worker relay callbackを追加`
 
 ## Task 5: Build Deno relay and upstream request with explicit activation
 
-**Files:** Create `apps/deno-tokenizer/src/relay.ts`, `apps/deno-tokenizer/test/relay.test.ts`; modify `apps/deno-tokenizer/src/http.ts`, `src/config.ts`, `src/main.ts`. Keep `/prepare` behavior unchanged.
+**Files:** Create `apps/deno-tokenizer/src/relay.ts`, `apps/deno-tokenizer/src/relay-auth.ts`, `apps/deno-tokenizer/test/relay.test.ts`; modify `apps/deno-tokenizer/src/http.ts`, `src/config.ts`, `src/main.ts`, and Deno workspace dependency declarations to consume `@octg/shared` credential primitives. Keep `/prepare` behavior unchanged.
 
-**Interfaces:** `handleRelay(request: Request, config: RelayServiceConfig, encoder: ExactEncoder, fetchImpl: typeof fetch): Promise<Response>` handles `POST /relay/v1/responses`. Define `activateOnce(grantId: string, credential: string): Promise<{ ok: boolean }>` and `forwardToGatewayB(body: Record<string, unknown>, decision: Extract<RelayDecisionV1, { kind: "allow" }>): Promise<Response>` as request-local helpers in `relay.ts`. Config contains Deno's environment-specific callback URL, service auth token, Gateway B base URL ending `/openai`, Gateway B API token and existing `MAX_INPUT_BYTES`. Reject partial config at startup; Deno endpoint unavailable until valid. The signed Worker context is forwarded to callbacks without logging it. Deno builds upstream JSON by calling existing `normalizeResponsesUpstreamBody(parsed)` and replacing `max_output_tokens` with the numeric allowed value; Gateway B headers match `callUpstream` in `apps/gateway-worker/src/upstream.ts`, including `cf-aig-collect-log-payload: false`, `cf-aig-max-attempts: 1`, cache policy, idempotency and metadata set only from verified decision/context. Do not reuse client `Authorization`.
+**Interfaces:** `handleRelay` accepts only `POST /relay/v1/responses`, exact JSON media type, bearer ingress auth and context header; it enforces 1,048,576 raw bytes and verifies service auth plus signed context with the shared primitives before parsing/forwarding. Deno configuration is the exact required key set in the Design; missing/partial/invalid settings fail startup and do not disable checks. It calls `POST /decision`, then `POST /activation` with exact envelopes. Grant credential travels only in `X-OCTG-Relay-Grant`. Gateway B URL/token are fixed Deno config, never request-supplied. Upstream JSON uses the existing normalizer and allowed numeric output clamp; headers follow existing Gateway B contract and never reuse client Authorization. Decision rejection is returned as its exact internal error envelope/status for Worker mapping; it is never rewritten to 503.
 
-- [ ] Add failing tests: malformed body has no callback, a decision reject has no activation or upstream request, activation lost/denied never calls upstream, a successful activation calls Gateway B exactly once with numeric clamp and fixed URL, `fetch` failure after activation reports uncertain, and failed callback cannot cause fallback. Example: `assertEquals(upstreamCalls, 0)` after an activation timeout.
+`activateOnce(grantId, leaseGeneration, credential)` returns the discriminated result `activated | denied(code) | unknown`. On definitive denial, Deno sends terminal `release` once because it knows activation did not happen. On timeout, malformed response, or lost ACK, Deno sends terminal `uncertain` best effort, does not retry activation, and never calls Gateway B. A successful activation is followed by exactly one Gateway B request.
+
+- [ ] Add failing tests: invalid ingress auth/context/media type/method/size has no callback; validation/model/quota/concurrency rejection preserves exact status/code and performs no activation or upstream request; activation lost/denied never calls upstream; successful activation calls fixed Gateway B exactly once with numeric clamp; fetch failure after activation reports uncertain; no failed callback causes fallback. Assert quota rejection remains `429 insufficient_quota`, not 503, with zero upstream calls.
 - [ ] Run `npm test -w apps/deno-tokenizer`; expect the new relay route tests to fail.
-- [ ] Implement bounded body preparation using the existing `readBoundedRawBody`, normalizer and encoder, extracting shared helpers from `http.ts` rather than duplicating parser logic. Send bounded metadata, require a valid allow decision, then activate once before forwarding. Treat all ambiguous post-activation outcomes as uncertain.
+- [ ] Implement bounded preparation using existing reader/normalizer/encoder; send exact decision metadata, require valid allow decision and grant header, then activate once before forwarding. Preserve decision rejection envelope/status/code for Worker translation. Treat every ambiguous post-activation outcome as uncertain.
 
   ```ts
   const decision = parseRelayDecision(await decisionResponse.json());
-  if (decision?.kind !== "allow") return new Response(null, { status: 503 });
-  const activation = await activateOnce(decision.grantId, decision.grantCredential);
-  if (!activation.ok) return new Response(null, { status: 503 });
+  if (decision?.kind === "reject") return relayErrorResponse(decision.status, decision.code);
+  if (decision?.kind !== "allow") return relayErrorResponse(500, "internal_error");
+  const grantCredential = decisionResponse.headers.get("X-OCTG-Relay-Grant");
+  if (grantCredential === null) return relayErrorResponse(500, "internal_error");
+  const activation = await activateOnce(decision.grantId, grantCredential);
+  if (!activation.ok) return relayErrorResponse(500, activation.code ?? "grant_replayed");
   const body = normalizeResponsesUpstreamBody(parsedBody);
   body.max_output_tokens = decision.maxOutputTokens;
   return forwardToGatewayB(body, decision);
   ```
 - [ ] Run `npm run typecheck -w apps/deno-tokenizer` and `npm test -w apps/deno-tokenizer`; expect pass.
+- [ ] **Completion boundary:** Deno ingress/config and single upstream attempt conform to v1; no usage parsing or public response metadata settlement logic is included.
+- [ ] **Commit only if explicitly authorized:** `feat: Deno relay ingressを追加`
 
 ## Task 6: Move usage extraction and terminal reporting to Deno
 
 **Files:** Create `apps/deno-tokenizer/src/relay-usage.ts`, `apps/deno-tokenizer/test/relay-usage.test.ts`; modify `apps/deno-tokenizer/src/relay.ts`, `apps/deno-tokenizer/test/relay.test.ts`.
 
-**Interfaces:** `relayUpstreamResponse(response: Response, onTerminal: (report: RelayTerminalV1) => Promise<void>): Response`; the client-visible stream bytes and content type are unchanged. Inspect a bounded tail for Responses `response.completed` usage and handle SSE event fragmentation. A non-stream response has a bounded read/parse budget and reports usage before returning; missing or malformed usage reports uncertainty. Renewal uses a timer shorter than the configured lease TTL and is cancelled at terminal; failure to renew aborts upstream and keeps quota uncertain.
+**Interfaces:** `relayUpstreamResponse(response, onTerminal): Response`; bytes and content type remain unchanged. Parse bounded Responses usage including fragmented SSE; non-stream response is bounded and reports before return. Renew at fixed 30,000 ms with exact 120,000 ms lease TTL from config; do not derive cadence from decision envelope. Renewal failure aborts further upstream work, attempts terminal uncertain and never releases an attempted reservation. Terminal callback is exactly-once locally; DO handles idempotent retries.
 
 - [ ] Add failing tests for SSE usage split across chunks, large non-usage events, no final usage, upstream non-2xx, client disconnect, renewal failure and callback failure. Assert original response bytes are identical, usage reported once, no full-stream buffering, and no quota release after activation.
 - [ ] Run `npm test -w apps/deno-tokenizer`; expect new tests to fail.
@@ -196,12 +234,14 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   // usage or uncertain, then clear the lease-renewal timer.
   ```
 - [ ] Run `npm run typecheck -w apps/deno-tokenizer` and `npm test -w apps/deno-tokenizer`; expect pass.
+- [ ] **Completion boundary:** Renewal cadence, stream/non-stream usage parsing, terminal outcomes and byte-preserving behavior pass focused tests; stale grant/reconciliation rules remain tested at the DO boundary.
+- [ ] **Commit only if explicitly authorized:** `feat: Deno usageとlease更新を追加`
 
 ## Task 7: Select relay for Responses and relay bytes without Worker parsing
 
 **Files:** Create `apps/gateway-worker/src/relay-client.ts`, `apps/gateway-worker/test/relay-client.test.ts`; modify `apps/gateway-worker/src/proxy.ts`, `apps/gateway-worker/src/index.ts`, `apps/gateway-worker/test/proxy-prepare.test.ts`.
 
-**Interfaces:** `callDenoRelay(request: Request, signedContext: string, config: RelayConfig, fetchImpl?: typeof fetch): Promise<Response>` sends original request body as a stream with internal auth; it must not buffer or clone the body. `relayPublicResponse(relayed: Response, requestId: string, version: WorkerVersionMetadataLike | undefined): Response` validates the bounded Worker-issued quota snapshot in the Deno response header, returns an OCTG public error on missing/malformed metadata, otherwise wraps `relayed.body` with `buildOctgHeaders` and `workerVersionHeaders`. `handleProxy` selects relay only when enabled for Responses; other routes and `proxyStream` remain legacy. It does not parse usage. Pre-header Deno errors map to existing public error responses. After response headers are sent, callback/DO ownership determines settlement.
+**Interfaces:** `callDenoRelay` sends original client body exactly once as a stream without clone/buffer/transform and with exact ingress headers. Deno response carries base64url UTF-8 JSON `RelayResponseMetaV1` in `X-OCTG-Relay-Response-Meta`, decoded size <=2,048 bytes. Worker validates metadata, request ID, route, pool/quota numeric invariants before public headers. Relay decision errors use `RelayErrorCode` and existing SPEC.md public status/code mapping (quota 429, model 403, validation 400); internal failures map to 500 `internal_error`, never blanket 503. `handleProxy` selects relay only when explicitly enabled for Responses; no fallback to legacy after relay may have reached Deno. Worker never parses usage.
 
 - [ ] Add failing integration tests for exact 1 MiB with and without Content-Length, malformed lengths, stream and non-stream, Deno timeout, validation reject and 5xx, unchanged Chat route, legacy fallback when disabled, and raw byte equality of SSE payload. Example: `expect(upstreamWorkerCalls).toBe(0)` on relay success and `expect(denoCalls).toBe(1)`.
 - [ ] Run `npm test -w apps/gateway-worker -- relay-client.test.ts proxy-prepare.test.ts`; expect relay-disabled tests to pass and new enabled tests to fail.
@@ -216,16 +256,20 @@ Fix wire names in Task 1; later tasks consume those names without renaming them.
   // The existing prepare and Chat paths remain below this branch.
   ```
 - [ ] Run focused tests and `npm run typecheck -w apps/gateway-worker`; expect pass.
+- [ ] **Completion boundary:** Public responses preserve existing error/status and header contracts; exact-once ingress and raw stream-forwarding tests pass.
+- [ ] **Commit only if explicitly authorized:** `feat: ResponsesをDeno relayへ接続`
 
 ## Task 8: Verify crash windows, isolation, config and rollout
 
 **Files:** Modify `apps/gateway-worker/test/relay-callback.test.ts`, `apps/deno-tokenizer/test/relay.test.ts`, `durable-objects/quota-controller/test/relay-grant.test.ts`, `scripts/production-deno-config.mjs`, its test, `scripts/preview-worker-config.test.mjs`, `.github/workflows/deploy-deno-tokenizer.yml`, `.github/workflows/deploy-production.yml`, `SPEC.md`, `docs/configuration.md`, `docs/deno-tokenizer.md`, `docs/operations.md`.
 
-- [ ] Add failing fault-injection tests for Worker termination after reserve, lost activation acknowledgement, duplicate Deno callback, terminal delivery failure, stale lease generation, Deno termination after activation, conflicting terminal reports, and Preview context at Production callback. Expected: one grant causes at most one upstream attempt; neither DO quota nor audit depends on D1 availability.
+- [ ] Add failing fault-injection tests for Worker termination after reserve, lost activation acknowledgement, duplicate callbacks, terminal delivery failure, stale lease generation, Deno termination after activation, conflicting terminal reports, Preview credential at Production callback, UTC-midnight late callbacks, reconciliation while grant authorized/attempted, terminal reports after reconciliation, renewal and activation after reconciliation, expired authorized/attempted grant, and retention cleanup. Assert one grant causes at most one upstream attempt and a reconciled grant credential cannot change quota; neither DO quota nor audit depends on D1 availability.
 - [ ] Run focused suites; expect missing crash handling and Preview isolation assertions to fail.
 - [ ] Wire isolated Preview and Production endpoints/secrets and make new relay opt-in, with config validation before remote mutation. Keep the same-SHA Deno-before-Worker gate; add a non-secret relay health/contract probe. Preserve existing Deno `/prepare` and Worker rollback path until pending grants can be reconciled.
-- [ ] Update `SPEC.md` as the single normative source for the new internal protocol, and human docs for configuration and rollback. Include CPU-by-size/concurrency evidence procedure and Deno capacity checks. Document that a single failed callback leaves quota conservative, not auto-released.
+- [ ] Update `SPEC.md` as the single normative source for the new internal protocol, and human docs for configuration and rollback. Include pre-implementation CPU gate and separate post-implementation canary, exact config keys and partial-config behavior, fixed lease TTL/cadence, transaction helper/reconciliation and retention. Document that failed callback after activation leaves quota conservative, not auto-released.
 - [ ] Run `npm run typecheck`, `npm test`, `npm run test:deno-deploy-workflow`, `npm run test:preview-workflow`, `git diff --check`, and, if installed, `npx --no-install markdownlint-cli2 SPEC.md docs/configuration.md docs/deno-tokenizer.md docs/operations.md`.
+- [ ] **Completion boundary:** All cross-runtime fault/isolation/config/rollout gates pass; Design, Plan, SPEC and operator docs agree; unresolved grants are reconciled before rollback removes callbacks/secrets.
+- [ ] **Commit only if explicitly authorized:** `test: relayの障害境界とrolloutを検証`
 
 ## Canary and release gate
 
