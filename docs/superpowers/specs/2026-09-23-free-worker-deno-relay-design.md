@@ -346,6 +346,7 @@ content type returns `400 invalid_request`.
 | Worker → Deno ingress | `POST /relay/v1/responses`; `Authorization: Bearer <OCTG_RELAY_INGRESS_AUTH_TOKEN>`; `X-OCTG-Relay-Context: <compact-context-token>`; optional `Idempotency-Key: <original value>` | Raw request body at most 1,048,576 bytes; context header at most 4,096 ASCII bytes; Idempotency-Key at most 255 UTF-8 bytes; content type is inherited as `application/json`. No other client headers are forwarded. |
 | Deno → Worker callbacks | `POST /internal/relay/v1/{decision,activation,renewal,terminal}`; `Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>` | JSON request and response body at most 8,192 bytes; context or grant credential header at most 4,096 ASCII bytes. |
 | Deno → Worker callback identity | `X-OCTG-Relay-Context` on decision; `X-OCTG-Relay-Grant` on activation, renewal, terminal | Never put either credential in the JSON body, logs, or public response. |
+| Deno → Worker decision callback | Optional `Idempotency-Key: <exact original value>` on decision only | At most 255 UTF-8 bytes; absent when no effective public key was supplied. Never attach this header to activation, renewal or terminal callbacks. |
 | Deno → Worker ingress response | `X-OCTG-Relay-Response-Meta` | Base64url without padding of UTF-8 JSON; decoded JSON at most 2,048 bytes; header at most 2,800 ASCII bytes. |
 
 Both service tokens are 32–256 printable ASCII bytes without whitespace; each
@@ -368,18 +369,39 @@ SHA-256(clientId || NUL || exact UTF-8 Idempotency-Key); raw keys and client
 credentials are never carried in the signed context. Ingress context lifetime
 is at most 60 seconds. Issuance must precede body forwarding.
 
-Deno transports the exact Idempotency-Key value unchanged and MUST NOT use
+Deno transports the effective Idempotency-Key value unchanged and MUST NOT use
 signed context claims as authority before the decision callback. It sends the
-opaque context and exact key (or its absence) to the decision callback; Worker
-verifies the context and returns allow plus grant only after successful
-verification. After allow, Deno decodes that same Worker-verified context
-payload and computes `null` when the key is absent, otherwise the defined hash
-from its `clientId` and the exact forwarded key. It compares this value with
-signed `idempotencyKeyHash`; mismatch, including absent/present disagreement,
-is rejected before activation. Deno makes a best-effort terminal `release`,
-does not call Gateway B, and returns internal `invalid_context`, which Worker
-maps to public `500 internal_error`. When the key was absent, no Idempotency-Key
-is added upstream.
+opaque context and exact key (or its absence) to the decision callback. The
+decision callback wire contract is `Authorization: Bearer
+<OCTG_RELAY_SERVICE_AUTH_TOKEN>`, `X-OCTG-Relay-Context: <opaque signed
+context>`, and optional `Idempotency-Key: <exact original value>`; the JSON body
+remains exactly `{version:1,metadata:...}`. The key header is accepted only on
+decision, is limited to 255 UTF-8 bytes, and is absent when there is no effective
+key. Existing `parseIdempotencyKey` semantics define absent as a missing, null,
+or empty value; an empty public header therefore has no effective key, yields a
+null signed hash, and is omitted on internal and upstream requests. Every
+non-empty valid key is forwarded byte-for-byte as its original string value.
+
+Before any reservation, lease acquisition, or grant creation, Worker authenticates
+the callback, applies bounded request validation, verifies the signed context,
+and obtains its verified `clientId` and `idempotencyKeyHash`. Worker parses the
+callback key using the same 255-byte public rule, computes `null` when absent or
+lowercase hex SHA-256 over UTF-8(`clientId`) || NUL || UTF-8(exact raw key) when
+present, and compares that result with the signed hash. A malformed key,
+hash mismatch, or disagreement between key presence and signed hash is rejected
+fail-closed before quota reservation: no reservation, in-flight lease, grant, or
+Gateway B call is created. Only after a successful comparison may Worker call
+`reserve(requestId, tokens, upperBoundTokens, rawIdempotencyKey,
+verifiedClientId)`. It MUST preserve QuotaController's existing raw-key plus
+clientId idempotency mapping; it MUST NOT pass the hash to `reserve` or create a
+relay-specific idempotency namespace. Thus duplicate keys retain the existing
+`duplicate_idempotency_key` result across legacy and relay routes.
+
+After allow, Deno may decode that same Worker-verified context as
+non-authoritative metadata, but performs no idempotency authorization check and
+does not issue a terminal release for key binding. It sends the identical
+effective raw key to Gateway B unchanged; when absent, it adds no upstream
+Idempotency-Key. The JSON decision body is unchanged.
 
 All identifiers are non-empty ASCII strings: requestId is the existing OCTG
 request identifier generated as `req_${ulid()}` (30 ASCII bytes, matching
