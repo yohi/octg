@@ -2,10 +2,14 @@
 
 ## Status and scope
 
-- Design approved: 2026-09-23; **BLOCKED pending CPU feasibility evidence**.
-- Implementation status: not authorized to start until the Pre-implementation CPU
-  Feasibility Gate below passes. No qualifying evidence is recorded in this
-  repository as of this revision; do not invent or infer measurements.
+- Design revision status: **requires Fresh Superpowers Review Gate review** after
+  the Task 0 architecture failure recorded below.
+- CPU feasibility: **FAIL — decision callback architecture requires revision**.
+- Fresh Review Gate findings: RG-001 remains unresolved; RG-002 through RG-007 remain resolved. This revision preserves their contracts and does not reopen those findings.
+- Implementation status: Tasks 1–8 remain blocked until the revised architecture
+  passes a complete new Task 0 run and the evidence is accepted by the Fresh
+  Superpowers Review Gate. This document revision does not authorize that remote
+  run or any implementation.
 - Constraint: Cloudflare Workers Paid is not an option. Deno may hold the
   upstream AI Gateway credential and perform upstream forwarding.
 - This is a follow-up to the implemented bounded-prefix approach in
@@ -34,11 +38,55 @@ hotspot. The Free HTTP CPU allowance is 10 ms. This design reduces repeated
 Worker processing and adds measured gates; it does **not** promise that
 forwarding the original input once through Worker will always fit 10 ms.
 
+### Task 0 failure evidence (2026-09-23)
+
+The Free-plan capability spike was run on a Workers Free account using a
+temporary Worker Preview and temporary Deno app. The harness and temporary
+resources were removed after collecting sanitized results. No Production traffic
+or resource was used; Tasks 1–8 and production source changes were not started.
+
+| Workload | Driver successful | CPU records | min | p50 | p90 | p95 | p99 | max | `exceededCpu` | Tail margin to 10 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ingress 123 KiB / `stream=true` | 100 | 100 | 0 | 0 | 2 | 3 | 4 | 4 | 0 | 6 ms |
+| Ingress 123 KiB / `stream=false` | 100 | 100 | 0 | 0 | 2 | 2 | 3 | 4 | 0 | 6 ms |
+| Ingress 174 KiB / `stream=true` | 100 | 100 | 0 | 0 | 1 | 1 | 2 | 4 | 0 | 6 ms |
+| Ingress 174 KiB / `stream=false` | 100 | 100 | 0 | 0 | 1 | 2 | 3 | 3 | 0 | 7 ms |
+| Ingress ~700 KiB / `stream=true` | 100 | 100 | 0 | 0 | 1 | 1 | 3 | 3 | 0 | 7 ms |
+| Ingress ~700 KiB / `stream=false` | 100 | 100 | 0 | 0 | 1 | 1 | 2 | 2 | 0 | 8 ms |
+| Ingress exactly 1 MiB / `stream=true` | 100 | 99 | 0 | 0 | 1 | 2 | 4 | 4 | 0 | 6 ms |
+| Ingress exactly 1 MiB / `stream=false` | 100 | 100 | 0 | 0 | 1 | 1 | 2 | 2 | 0 | 8 ms |
+| Decision callback | 100 | 98 | 1 | 2 | 6 | 7 | **19** | **19** | 0 | **-9 ms** |
+| Activation callback | 100 | 100 | 0 | 1 | 3 | 3 | 6 | 8 | 0 | 2 ms |
+| Renewal callback | 100 | 99 | 0 | 1 | 3 | 5 | 7 | 7 | 0 | 3 ms |
+| Terminal callback | 100 | 99 | 0 | 1 | 3 | 4 | 8 | 8 | 0 | 2 ms |
+
+CPU values are sanitized `$workers.cpuTimeMs` records from stateless Worker
+invocations; percentiles use nearest-rank over observed records. Some log series
+contained fewer records than the 100 successful driver invocations. This prevents
+PASS completeness, but does not make the result BLOCKED: the decision callback
+has an observed p99 and maximum of 19 ms, exceeding both mandatory Worker
+thresholds. The prior harness did not contain `RelayDecisionController` or
+`QuotaController.admitRelay`; no DO CPU percentiles for those not-yet-designed
+invocations are available or inferred here.
+
+| Runtime evidence | Value |
+| --- | --- |
+| Cloudflare plan/runtime | Workers Free, Dashboard verified 2026-09-23 JST |
+| Worker Preview | `cpu-gate-f631181` |
+| Worker revision | `0650e69b-bb99-49c2-b59d-71413f4eaa6c` |
+| Temporary Deno app / revision | `octg-task0-f631181` / `1wy0c39533tx` |
+| Measurement period | 2026-09-23 21:03:49–21:10:54 JST |
+
+**CPU feasibility: FAIL — decision callback architecture requires revision.**
+No credentials, request bodies, prompts or response bodies are included in this
+record.
+
 ## Goals and exclusions
 
 - Preserve client-facing `/v1/responses`, including streaming, output
   clamping, idempotency, and existing quota and error contracts.
-- Keep QuotaController DO as the sole quota authority; D1 remains audit-only.
+- Keep QuotaController DO as the sole quota authority; D1 remains outside quota
+  accounting, while the existing model/registry/policy read path stays read-only.
 - Have Deno prepare the body and send it to Gateway B without returning the
   prepared request body to Worker.
 - Minimize Worker per-byte work on both request and response; expose measured
@@ -57,34 +105,38 @@ or response body is persisted for recovery.
 ## Architecture and protocol
 
 ```text
-Client -> Worker: authenticated Responses request (one streaming pass)
-Worker -> Deno: authenticated relay request + short-lived signed context
-Deno: bounded parse, normalize, tokenize; hold prepared body in memory
-Deno -> Worker internal callback: metadata + signed context
-Worker -> QuotaController: policy/model checks, budget, reserve and admission
-Worker -> Deno: bounded decision (reject, or one-use authorization + clamp)
+Client -> ingress Worker: authenticate, make req_${ulid()}, sign context, stream body once
+Worker -> Deno: original body stream + opaque context
+Deno: bounded parse, normalize and tokenize; hold prepared body in memory
+Deno -> Worker /decision callback: bounded metadata + opaque context + exact Idempotency-Key
+Worker /decision callback: bounded transport validation + deterministic Decision DO dispatch
+Worker -> RelayDecisionController DO: bounded decision envelope and opaque signed context
+RelayDecisionController DO: verify context/binding, resolve policy/model/budget, choose pool/day
+RelayDecisionController DO -> QuotaController: one atomic admitRelay RPC
+QuotaController: reserve + lease + authorized grant in one transaction
+RelayDecisionController DO -> Worker -> Deno: reject or allow + signed one-use grant
 Deno -> Gateway B: upstream request using Deno-held credential
 Gateway B -> Deno -> Worker -> Client: response stream
-Deno -> Worker callback -> QuotaController: terminal usage or uncertainty
+Deno -> Worker callbacks -> QuotaController: activation, renewal, terminal usage/uncertainty
 ```
 
-Worker authenticates the external client, validates the Idempotency-Key and
-public request route, and passes the original request body to Deno once.
-The internal context contains the existing OCTG request ID, environment
-identifier, client ID, idempotency-key identity, issue and expiry times, and a
-unique nonce. It does not contain the client key or upstream credentials. The
-Worker authenticates Deno with an environment-specific service secret and signs
-the context with a separate environment-specific key. Deno authenticates all
-callback calls. Only Worker holds the context HMAC key: it signs ingress
-contexts and grant credentials, verifies ingress contexts on decision callbacks,
-and verifies grant credentials on activation, renewal and terminal callbacks.
-Deno does not verify or sign either token. It checks only the context header's
-transport size and syntax bounds and forwards the opaque token unchanged to the
-decision callback. A successful allow response proves to Deno that Worker
-verified that exact context. Only after allow, Deno may decode the context as
-non-authoritative data for bounded relay/upstream metadata such as request ID
-and client ID; it must not use unverified claims for quota, policy, model, pool,
-admission-day, or target selection. Deno transports the grant credential opaquely in its callbacks.
+The ingress Worker authenticates the external client, validates the
+Idempotency-Key and public request route, creates the existing OCTG request ID,
+signs the short-lived context, and passes the original body to Deno once.
+The internal context contains the environment, client ID, idempotency-key
+identity, issue and expiry times, and a unique nonce; it contains neither the
+client key nor an upstream credential. The environment-specific HMAC key is a
+Cloudflare Worker deployment secret. The ingress Worker uses it only to sign
+context; `RelayDecisionController` uses it to verify context and sign grants.
+Deno never holds the key and never verifies or signs either token. Deno and Worker
+callbacks authenticate each other with environment-specific service secrets.
+Deno checks only transport size and syntax bounds for the opaque context header
+and forwards that token unchanged to the decision callback. A successful allow
+response proves that `RelayDecisionController` verified that exact context.
+Only after allow, Deno may decode the context as
+non-authoritative bounded relay/upstream metadata such as request ID and client
+ID; it must not use those claims for quota, policy, model, pool,
+admission-day, or target selection. Deno transports grant credentials opaquely in its callbacks.
 Endpoint configuration is pinned to the corresponding environment.
 The short-lived ingress context is validated only when creating the decision;
 long-running renewal and terminal callbacks use a separate grant-bound
@@ -94,16 +146,18 @@ After terminal state, the grant credential can only retrieve the stored
 result for an identical terminal report; it cannot activate, renew or change
 the outcome.
 
-Deno enforces raw and normalized size limits, parses Responses, performs
-exact token estimation, prepares the upstream JSON in memory, and sends only
-bounded metadata to the internal decision callback. Worker verifies the
-context and metadata schema, loads the authoritative registry and policy,
-applies the existing tool/model rules and output budget, then asks the
-Production or Preview QuotaController to reserve and acquire an in-flight
-lease. Rejected requests never reach Gateway B. The callback returns the
-clamped output-token limit and an authorization bound to this request,
-environment, lease generation, and nonce; Deno applies the clamp before
-forwarding. A network timeout or malformed response is a rejection, never
+Deno enforces raw and normalized size limits, parses Responses, performs exact
+token estimation, prepares the upstream JSON in memory, and sends bounded
+metadata to the internal decision callback. The stateless Worker callback
+enforces only bounded transport/authentication and deterministic dispatch. The
+Decision DO verifies the context and metadata schema, loads the authoritative
+registry/policy, applies model/tool rules, classifies the pool, calculates the
+output budget and admission UTC day, then calls `QuotaController.admitRelay`.
+That single RPC commits reservation, in-flight lease, and authorized grant in
+one QuotaController transaction. The Decision DO signs the returned grant
+claims and emits the unchanged allow/reject callback envelope. Rejected requests
+never reach Gateway B; Deno applies the authorized output clamp before
+forwarding. A timeout or malformed result at any boundary is a rejection, never
 permission to send upstream.
 
 **A signed context alone is not an execution permit.** A per-request grant
@@ -174,10 +228,11 @@ replaced with a new JSON error response.
 
 | Boundary | Required quota state and behavior |
 | --- | --- |
-| Authentication, Deno parsing or prepare fails | No reserve, no upstream call; return mapped validation or internal error. |
-| DO reservation rejected or result unknown | No activation or upstream; unknown reserve uses existing conservative handling. |
-| Admission fails before grant | Release confirmed reservation; no upstream call. |
-| Grant delivery fails after reservation | Do not send upstream; release only if the DO proves activation never occurred, otherwise uncertain. |
+| Authentication, Deno parsing or DecisionDO validation fails | No `admitRelay` call, no reservation/lease/grant and no upstream call; return the mapped validation or internal error. |
+| `QuotaController.admitRelay` rejects quota, concurrency or idempotency | Its single transaction writes no admission state; no activation or upstream call. |
+| `admitRelay` acknowledgement is lost | Worker returns internal failure and Deno does not activate. An exact retry with the same context/body/key is idempotent at the same shard and QuotaController; if no retry succeeds, the authorized grant expires and is atomically released, or an attempted grant follows the existing uncertain rule. |
+| Grant signing fails after `admitRelay` commits | DecisionDO uses the stored grant binding to request pre-activation `release`; it returns no allow. If release acknowledgement is ambiguous, leave the grant for exact retry/authorized expiry; never send upstream. |
+| Allow response delivery is ambiguous | Exact decision retry returns the same stored grant while still authorized; after activation it cannot authorize another upstream attempt. |
 | Activation acknowledged, upstream fetch fails or response is ambiguous | Mark uncertain; no upstream retry. |
 | Deno proves failure before any activation | Release reservation and lease. |
 | Upstream response lacks trustworthy usage, stream aborts, or callbacks fail | Keep or mark uncertain; release the lease when safe; reconcile later. |
@@ -208,60 +263,75 @@ log; its logging may omit attempts that fail during upload.
 
 ## Rollout, rollback and acceptance
 
-1. Deploy the versioned Deno relay and Worker callbacks inert, with
-   environment-specific secrets. Keep the existing prepare route functional.
+1. Deploy the versioned Deno relay and Worker/Decision DO code inert, with
+   environment-specific secrets and the SQLite migration. Keep the existing
+   `/prepare` route functional.
 2. Test request-size buckets including prior failed sizes (at least 123 KiB,
    174 KiB, approximately 700 KiB and 1 MiB), both stream modes, tool policy,
    invalid lengths, duplicate idempotency keys, and concurrent admissions.
-3. Run injected failures at every matrix boundary, including lost activation
-   ACK, Worker CPU termination after reserve, Deno termination after activation,
-   and client disconnect. Assert at most one upstream attempt per grant and
-   no over-release of quota.
+3. Run injected failures at every matrix boundary, including lost
+   `admitRelay` acknowledgement/retry with identical context, lost activation
+   ACK, Worker termination after atomic admission, Deno termination after
+   activation, and client disconnect. Assert at most one upstream attempt per
+   grant and no over-release of quota.
 4. Canary the relay in Preview, then a controlled Production subset. Compare
-   Worker `exceededCpu`, per-invocation CPU distribution, Deno capacity,
-   Gateway B log matches, settlement and uncertain-entry counts by revision.
-   Do not promote based on elapsed time alone. The release gate is zero CPU
-   failures on a documented set of representative large requests and no quota
-   invariant violations; record the sample size and tail CPU margin below
-   10 ms. If the request-forwarding leg alone breaches the limit, stop and
-   revisit ingress architecture instead of declaring this relay sufficient.
+   stateless Worker `exceededCpu`/CPU distributions separately from
+   RelayDecisionController and QuotaController DO CPU series, plus Deno capacity,
+   Gateway B log matches, settlement and uncertain-entry counts by revision. Do
+   not promote based on elapsed time alone. The release gate is zero CPU failures
+   in every documented Worker and DO series and no quota invariant violations.
+   Record sample counts and tail margins to 10 ms for Worker and 30,000 ms for
+   DO. A DO pass never excuses a stateless Worker failure.
 5. Deploy Deno before Worker for each immutable revision. Roll back Worker to
    the existing prepare route only when it is safe to do so; leave Deno's new
    endpoint compatible during rollback. Reconcile outstanding grants before
    disabling callbacks or removing secrets. Never route unresolved requests
    to a different control plane.
 
-Observability contains request ID, deployment revision, environment, size
-bucket, stage, grant state and DO terminal state, without body, prompt,
-response, nonce, signature, client key or API token. Correlate the two legs
-through an opaque request ID and measure CPU independently on both Worker
-callback invocations and the original ingress invocation.
+Observability records an opaque request ID, deployment revision, environment,
+size bucket, stage, grant state and DO terminal state, without body, prompt,
+response, nonce, signature, client key or API token. Measure CPU as separate
+`stateless` and `durableObject` invocation series; distinguish
+RelayDecisionController and each QuotaController RPC class by service/trigger or
+isolated measurement window. Never pool a DO invocation into its calling Worker
+callback.
 
 ## Pre-implementation CPU Feasibility Gate (BLOCKING)
 
-Task 1 through Task 8 in the implementation plan MUST NOT start until this gate
-is PASS. Task 0, the isolated Free-plan CPU Capability Spike defined in the
-Plan, is the sole activity permitted before PASS. It is not production source
-implementation and must not create production routes, callbacks, or relay
-modules. Remote deployment and runtime measurement for Task 0 still require the
-user's explicit authorization. The gate measures the exact Free-plan runtime and deployment class used
-by the intended Worker, not a local emulator, Paid Worker, or synthetic
-microbenchmark. Record the dated Worker revision, runtime/plan, test harness,
-and raw aggregate results without request bodies or credentials.
+Task 1 through Task 8 MUST remain blocked until a complete Task 0 rerun for this
+revised architecture is PASS and Fresh Superpowers Review Gate accepts its
+evidence. Task 0 is the sole permitted pre-gate activity. It is an
+outside-repository disposable capability spike, not production implementation.
+Remote deployment and measurement require the user's explicit authorization.
+Use the intended Workers Free Preview and a temporary Deno app; local emulators,
+Paid Workers and synthetic microbenchmarks do not satisfy this gate. Record the
+dated Worker/Deno revisions, runtime/plan, methodology and sanitized aggregate
+results without request bodies or credentials.
 
 The evidence MUST include all of the following:
 
-- The Worker receives a representative authenticated `/v1/responses` request
-  and transfers its body to Deno exactly once, without cloning, buffering,
-  parsing, or transforming it.
+- The ingress Worker receives a representative authenticated `/v1/responses`
+  request, signs its bounded context, and transfers the original body to Deno
+  exactly once, without cloning, full buffering, JSON parsing or transformation.
 - Request payload buckets of 123 KiB, 174 KiB, approximately 700 KiB, and
   exactly 1 MiB; cover both `stream=true` and `stream=false` in every bucket
   with at least 100 valid authenticated invocations per size/mode combination.
-- The decision callback invocation, measured separately from ingress, runs this
-  bounded workload: service bearer validation; bounded JSON parsing; signed
-  ingress-context verification; registry/policy lookup equivalent; model
-  classification; token-budget calculation; reservation; in-flight acquisition;
-  and a durable authorize-equivalent DO operation.
+- The stateless Worker `/decision` callback is measured as a thin invocation:
+  exact method/path and content-type validation; Deno service bearer check;
+  bounded context, key and body-size checks; bounded body read; request-ID shard
+  hint extraction; deterministic shard selection; and one Decision DO dispatch.
+  It does not parse decision JSON, verify HMAC, bind the idempotency hash, read
+  policy, classify models, calculate budgets, mutate quota, create grants or
+  sign credentials.
+- The `RelayDecisionController.decide` DO invocation is measured separately and
+  includes bounded decision JSON parsing; full signed context validation;
+  environment/audience/expiry/nonce checks; exact `clientId` and raw
+  Idempotency-Key/hash binding; authoritative registry/policy lookup;
+  tool/model classification; token-budget calculation; pool/day resolution;
+  one `QuotaController.admitRelay` RPC; and grant signing.
+- The `QuotaController.admitRelay` DO invocation is measured as a separate
+  series and includes idempotency, quota, finalized-state, and concurrency
+  checks plus one atomic reservation/lease/grant transaction.
 - The activation callback invocation, measured separately from ingress, runs:
   service bearer validation; grant-credential verification; grant, reservation,
   and lease-generation validation; and an atomic `authorized -> attempted`
@@ -274,27 +344,36 @@ The evidence MUST include all of the following:
   service bearer validation; grant-credential verification; grant-state
   validation; a quota settle/uncertain-equivalent mutation; and a lease-release /
   grant-terminalization-equivalent DO operation.
+- Capture the QuotaController activation, renewal and terminal RPC CPU records
+  separately from both the stateless Worker callbacks and each other. Do not
+  pool DO CPU into the stateless callback distributions.
 - Task 0's callback harness is disposable and outside the repository. It MUST
   NOT create production source, modules, routes, or callbacks.
-- At least 100 successful invocations per payload-size/stream-mode combination
-  and at least 100 invocations per callback class. Report sample count and per-invocation CPU
-  distribution (minimum, p50, p90, p95, p99, maximum), ingress/callback
-  `exceededCpu` counts, and each distribution's tail margin to the 10 ms limit.
-- A documented pass threshold: zero `exceededCpu`; p99 CPU at or below 8 ms
-  (at least 2 ms margin); maximum observed CPU below 10 ms; no payload bucket or
-  callback class may be omitted or pooled to hide a failing tail.
+- At least 100 successful invocations per ingress bucket and stateless callback
+  class, and at least 100 successful invocations per DO operation class. Report
+  sample count and per-invocation CPU min/p50/p90/p95/p99/max, successful count,
+  `exceededCpu`, and tail margin to the applicable limit for each class.
+- Stateless Worker PASS: `exceededCpu = 0`, p99 at most 8 ms and maximum below
+  10 ms for every ingress bucket and callback class.
+- Durable Object PASS: `exceededCpu = 0`, p99 at most 24,000 ms and maximum
+  below 30,000 ms for each of `RelayDecisionController.decide`,
+  `QuotaController.admitRelay`, and the QuotaController activation, renewal and
+  terminal RPCs. This uses 20% p99 headroom against the documented 30,000 ms
+  default Durable Object per-request CPU limit; Task 0 does not configure a
+  higher `limits.cpu_ms`.
+- Report stateless Worker and DO CPU separately. Do not pool different ingress
+  buckets, callbacks, DO classes or operation classes to hide a failing tail.
 
-The gate is **FAIL** if any invocation exceeds 10 ms, p99 exceeds 8 ms, any
-`exceededCpu` event occurs, or the representative one-pass ingress itself
-cannot meet the threshold. On failure, do not begin Tasks 1–8: redesign ingress
-architecture if ingress fails, or reduce/reassign callback responsibility if
-any callback class fails; rerun the complete gate after the redesign. Missing
-samples, unavailable Free runtime, or incomplete telemetry are **BLOCKED**, not
-PASS. If Task 0 fails, do not begin production implementation; return to this Design
-and revise the architecture. Record no measurements until actually observed.
-Until then the status remains `BLOCKED pending CPU feasibility evidence`.
-Store the evidence and explicit PASS decision in the review record before
-changing this document's status to implementation-ready.
+The gate is **FAIL** if any stateless Worker invocation has `exceededCpu > 0`,
+p99 > 8 ms or max >= 10 ms; or if any required DO operation has `exceededCpu >
+0`, p99 > 24,000 ms or max >= 30,000 ms. A known observed threshold violation
+is FAIL even when another telemetry record is missing. Missing required samples
+or telemetry with no observed failure, unavailable Free runtime or incomplete
+workload reproduction is **BLOCKED**, never PASS. The recorded Task 0 result is
+FAIL because the decision callback reached p99/max 19 ms. Tasks 1–8 must remain
+not started; this revision requires Fresh Review Gate approval before a complete
+Task 0 rerun. Only a complete rerun PASS and accepted evidence can change the
+design status to implementation-ready.
 
 ## Normative relay contract (v1)
 
@@ -319,16 +398,27 @@ to one environment and are never shared between Preview and Production:
 | `OCTG_RELAY_LEASE_TTL_MS` | Exactly `120000`. |
 | `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` | Exactly `30000`; four renewals per lease TTL. |
 
-Worker alone stores `OCTG_RELAY_CONTEXT_HMAC_KEY`, an environment-unique
-base64url-no-padding encoding of exactly 32 random bytes. It is never configured
-in Deno. Worker relay configuration is enabled only when all `OCTG_RELAY_*` Worker
-bindings are present and valid: `OCTG_RELAY_ENVIRONMENT`,
-`OCTG_RELAY_INGRESS_ENDPOINT`, `OCTG_RELAY_INGRESS_AUTH_TOKEN`,
-`OCTG_RELAY_SERVICE_AUTH_TOKEN`, and `OCTG_RELAY_CONTEXT_HMAC_KEY`. The endpoint
+The Cloudflare Worker deployment alone stores `OCTG_RELAY_CONTEXT_HMAC_KEY`, an
+environment-unique base64url-no-padding encoding of exactly 32 random bytes. The
+ingress Worker uses it to sign context; RelayDecisionController uses the same
+environment key to verify context and sign grant credentials. It is never
+configured in Deno. Worker relay configuration is enabled only when all
+`OCTG_RELAY_*` Worker bindings are present and valid:
+`OCTG_RELAY_ENVIRONMENT`, `OCTG_RELAY_INGRESS_ENDPOINT`,
+`OCTG_RELAY_INGRESS_AUTH_TOKEN`, `OCTG_RELAY_SERVICE_AUTH_TOKEN`, and
+`OCTG_RELAY_CONTEXT_HMAC_KEY`. The `RELAY_DECISION_CONTROLLER` and
+`QUOTA_CONTROLLER` Durable Object bindings must resolve to the same environment;
+the relay environment must not be inferred from callback input. The endpoint
 must be HTTPS and environment-pinned. Deno starts the relay endpoint only when
 all keys in the table are present and valid. A partial or invalid configuration
 is a startup/configuration failure (`500 internal_error`); it MUST NOT silently
 disable authentication, mix environments, or fall back to the legacy route.
+The Decision DO also uses the same environment's D1 binding only for the existing
+read-only registry and policy lookups. D1 remains audit-only for quota mutation:
+the admission transaction and all quota/grant state writes are in
+QuotaController. `MAX_IN_FLIGHT_REQUESTS` and `IN_FLIGHT_LEASE_TTL_MS` are
+server-side Worker configuration consumed by QuotaController; they are never
+callback inputs.
 `OCTG_RELAY_ENABLED` is exactly `true` to enable and `false` to disable; absent
 means disabled, and any other value is invalid. When true, missing or partial
 relay config fails closed; it never silently switches to the legacy route.
@@ -345,6 +435,7 @@ content type returns `400 invalid_request`.
 | --- | --- | --- |
 | Worker → Deno ingress | `POST /relay/v1/responses`; `Authorization: Bearer <OCTG_RELAY_INGRESS_AUTH_TOKEN>`; `X-OCTG-Relay-Context: <compact-context-token>`; optional `Idempotency-Key: <original value>` | Raw request body at most 1,048,576 bytes; context header at most 4,096 ASCII bytes; Idempotency-Key at most 255 UTF-8 bytes; content type is inherited as `application/json`. No other client headers are forwarded. |
 | Deno → Worker callbacks | `POST /internal/relay/v1/{decision,activation,renewal,terminal}`; `Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>` | JSON request and response body at most 8,192 bytes; context or grant credential header at most 4,096 ASCII bytes. |
+| Worker decision callback → RelayDecisionController | Internal DO RPC `decide(input)`; never exposed as a public HTTP route | Worker reads at most 8,192 callback-body bytes and passes them unchanged; context header at most 4,096 ASCII bytes; optional exact Idempotency-Key at most 255 UTF-8 bytes. The unverified request-ID hint only selects a shard; the DO verifies it. |
 | Deno → Worker callback identity | `X-OCTG-Relay-Context` on decision; `X-OCTG-Relay-Grant` on activation, renewal, terminal | Never put either credential in the JSON body, logs, or public response. |
 | Deno → Worker decision callback | Optional `Idempotency-Key: <exact original value>` on decision only | At most 255 UTF-8 bytes; absent when no effective public key was supplied. Never attach this header to activation, renewal or terminal callbacks. |
 | Deno → Worker ingress response | `X-OCTG-Relay-Response-Meta` | Base64url without padding of UTF-8 JSON; decoded JSON at most 2,048 bytes; header at most 2,800 ASCII bytes. |
@@ -360,10 +451,11 @@ The signed `RelayContextV1` claims are exactly `version`, `audience`,
 `issuedAtMs`, and `expiresAtMs`. Values:
 `version=1`, `audience="octg-deno-relay"`, `route="responses"`, environment
 `preview|production`. The ingress context intentionally excludes model, pool,
-and quota day: Worker cannot safely learn those without parsing/buffering the
-streamed input. Following Deno metadata callback, Worker resolves the
-authoritative model, pool, and admission UTC day and binds them in the durable
-grant and grant credential.
+and quota day: the ingress Worker cannot learn those without parsing/buffering
+the streamed input. Following the Deno metadata callback,
+RelayDecisionController resolves the authoritative model, pool, and admission
+UTC day; QuotaController binds them into the durable grant and
+RelayDecisionController signs the grant credential.
 `idempotencyKeyHash` is `null` when absent, otherwise lowercase hex
 SHA-256(clientId || NUL || exact UTF-8 Idempotency-Key); raw keys and client
 credentials are never carried in the signed context. Ingress context lifetime
@@ -382,22 +474,28 @@ or empty value; an empty public header therefore has no effective key, yields a
 null signed hash, and is omitted on internal and upstream requests. Every
 non-empty valid key is forwarded byte-for-byte as its original string value.
 
-Before any reservation, lease acquisition, or grant creation, Worker authenticates
-the callback, applies bounded request validation, verifies the signed context,
-and obtains its verified `clientId` and `idempotencyKeyHash`. Worker parses the
+Before any reservation, lease acquisition or grant creation, the stateless
+Worker callback authenticates Deno and enforces the method/path, content type,
+and bounded header/body limits. It passes the bounded body bytes, opaque context,
+and exact optional Idempotency-Key to RelayDecisionController via internal RPC;
+it does not parse decision JSON or perform HMAC, policy, budget, or quota work.
+
+RelayDecisionController verifies the signed context and obtains the verified
+`clientId` and `idempotencyKeyHash`. It parses the
 callback key using the same 255-byte public rule, computes `null` when absent or
 lowercase hex SHA-256 over UTF-8(`clientId`) || NUL || UTF-8(exact raw key) when
 present, and compares that result with the signed hash. A malformed key,
 hash mismatch, or disagreement between key presence and signed hash is rejected
-fail-closed before quota reservation: no reservation, in-flight lease, grant, or
-Gateway B call is created. Only after a successful comparison may Worker call
-`reserve(requestId, tokens, upperBoundTokens, rawIdempotencyKey,
-verifiedClientId)`. It MUST preserve QuotaController's existing raw-key plus
-clientId idempotency mapping; it MUST NOT pass the hash to `reserve` or create a
-relay-specific idempotency namespace. Thus duplicate keys retain the existing
-`duplicate_idempotency_key` result across legacy and relay routes.
+fail-closed before any QuotaController call: no reservation, lease or grant is
+created. Only after successful verification does RelayDecisionController call
+the single `QuotaController.admitRelay` RPC with the exact raw key, verified
+client ID, verified context claims and server-derived budget. QuotaController
+preserves its existing raw-key plus clientId mapping; it MUST NOT receive the
+hash as an idempotency key or create a relay-specific namespace. Duplicate keys
+retain the existing `duplicate_idempotency_key` result across legacy and relay
+routes.
 
-After allow, Deno may decode that same Worker-verified context as
+After allow, Deno may decode that same DecisionController-verified context as
 non-authoritative metadata, but performs no idempotency authorization check and
 does not issue a terminal release for key binding. It sends the identical
 effective raw key to Gateway B unchanged; when absent, it adds no upstream
@@ -420,11 +518,17 @@ base64url-no-padding(HMAC-SHA-256(key, purpose || 0x00 || canonicalPayload))`.
 Context purpose is ASCII `octg-relay-context-v1`; grant purpose is
 `octg-relay-grant-v1`. Tokens contain exactly two segments; reject padding,
 non-canonical JSON, duplicate keys, unknown claims, non-canonical base64url,
-oversize tokens, and additional segments. Worker interfaces are exactly
+oversize tokens, and additional segments. Cloudflare-side credential interfaces are exactly
 `signRelayContext(context: RelayContextV1, key: Uint8Array): Promise<string>`
 and `verifyRelayContext(token: string, key: Uint8Array,
 expectedEnvironment: RelayEnvironment, nowMs: number):
-Promise<RelayContextV1 | undefined>`.
+Promise<RelayContextV1 | undefined>`, `signRelayGrantCredential(claims:
+RelayGrantCredentialV1, key: Uint8Array): Promise<string>`, and
+`verifyRelayGrantCredential(token: string, key: Uint8Array,
+expectedEnvironment: RelayEnvironment, nowMs: number):
+Promise<RelayGrantCredentialV1 | undefined>`. The ingress Worker signs context;
+RelayDecisionController verifies context/signs grants; remaining Worker
+callbacks verify grants.
 
 ### Callback and response envelopes
 
@@ -522,34 +626,178 @@ claims: `version:1`, `audience:"octg-worker-relay"`,
 `environment`, `route:"responses"`, `requestId`, `grantId`, `nonce`, `clientId`,
 `idempotencyKeyHash`, `model`, `pool`, `admissionUtcDay`, `leaseGeneration`,
 `issuedAtMs`, `expiresAtMs`. No `kid` or algorithm negotiation is accepted.
-`model`, `pool`, and `admissionUtcDay` are set by Worker from authoritative
-policy/quota resolution after Deno submits request metadata; they are not copied
-from Deno metadata or the ingress context. Keys are environment-unique, exactly
-32 random bytes, and compared using constant-time verification. Plan interfaces are exactly
-`signRelayGrantCredential(claims: RelayGrantCredentialV1, key: Uint8Array): Promise<string>` and
-`verifyRelayGrantCredential(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number):
-Promise<RelayGrantCredentialV1 | undefined>`; context signing uses the same
-canonical serialization and HMAC primitive with its exact context purpose
-defined above. `RelayEnvironment` is exactly `"preview" | "production"`.
+The model is selected by RelayDecisionController from the authoritative registry;
+pool and admission UTC day are derived from that classification and the Decision
+DO's trusted clock. They are never copied from Deno metadata or ingress claims.
+Keys are environment-unique, exactly 32 random bytes, and compared using
+constant-time verification. Cloudflare-side credential functions use these exact
+signatures and the canonical payload/purpose rules above:
 
-The grant credential is minted only after durable authorization. It expires at
+```ts
+signRelayContext(context: RelayContextV1, key: Uint8Array): Promise<string>
+verifyRelayContext(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number): Promise<RelayContextV1 | undefined>
+signRelayGrantCredential(claims: RelayGrantCredentialV1, key: Uint8Array): Promise<string>
+verifyRelayGrantCredential(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number): Promise<RelayGrantCredentialV1 | undefined>
+```
+
+The ingress Worker signs context; RelayDecisionController verifies context and
+signs grants; activation, renewal and terminal callbacks verify grants. Deno has
+no signing or verification-key capability. `RelayEnvironment` is exactly
+`"preview" | "production"`.
+
+The grant credential is signed only after durable authorization. It expires at
 `issuedAtMs + 3,900,000` (one-hour maximum request duration plus five-minute
-callback grace); the grant's authorization expiry is `issuedAtMs +
-3,600,000`. No decision envelope controls TTL. Every callback verifies all
-claims against the durable grant, request entry, and environment. For the decision callback, Worker verifies the ingress context, loads the
-authoritative registry and policy, validates Deno metadata, classifies the model
-and pool authoritatively, and derives the server-side admission UTC day. It
-resolves the QuotaController DO from that authoritative pool and day; the
-ingress context contains neither value and cannot route the decision. After
-grant issuance, activation, renewal and terminal callbacks reconstruct the same
-DO only from the Worker-verified signed grant credential's `pool` and
-`admissionUtcDay`. Worker maps `pool` to `STANDARD|MINI` and `admissionUtcDay`
-to the canonical name `quota:{POOL}:{YYYY-MM-DD}`, then resolves that name in
-the environment's own `QUOTA_CONTROLLER` namespace. Deno cannot nominate a
-namespace, name, or object ID. This guarantees late callbacks across UTC
-midnight use the admission day's same DO.
+callback grace); authorization expires at `issuedAtMs + 3,600,000`. No decision
+envelope controls either TTL. Every callback verifies all immutable claims
+against the stored grant, request entry, and environment.
+RelayDecisionController loads authoritative registry/policy state, validates
+Deno metadata, classifies the model/pool, and derives the admission UTC day. It
+resolves `quota:{POOL}:{YYYY-MM-DD}` in the environment-specific
+`QUOTA_CONTROLLER` namespace. The ingress context contains neither pool nor day
+and cannot select the quota object. After grant creation, activation, renewal and
+terminal callbacks reconstruct the same QuotaController object only from the
+Worker-verified grant credential's `pool` and `admissionUtcDay`. Deno cannot
+nominate a namespace, name or object ID. Late callbacks therefore use the
+admission day's same QuotaController object across UTC midnight.
 
-The DO grant record stores the immutable credential claim bindings,
+#### RelayDecisionController routing and authority
+
+RelayDecisionController uses a fixed 64-shard map for v1. The stateless
+callback derives a routing hint only from the compact context payload's existing
+`requestId`, after enforcing token/header bounds and the existing request-ID
+syntax. It does not validate the HMAC or use the hint for authorization. The
+shard function starts with unsigned offset basis `2166136261`; for each ASCII
+`requestId` byte it computes `hash = Math.imul(hash ^ byte, 16777619) >>> 0`.
+The shard index is `hash & 63`, zero-padded to two decimal digits. The exact DO name is
+`relay-decision:v1:{environment}:{shard:00..63}`. The environment is selected
+from static deployment configuration and names a separate Preview or Production
+namespace; no Production namespace ID is used by Preview.
+
+The Worker exports class `RelayDecisionController`. Its Production SQLite
+namespace is introduced in `apps/gateway-worker/wrangler.jsonc` migration tag
+`v3` with `new_sqlite_classes: ["RelayDecisionController"]`. Preview
+configuration binds `RELAY_DECISION_CONTROLLER`, `QUOTA_CONTROLLER` and
+`TOKENIZER_CONTROLLER` to Preview-local class namespaces without explicit
+Production `namespace_id` values, alongside Preview D1 and Deno resources. A
+Preview config that can resolve any of these bindings/resources to Production
+must fail validation before deployment.
+
+```ts
+interface RelayDecisionDispatchInput {
+  readonly decisionBody: Uint8Array; // <= 8,192 bytes; exact bytes from Deno
+  readonly contextToken: string; // opaque X-OCTG-Relay-Context value
+  readonly rawIdempotencyKey?: string; // exact callback header value
+}
+
+type RelayDecisionDispatchResult =
+  | {
+      readonly kind: "allow";
+      readonly decision: Extract<RelayDecisionV1, { readonly kind: "allow" }>;
+      readonly grantCredential: string;
+    }
+  | {
+      readonly kind: "reject";
+      readonly decision: Extract<RelayDecisionV1, { readonly kind: "reject" }>;
+    }
+  | { readonly kind: "protocol_error"; readonly code: "invalid_request" | "invalid_context" | "environment_mismatch" }
+  | { readonly kind: "internal_error"; readonly code: "internal_error" };
+
+interface RelayDecisionControllerOperations {
+  decide(input: RelayDecisionDispatchInput): Promise<RelayDecisionDispatchResult>;
+}
+```
+
+`RelayDecisionDispatchInput` and `RelayDecisionDispatchResult` are exported
+Cloudflare-internal shared types so the stateless callback and DO compile against
+the same RPC contract. They do not change the Deno/Worker HTTP wire format.
+
+`kind:"allow"` and `kind:"reject"` are valid decisions serialized by the
+stateless callback with HTTP 200; the grant header is emitted only for allow.
+Malformed decision bodies, invalid signatures/claims and raw-key/hash binding
+mismatches return `protocol_error` (`invalid_request`, `invalid_context`, or
+`environment_mismatch`) and map to the existing HTTP 400 internal callback
+failure. Quota/model/policy denials use the exact v1 reject envelope. A lost or
+ambiguous QuotaController RPC result maps to `internal_error`/HTTP 500, never an
+allow. Deno therefore cannot activate or call Gateway B after any protocol or
+internal error.
+
+RelayDecisionController obtains environment from its own bound configuration,
+verifies the complete context HMAC and claims, recomputes the shard name from
+the verified request ID, and rejects a shard mismatch before policy reads or
+quota operations. It then strictly parses the decision envelope, validates raw
+key length and binding against the signed `idempotencyKeyHash`, performs
+authoritative registry/policy reads and model/tool classification, calculates
+the token budget, and derives the admission UTC day. No field from an unverified
+hint, request body, or Deno-selected URL can choose a pool, quota DO, environment
+or policy result.
+
+QuotaController exposes one relay admission RPC:
+
+```ts
+interface QuotaControllerEnv {
+  readonly QUOTA_LIMIT_STANDARD?: string;
+  readonly QUOTA_LIMIT_MINI?: string;
+  readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly OCTG_RELAY_ENVIRONMENT?: string; // required by admitRelay; preview|production only
+}
+
+interface RelayAdmissionInput {
+  readonly context: RelayContextV1; // verified by RelayDecisionController
+  readonly metadata: RelayRequestMetaV1; // strictly parsed by RelayDecisionController
+  readonly rawIdempotencyKey?: string; // exact value; absent when effectively absent
+  readonly reservedTokens: number;
+  readonly upperBoundTokens: number;
+  readonly maxOutputTokens: number;
+  readonly cacheEnabled: boolean;
+}
+
+type RelayAdmissionResult =
+  | { readonly kind: "admitted"; readonly grant: RelayGrant; readonly quota: RelayQuotaSnapshotV1 }
+  | { readonly kind: "denied"; readonly code: RelayErrorCode };
+
+interface QuotaControllerRelayOperations {
+  admitRelay(input: RelayAdmissionInput): Promise<RelayAdmissionResult>;
+}
+```
+
+`admitRelay` derives pool/day from that QuotaController's immutable
+`quota:{POOL}:{YYYY-MM-DD}` identity and validates the context environment
+against its environment binding. Its single `ctx.storage.transaction()` checks
+the existing raw-key/client idempotency mapping, finalized state, quota and
+in-flight capacity before writing. On admission it commits the RequestEntry,
+pool and unresolved counters, existing idempotency mapping, generation-bound
+lease, and initial `authorized` RelayGrant together. On quota, concurrency or
+duplicate-key rejection it writes no reservation, counter, idempotency mapping
+or grant; pruning expired leases may commit in the same transaction. An exact
+request replay returns the stored admission result only when request identity,
+metadata, key binding, and grant state match; a conflicting replay rejects.
+Different request IDs may reach different Decision shards, but all decisions for
+the same authoritative pool/day serialize in the same QuotaController; its
+existing raw-key/client mapping prevents cross-shard duplicate admission. The
+RPC accepts no pool, day, namespace, DO ID, expiry, environment override, or
+client-selected concurrency limit. It resolves `MAX_IN_FLIGHT_REQUESTS` from
+its bound Worker environment using the existing positive-integer/default-2
+semantics and uses the fixed `DEFAULT_IN_FLIGHT_LEASE_TTL_MS` value of 120,000
+ms. The bound environment also supplies the fixed `OCTG_RELAY_ENVIRONMENT`,
+which must be `preview` or `production` and match the verified context. These
+settings are not RPC inputs. QuotaController creates grant IDs, lease generations
+and timestamps inside the transaction. The Decision DO signs the grant claims
+returned by this RPC.
+QuotaController remains the sole quota and durable grant authority; the Decision
+DO persists no quota or grant ledger.
+
+QuotaController's existing `reserve`, `acquireInFlight`, and
+`authorizeRelay`-style split calls are not composed by the new decision path.
+Legacy routes retain their existing APIs. Relay admission uses only the atomic
+`admitRelay` RPC, with transaction-scoped helpers that do not open nested
+transactions. If an RPC acknowledgement is lost, an exact retry reaches the
+same Decision shard and calls `admitRelay` with the same request ID, context,
+metadata, and raw key; QuotaController returns the saved admission rather than
+reserving or authorizing twice. After activation, an exact decision replay
+cannot produce a second upstream attempt. Deno never retries an upstream request
+after activation; a transport failure before activation fails closed.
+
+The QuotaController DO grant record stores the immutable credential claim bindings,
 `authorizationExpiresAtMs` (issuedAt + 3,600,000), state, terminal
 report/fingerprint, and retention deadline. The credential's `expiresAtMs`
 remains issuedAt + 3,900,000. The state union is
@@ -648,17 +896,24 @@ cannot cause any quota transition after reconciliation.
 
 ## Traceability and rollout gate
 
-The Plan tasks map every requirement as follows: Task 0 is the sole pre-gate
-task and owns CPU feasibility measurement/evidence; CPU Gate PASS is a
-precondition to Tasks 1–8. Task 1 owns all wire types/bounds/errors; Task 2
-owns grant state, transaction seam, lease and reconciliation; Task 3 owns
-credential primitives and environment validation; Task 4 owns Worker
-callbacks, authorization and same-DO routing; Task 5 owns Deno ingress,
-configuration and upstream forwarding; Task 6 owns renewal, usage and terminal
-reporting; Task 7 owns public Responses integration/metadata/status mapping;
-Task 8 owns cross-runtime fault tests, config/deployment/docs/rollback and
-rollout verification. Component ownership, credential ownership, environments,
-routes, names and error semantics MUST match the Plan verbatim.
+The Plan tasks map every requirement as follows: Task 0 is the only pre-gate
+task and owns complete CPU feasibility evidence. The current Task 0 evidence is
+FAIL; Tasks 1–8 remain blocked. Task 1 owns shared wire contracts and their
+normative SPEC synchronization. Task 2 owns QuotaController's one-transaction
+`admitRelay`, grant state, lease, lifecycle and reconciliation. Task 3 owns
+credential primitives and environment validation. Task 4 owns the
+RelayDecisionController DO and the thin stateless decision callback; activation,
+renewal and terminal callback ownership remains Worker-side. Task 5 owns Deno
+ingress/config/upstream forwarding; Task 6 owns renewal, usage and terminal
+reporting; Task 7 owns public Responses integration and metadata/status mapping;
+Task 8 owns SQLite DO migration, Preview/Production isolation, fault tests,
+deployment/config/docs/rollback and rollout verification. Component ownership,
+credential ownership, environments, routes, names and error semantics MUST match
+the Plan verbatim.
+
+Fresh Superpowers Review Gate must review this revision before any new Task 0
+remote measurement authorization is used. Even after a complete Task 0 PASS,
+Tasks 1–8 do not start automatically.
 
 Canary remains a post-implementation rollout gate and does not replace the
 pre-implementation CPU gate. Rollout is blocked until both gates pass.
@@ -667,8 +922,12 @@ pre-implementation CPU gate. Rollout is blocked until both gates pass.
 
 - Free-tier ingress may still exceed 10 ms while proxying the original body
   once; a relay is a reduction in Worker work, not a proof of sufficiency.
-- Callback invocations themselves also run within the Free CPU limit and
-  need bounded payloads and isolated measurement.
+- DecisionDO offload is not a presumed CPU pass. Its 30-second Durable Object
+  CPU acceptance bound is separate from the stateless Worker's 10 ms limit and
+  requires independent measurement; the authoritative QuotaController
+  admission RPC is measured separately again.
+- The thin Worker decision callback still runs under the Free 10 ms HTTP CPU
+  limit; it must not regain cryptography, metadata parsing, policy or quota work.
 - Deno's execution lifetime after a client disconnect is not guaranteed by
   this design. DO conservative state plus reconciliation, rather than a
   background callback assumption, is the safety mechanism.
