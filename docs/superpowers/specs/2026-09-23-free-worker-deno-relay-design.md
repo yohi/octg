@@ -2,14 +2,15 @@
 
 ## Status and scope
 
-- Design revision status: **requires Fresh Superpowers Review Gate review** after
-  the Task 0 architecture failure recorded below.
-- CPU feasibility: **FAIL — decision callback architecture requires revision**.
-- Fresh Review Gate findings: RG-001 remains unresolved; RG-002 through RG-007 remain resolved. This revision preserves their contracts and does not reopen those findings.
-- Implementation status: Tasks 1–8 remain blocked until the revised architecture
-  passes a complete new Task 0 run and the evidence is accepted by the Fresh
-  Superpowers Review Gate. This document revision does not authorize that remote
-  run or any implementation.
+- Fresh post-measurement Superpowers Review Gate: **ACCEPTED (2026-09-27)**.
+- Task 0: **COMPLETE** for the revised architecture.
+- CPU feasibility: **PASS**.
+- Architecture revision required: **NO**.
+- Review findings: RG-001 is **RESOLVED**; RG-002 through RG-007 remain
+  **RESOLVED**; new architecture findings: **NONE**.
+- Implementation status: Tasks 1–8 remain **NOT STARTED**. They are no longer
+  blocked by the CPU feasibility gate. Task 0 acceptance does not authorize a
+  commit, push, or Production deployment.
 - Constraint: Cloudflare Workers Paid is not an option. Deno may hold the
   upstream AI Gateway credential and perform upstream forwarding.
 - This is a follow-up to the implemented bounded-prefix approach in
@@ -77,9 +78,88 @@ invocations are available or inferred here.
 | Temporary Deno app / revision | `octg-task0-f631181` / `1wy0c39533tx` |
 | Measurement period | 2026-09-23 21:03:49–21:10:54 JST |
 
-**CPU feasibility: FAIL — decision callback architecture requires revision.**
+**Historical CPU feasibility result for the pre-revision architecture: FAIL —
+decision callback architecture required revision.**
 No credentials, request bodies, prompts or response bodies are included in this
 record.
+
+<!-- markdownlint-disable MD013 -->
+### Revised Task 0 PASS evidence (2026-09-27)
+
+The revised architecture passed the complete Task 0 capability gate. The
+post-measurement Fresh Superpowers Review Gate accepted this evidence; RG-001 is
+resolved, RG-002 through RG-007 remain resolved, and no new architecture
+finding was raised. The 2026-09-23 FAIL above remains historical evidence for
+the earlier architecture and is not superseded as a historical result.
+
+| Measurement evidence | Value |
+| --- | --- |
+| Harness fingerprint | `afb3bad3c2eef2ec95d93aa12c99a7ff07c861a8694426552ab0b90a8e831ca4` |
+| Worker revision | `0fce809d-58bd-4846-bc40-219b1ebad06f` |
+| Deno revision | `63q85abbp908` |
+| Gateway B stub revision | `f93fef7e-e628-4701-b007-e6b685f228ad` |
+| Measurement window | 2026-09-27 00:54:05–01:13:28 UTC |
+| Driver workload classes | 17; at least 100 successful invocations per class |
+| Upstream | Separate Gateway B HTTP stub; no paid model request was performed |
+| Harness location | Outside the repository |
+
+The correctness gate used the same fingerprinted revisions: ingress returned
+HTTP 200 `allow`; D01–D18 completed; the selected and recomputed Decision DO
+shards matched; and the admit → activate → renew → settle grant lifecycle
+succeeded. The Deno path made an HTTP request to the separate Gateway B stub.
+
+The CPU series below copy the accepted sanitized aggregate report for classes
+that were complete there and include read-only Workers Logs recovery for the
+five initially incomplete series. The source reports remain unchanged.
+Percentiles are nearest-rank values. Tail margin is measured to the stateless
+10 ms maximum or the Durable Object 30,000 ms maximum, as appropriate.
+
+| Stateless Worker class | Driver successful | CPU records | min | p50 | p90 | p95 | p99 | max | `exceededCpu` | Tail margin |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ingress 123 KiB / `stream=true` | 200 | 200 | 1 | 1 | 2 | 2 | 4 | 5 | 0 | 5 ms |
+| Ingress 123 KiB / `stream=false` | 200 | 200 | 1 | 1 | 2 | 2 | 4 | 4 | 0 | 6 ms |
+| Ingress 174 KiB / `stream=true` | 200 | 200 | 1 | 1 | 2 | 3 | 4 | 5 | 0 | 5 ms |
+| Ingress 174 KiB / `stream=false` | 200 | 200 | 1 | 1 | 2 | 2 | 4 | 6 | 0 | 4 ms |
+| Ingress ~700 KiB / `stream=true` | 200 | 199 | 1 | 1 | 2 | 2 | 4 | 5 | 0 | 5 ms |
+| Ingress ~700 KiB / `stream=false` | 103 | 104 | 1 | 1 | 2 | 2 | 4 | 5 | 0 | 5 ms |
+| Ingress exactly 1 MiB / `stream=true` | 100 | 100 | 1 | 1 | 1 | 2 | 4 | 4 | 0 | 6 ms |
+| Ingress exactly 1 MiB / `stream=false` | 100 | 100 | 1 | 1 | 1 | 1 | 3 | 5 | 0 | 5 ms |
+| Decision callback | 100 | 1,080 | 1 | 1 | 1 | 1 | 2 | 5 | 0 | 5 ms |
+| Activation callback | 100 | 1,350 | 1 | 1 | 1 | 2 | 3 | 8 | 0 | 2 ms |
+| Renewal callback | 100 | 101 | 0 | 1 | 1 | 2 | 2 | 2 | 0 | 8 ms |
+| Terminal callback | 100 | 1,374 | 1 | 1 | 1 | 2 | 3 | 4 | 0 | 6 ms |
+
+| Durable Object operation | Driver successful | CPU records | min | p50 | p90 | p95 | p99 | max | `exceededCpu` | Tail margin |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `RelayDecisionController.decide` | 100 | 100 | 1 | 3 | 5 | 6 | 7 | 8 | 0 | 29,992 ms |
+| `QuotaController.admitRelay` | 100 | 100 | 0 | 0 | 1 | 1 | 1 | 2 | 0 | 29,998 ms |
+| `QuotaController.activateRelay` | 100 | 100 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 29,999 ms |
+| `QuotaController.renewRelay` | 100 | 100 | 0 | 0 | 0 | 1 | 1 | 1 | 0 | 29,999 ms |
+| `QuotaController.finishRelay` | 100 | 100 | 0 | 0 | 0 | 0 | 1 | 2 | 0 | 29,998 ms |
+
+The initially low CPU-record counts were a query undercount. A read-only
+Workers Logs `invocations` query against this same Worker revision and the
+original measurement windows recovered at least 100 qualifying CPU invocation
+rows for each previously incomplete series. The Worker Logs records were
+grouped by invocation and checked for the `cpuTimeMs` field. Each of the five
+recoveries is classified `QUERY_FILTER_UNDERCOUNT`. For the four
+QuotaController RPCs, the query grouped all observed Durable Object IDs by
+exact RPC method and class; it did not filter to one object ID or combine
+different RPC methods. The recovered records contain `cpuTimeMs`, and each
+class has zero `exceededCpu`. No workload was rerun during telemetry recovery.
+
+An additional full-range, same-method check observed a 31 ms maximum for
+`QuotaController.finishRelay`. This remains below the 30,000 ms Durable Object
+maximum; it is not substituted for the dedicated per-operation result above.
+
+Task 0 cleanup removed the temporary Worker, Gateway stub Worker, Preview D1,
+external harness source and raw logs. The pre-existing Deno Task 0 app
+`octg-t0-full-rerun-260925-c7e9` remains as a cleanup exception; its upstream
+setting was restored on revision `2sv3ycz08p72` and its health route was
+verified. The repository was unchanged by Task 0. Sanitized evidence is
+retained outside the repository in `reports/cpu-summary.json` and
+`reports/fingerprint.json`.
+<!-- markdownlint-enable MD013 -->
 
 ## Goals and exclusions
 
@@ -296,17 +376,14 @@ RelayDecisionController and each QuotaController RPC class by service/trigger or
 isolated measurement window. Never pool a DO invocation into its calling Worker
 callback.
 
-## Pre-implementation CPU Feasibility Gate (BLOCKING)
+## Pre-implementation CPU Feasibility Gate (PASS; prerequisite satisfied)
 
-Task 1 through Task 8 MUST remain blocked until a complete Task 0 rerun for this
-revised architecture is PASS and Fresh Superpowers Review Gate accepts its
-evidence. Task 0 is the sole permitted pre-gate activity. It is an
-outside-repository disposable capability spike, not production implementation.
-Remote deployment and measurement require the user's explicit authorization.
-Use the intended Workers Free Preview and a temporary Deno app; local emulators,
-Paid Workers and synthetic microbenchmarks do not satisfy this gate. Record the
-dated Worker/Deno revisions, runtime/plan, methodology and sanitized aggregate
-results without request bodies or credentials.
+Task 0 for the revised architecture is COMPLETE with CPU feasibility **PASS**,
+and the post-measurement Fresh Superpowers Review Gate ACCEPTED its evidence on
+2026-09-27. Tasks 1–8 are no longer blocked by the CPU feasibility gate, but
+remain NOT STARTED. Task 0 remains an outside-repository disposable capability
+spike, not production implementation. This accepted gate does not authorize a
+commit, push or Production deployment.
 
 The evidence MUST include all of the following:
 
@@ -369,11 +446,13 @@ p99 > 8 ms or max >= 10 ms; or if any required DO operation has `exceededCpu >
 0`, p99 > 24,000 ms or max >= 30,000 ms. A known observed threshold violation
 is FAIL even when another telemetry record is missing. Missing required samples
 or telemetry with no observed failure, unavailable Free runtime or incomplete
-workload reproduction is **BLOCKED**, never PASS. The recorded Task 0 result is
-FAIL because the decision callback reached p99/max 19 ms. Tasks 1–8 must remain
-not started; this revision requires Fresh Review Gate approval before a complete
-Task 0 rerun. Only a complete rerun PASS and accepted evidence can change the
-design status to implementation-ready.
+workload reproduction is **BLOCKED**, never PASS. The 2026-09-23 result remains
+historical FAIL because the prior decision callback reached p99/max 19 ms. The
+revised 2026-09-27 result is PASS and was accepted by the post-measurement Fresh
+Superpowers Review Gate; the sanitized per-class evidence is recorded above.
+Tasks 1–8 remain unstarted, but are no longer blocked by this CPU gate. Their
+dependency order and the separate authorization requirements for commit, push
+and Production deployment remain unchanged.
 
 ## Normative relay contract (v1)
 
@@ -896,9 +975,10 @@ cannot cause any quota transition after reconciliation.
 
 ## Traceability and rollout gate
 
-The Plan tasks map every requirement as follows: Task 0 is the only pre-gate
-task and owns complete CPU feasibility evidence. The current Task 0 evidence is
-FAIL; Tasks 1–8 remain blocked. Task 1 owns shared wire contracts and their
+The Plan tasks map every requirement as follows: Task 0 is the pre-implementation
+CPU feasibility gate and owns complete CPU evidence. The revised 2026-09-27
+Task 0 result is PASS and accepted; Tasks 1–8 are no longer blocked by CPU
+feasibility and remain unstarted. Task 1 owns shared wire contracts and their
 normative SPEC synchronization. Task 2 owns QuotaController's one-transaction
 `admitRelay`, grant state, lease, lifecycle and reconciliation. Task 3 owns
 credential primitives and environment validation. Task 4 owns the
@@ -911,9 +991,10 @@ deployment/config/docs/rollback and rollout verification. Component ownership,
 credential ownership, environments, routes, names and error semantics MUST match
 the Plan verbatim.
 
-Fresh Superpowers Review Gate must review this revision before any new Task 0
-remote measurement authorization is used. Even after a complete Task 0 PASS,
-Tasks 1–8 do not start automatically.
+The post-measurement Fresh Superpowers Review Gate accepted the revised Task 0
+PASS evidence on 2026-09-27. Tasks 1–8 do not start automatically. Their
+implementation, any commit or push, and any Production deployment remain
+subject to the applicable separate user instructions and authorizations.
 
 Canary remains a post-implementation rollout gate and does not replace the
 pre-implementation CPU gate. Rollout is blocked until both gates pass.
@@ -922,10 +1003,11 @@ pre-implementation CPU gate. Rollout is blocked until both gates pass.
 
 - Free-tier ingress may still exceed 10 ms while proxying the original body
   once; a relay is a reduction in Worker work, not a proof of sufficiency.
-- DecisionDO offload is not a presumed CPU pass. Its 30-second Durable Object
-  CPU acceptance bound is separate from the stateless Worker's 10 ms limit and
-  requires independent measurement; the authoritative QuotaController
-  admission RPC is measured separately again.
+- DecisionDO offload is not presumed to pass CPU limits. The revised
+  architecture passed its independent 2026-09-27 Task 0 measurement: the
+  Durable Object 30-second bound remained separate from the stateless Worker's
+  10 ms limit, and the authoritative QuotaController RPCs were measured
+  separately. This evidence does not authorize a Production deployment.
 - The thin Worker decision callback still runs under the Free 10 ms HTTP CPU
   limit; it must not regain cryptography, metadata parsing, policy or quota work.
 - Deno's execution lifetime after a client disconnect is not guaranteed by

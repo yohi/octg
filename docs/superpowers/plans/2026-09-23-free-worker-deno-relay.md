@@ -12,9 +12,9 @@
 
 **Spec:** [Free-Worker Responses Relay Through Deno](../specs/2026-09-23-free-worker-deno-relay-design.md).
 
-**Execution status: FAIL — decision callback CPU feasibility.** Task 0 was executed on 2026-09-23. The stateless decision callback recorded p99/max CPU of 19 ms, violating the 8/10 ms gate. The sanitized evidence is in the Design. This Plan revision is documentation-only and awaits Fresh Superpowers Review Gate approval. Do not start Tasks 1–8. After review approval and separate explicit remote-measurement authorization, Task 0 must be rerun in full for the revised architecture; Tasks 1–8 remain blocked until that complete rerun passes and its evidence is accepted.
+**Execution status: Task 0 COMPLETE — revised CPU feasibility PASS (2026-09-27).** The 2026-09-23 decision-callback CPU failure remains historical evidence for the earlier architecture. The revised architecture passed the full Task 0 gate, and the post-measurement Fresh Superpowers Review Gate ACCEPTED the evidence. RG-001 is RESOLVED; RG-002 through RG-007 remain RESOLVED; no new architecture findings were raised. Tasks 1–8 have not started and are no longer blocked by the CPU feasibility gate. No commit, push or Production deployment is authorized by this status.
 
-**Review findings:** RG-001 remains unresolved because the measured architecture failed. RG-002 through RG-007 remain resolved and are preserved; reopen none without a concrete regression introduced by this revision.
+**Review findings:** RG-001 is RESOLVED by the accepted 2026-09-27 post-measurement review. RG-002 through RG-007 remain RESOLVED and are preserved; new architecture findings: NONE. Reopen none without a concrete regression introduced by a future revision.
 
 ## Global Constraints
 
@@ -62,15 +62,15 @@
 
 The Design's **Normative relay contract (v1)** is authoritative for every name, field, limit, state, mapping and ownership rule below. Task 1 reproduces that complete normative contract as shared wire types and parsers; later tasks consume those names without renaming them. Keep each new TS module focused and below the repository's 250-LOC guidance where feasible. Existing oversized modules should gain only routing glue, not another full state machine.
 
-## Task 0: Free-plan CPU Capability Spike (the only pre-gate task)
+## Task 0: Free-plan CPU Capability Spike (complete pre-implementation gate)
 
-**Purpose:** Re-run the complete capability gate for the revised split between the stateless Worker decision callback, `RelayDecisionController`, and atomic `QuotaController.admitRelay`, without implementing production behavior in Task 0.
+**Purpose:** Complete the capability gate for the revised split between the stateless Worker decision callback, `RelayDecisionController`, and atomic `QuotaController.admitRelay`, without implementing production behavior in Task 0. This Task 0 is complete; do not rerun it for the accepted evidence.
 
-**Consumes / produces:** Consumes the reviewed Design, Free-plan runtime authorization and the sanitized prior FAIL. Produces the complete revised Task 0 CPU evidence and one explicit PASS/FAIL/BLOCKED decision; it does not produce source or implementation artifacts.
+**Consumes / produces:** Consumed the Design, the historical 2026-09-23 FAIL, Free-plan runtime authorization and separate measurement authorization. Produced the complete revised Task 0 CPU evidence and an explicit PASS decision accepted by the post-measurement Fresh Superpowers Review Gate. It produced no repository source or implementation artifacts.
 
-**Current evidence:** Task 0 was executed on 2026-09-23 and is **FAIL**. The stateless decision callback had 98 CPU telemetry records from 100 successful driver invocations, with p99/max of 19 ms and `exceededCpu=0`. The observed maximum violates the 10 ms gate. The sanitized evidence is in the Design. Tasks 1–8 have not started.
+**Current evidence:** The 2026-09-23 architecture remains historical **FAIL**: the decision callback had 98 CPU records from 100 successful driver invocations, with p99/max of 19 ms. The revised 2026-09-27 architecture is **PASS** and accepted. Its fingerprint is `afb3bad3c2eef2ec95d93aa12c99a7ff07c861a8694426552ab0b90a8e831ca4`, Worker revision is `0fce809d-58bd-4846-bc40-219b1ebad06f`, and measurement window is 2026-09-27T00:54:05Z–01:13:28Z. All 17 classes recorded at least 100 successful driver invocations; the per-class CPU evidence, correctness result and telemetry-recovery method are in the Design's **Revised Task 0 PASS evidence (2026-09-27)** section. Tasks 1–8 implementation remains not started.
 
-**Next-run preconditions:** Fresh Superpowers Review Gate must accept this Design/Plan revision, and the user must separately authorize remote deployment/runtime measurement. Only then may Task 0 run in a repository-external disposable harness against a Workers Free Preview and a temporary Deno app with isolated Preview D1/DO namespaces. Never use Production resources. Local emulators, Paid Workers and synthetic microbenchmarks are not qualifying evidence. Task 0 remains the only permitted work until its complete revised gate records PASS and the evidence is accepted.
+**Accepted gate state:** The post-measurement Fresh Superpowers Review Gate accepted the revised PASS evidence on 2026-09-27. Tasks 1–8 are no longer blocked by CPU feasibility, but are not started automatically. Any future remote deployment or runtime measurement still requires separate explicit user authorization. Never use Production resources for Task 0. Local emulators, Paid Workers and synthetic microbenchmarks are not qualifying evidence. Task 0 is complete, and its accepted PASS removes the CPU-feasibility block for Tasks 1–8.
 
 **Ingress workload:** Reproduce authenticated one-pass `/v1/responses` Worker → Deno forwarding. The ingress Worker signs the existing request context, then forwards the original body exactly once without clone, full buffering, JSON parsing or transformation. Measure each size/mode bucket below with at least 100 successful invocations:
 
@@ -96,15 +96,17 @@ Use at least 100 successful invocations per ingress bucket, stateless callback a
 
 **Artifacts and disposal:** Keep harness source, temporary deployment configuration, logs and raw measurement files outside the repository in a task-specific temporary directory owned by the Task 0 operator. Do not place credentials, request bodies, prompts or response bodies in artifacts. The operator is responsible for cleanup: after results are independently summarized into the review record, delete the harness, temporary configuration, raw logs and temporary deployment resources. Retain only sanitized aggregate evidence, dated runtime/revision identifiers, test methodology and explicit PASS/FAIL decision in the review record. Do not commit or push spike artifacts.
 
-**Gate decision:** PASS requires every stateless Worker class and every required DO operation class to meet its separate thresholds, with complete >=100 successful/CPU telemetry samples, no `exceededCpu`, and no omitted class. Any observed bound violation is FAIL even if another telemetry series is incomplete. Missing evidence without an observed failure is BLOCKED. The previous architecture has an observed 19 ms decision callback and is recorded FAIL; do not rerun that architecture. The revised complete gate is the sole prerequisite for Tasks 1–8. Do not weaken thresholds or reduce workload after a failure.
+**Cleanup record (2026-09-27):** The temporary Worker, Gateway stub Worker, Preview D1, external harness source and raw logs were removed. The pre-existing Deno Task 0 app `octg-t0-full-rerun-260925-c7e9` remains as a cleanup exception; its upstream setting was restored on revision `2sv3ycz08p72` and its health route verified. The repository was unchanged by Task 0. Only sanitized `reports/cpu-summary.json` and `reports/fingerprint.json` were retained outside the repository.
 
-## Blocking prerequisite: Pre-implementation CPU Feasibility Gate
+**Gate decision:** PASS requires every stateless Worker class and every required DO operation class to meet its separate thresholds, with complete >=100 successful/CPU telemetry samples, no `exceededCpu`, and no omitted class. Any observed bound violation is FAIL even if another telemetry series is incomplete. Missing evidence without an observed failure is BLOCKED. The previous architecture's observed 19 ms decision callback remains historical FAIL evidence; do not rerun that architecture. The revised 2026-09-27 gate is PASS and accepted; Tasks 1–8 are no longer blocked by CPU feasibility. Do not weaken thresholds or reduce workload after a failure.
 
-Task 0 is the sole task permitted before PASS. The current Task 0 result is FAIL, so Tasks 1–8 MUST remain not-started. Fresh Superpowers Review Gate must first accept this revision; a separately authorized complete Task 0 rerun must then pass, with all evidence recorded, before Task 1 can start. No task completion or CPU PASS automatically authorizes a commit or push.
+## Pre-implementation CPU Feasibility Gate (PASS; prerequisite satisfied)
+
+Task 0 is complete with an accepted PASS. Tasks 1–8 are no longer blocked by the CPU feasibility gate and remain not started. This gate result does not authorize a commit, push or Production deployment. Any such action continues to require its separate explicit authorization.
 
 ## Task dependencies and TDD/commit order
 
-Task 0 is the only pre-gate task. The current status is FAIL; Fresh Superpowers Review Gate must accept this revision before a separately authorized complete Task 0 rerun. Its explicit PASS and accepted evidence are hard prerequisites to Tasks 1–8. After that gate: Task 1 (including normative SPEC synchronization) precedes Tasks 2 and 3; Tasks 2 and 3 both precede Task 4; Tasks 1, 3 and 4 precede Task 5; Task 5 precedes Task 6; Tasks 1, 3, 4, 5 and 6 precede Task 7; Tasks 1–7 precede Task 8. Tasks 2 and 3 may proceed independently after Task 1. Within Tasks 1–8, follow this exact sequence: (1) RED command, (2) expected RED, (3) minimum GREEN implementation, (4) GREEN command, (5) expected GREEN, (6) only then necessary refactor and rerun GREEN, (7) completion boundary, (8) commit message usable only if the user explicitly authorized that commit. Task 0 is excluded from this sequence and remains an external disposable runtime capability measurement. No task instructs push.
+Task 0 is complete with an accepted PASS; Tasks 1–8 are no longer blocked by CPU feasibility. The implementation dependency order is: Task 1 (including normative SPEC synchronization) precedes Tasks 2 and 3; Tasks 2 and 3 both precede Task 4; Tasks 1, 3 and 4 precede Task 5; Task 5 precedes Task 6; Tasks 1, 3, 4, 5 and 6 precede Task 7; Tasks 1–7 precede Task 8. Tasks 2 and 3 may proceed independently after Task 1. Within Tasks 1–8, follow this exact sequence: (1) RED command, (2) expected RED, (3) minimum GREEN implementation, (4) GREEN command, (5) expected GREEN, (6) only then necessary refactor and rerun GREEN, (7) completion boundary, (8) commit message usable only if the user explicitly authorized that commit. Task 0 is complete and excluded from this sequence and its repository-external capability measurement is complete. No task instructs push.
 
 ## Task 1: Define and test the bounded relay contract
 
@@ -435,7 +437,7 @@ No production change occurs as part of writing or merely executing tests for thi
 - Thin callback and DecisionDO trust/routing: Tasks 3, 4, 8.
 - Atomic quota admission, one-use authorization and failure windows: Tasks 2, 4, 8.
 - Upstream forwarding, stream usage and lease renewal: Tasks 5, 6.
-- Free CPU feasibility ownership/evidence: Task 0; complete Worker + separate DO CPU PASS prerequisite for Tasks 1–8. Deployment, SQLite migration, environment isolation and rollback: Tasks 4, 8, canary gate.
+- Free CPU feasibility ownership/evidence: Task 0; the accepted complete Worker + separate DO CPU PASS satisfies the prerequisite, so Tasks 1–8 are no longer CPU-blocked. Deployment, SQLite migration, environment isolation and rollback: Tasks 4, 8, canary gate.
 - External-facing normative contract and operational documentation: Task 8.
 
 The source tree already contains an unrelated untracked `deno.lock`; verify status before edits and leave it unstaged.
