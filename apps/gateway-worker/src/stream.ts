@@ -117,12 +117,8 @@ export function proxyStream(
   let renewalError: unknown;
   let renewalInFlight = false;
   let renewalTimer: ReturnType<typeof setInterval> | undefined;
-  let textDecoder: TextDecoder | undefined;
-  const ringBuffer = new RingTailBuffer(32768);
-  const decodeTail = (tail: Uint8Array): string => {
-    textDecoder ??= new TextDecoder();
-    return textDecoder.decode(tail);
-  };
+  const textDecoder = new TextDecoder();
+  let pendingEvent = "";
   const stopRenewal = () => {
     if (renewalTimer === undefined) return;
     clearInterval(renewalTimer);
@@ -189,43 +185,24 @@ export function proxyStream(
       await finalizeUncertain(error);
     }
   };
-  const parseEvents = (text: string) => {
-    let eventStart = 0;
-    while (eventStart < text.length) {
-      let eventEnd = text.indexOf("\n\n", eventStart);
-      if (eventEnd === -1) eventEnd = text.length;
-      const event = text.slice(eventStart, eventEnd);
-      eventStart = eventEnd + 2;
-
-      if (!event.includes('"usage"') && !event.includes("response.completed")) continue;
-
-      const extracted = extractUsageFromEvent(event);
-      if (extracted) {
-        usage = extracted;
-        continue;
-      }
-
-      if (event.length < 2048) {
-        let lineStart = 0;
-        while (lineStart < event.length) {
-          let lineEnd = event.indexOf("\n", lineStart);
-          if (lineEnd === -1) lineEnd = event.length;
-          const line = event.slice(lineStart, lineEnd);
-          lineStart = lineEnd + 1;
-
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(payload) as Record<string, unknown>;
-            if (parsed.usage) usage = parsed.usage as Usage;
-            const response = parsed.response as { usage?: Usage } | undefined;
-            if (parsed.type === "response.completed" && response?.usage) usage = response.usage;
-          } catch {
-            continue;
-          }
-        }
-      }
+  const parseEvent = (event: string) => {
+    if (!event.includes('"usage"') && !event.includes("response.completed")) return;
+    const extracted = extractUsageFromEvent(event);
+    if (extracted !== undefined) usage = extracted;
+  };
+  const consumeEventText = (text: string, flush = false) => {
+    pendingEvent += text;
+    const boundaryPattern = /\r?\n\r?\n/g;
+    let boundary = boundaryPattern.exec(pendingEvent);
+    while (boundary !== null) {
+      parseEvent(pendingEvent.slice(0, boundary.index));
+      pendingEvent = pendingEvent.slice(boundary.index + boundary[0].length);
+      boundaryPattern.lastIndex = 0;
+      boundary = boundaryPattern.exec(pendingEvent);
+    }
+    if (flush && pendingEvent.length > 0) {
+      parseEvent(pendingEvent);
+      pendingEvent = "";
     }
   };
   if (!upstream.body) {
@@ -262,20 +239,10 @@ export function proxyStream(
   const tapped = upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       controller.enqueue(chunk);
-      ringBuffer.write(chunk);
-      if (usage === undefined && mightContainUsage(chunk)) {
-        const text = decodeTail(ringBuffer.getTail());
-        parseEvents(text);
-      }
+      if (usage === undefined) consumeEventText(textDecoder.decode(chunk, { stream: true }));
     },
     flush() {
-      if (usage === undefined) {
-        const tail = ringBuffer.getTail();
-        if (tail.byteLength > 0) {
-          const text = decodeTail(tail);
-          parseEvents(text);
-        }
-      }
+      if (usage === undefined) consumeEventText(textDecoder.decode(), true);
       ctx.waitUntil(finalize());
     },
     cancel() {

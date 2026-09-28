@@ -66,6 +66,7 @@ const activationCallbackPath = "/internal/relay/v1/activation";
 const renewalCallbackPath = "/internal/relay/v1/renewal";
 const terminalCallbackPath = "/internal/relay/v1/terminal";
 const upstreamResponsesPath = "/responses";
+const callbackTimeoutMs = 10_000;
 const jsonContentType = "application/json";
 const maxContextHeaderBytes = 4_096;
 const maxGrantCredentialBytes = 4_096;
@@ -217,6 +218,7 @@ async function activateOnce(args: RelayHandlerArgs, grant: ActiveGrant): Promise
         grantId: grant.grantId,
         leaseGeneration: grant.leaseGeneration,
       }),
+      signal: callbackSignal(args),
     });
   } catch {
     return { kind: "unknown" };
@@ -265,6 +267,16 @@ function terminalReport(grant: ActiveGrant, outcome: TerminalCallbackOutcome): R
   };
 }
 
+function callbackSignal(args: RelayHandlerArgs, renewal = false): AbortSignal {
+  const timeoutMs = renewal
+    ? Math.min(
+      callbackTimeoutMs,
+      Math.max(1, args.config.leaseTtlMs - args.config.leaseRenewalIntervalMs - 1),
+    )
+    : callbackTimeoutMs;
+  return AbortSignal.timeout(timeoutMs);
+}
+
 /** Best-effort terminal callback; delivery failure never fails the ingress response. */
 async function sendTerminalReport(
   args: RelayHandlerArgs,
@@ -276,6 +288,7 @@ async function sendTerminalReport(
       method: "POST",
       headers: callbackHeaders(args.config, grantHeader, grant.credential),
       body: JSON.stringify(report),
+      signal: callbackSignal(args),
     });
   } catch {
     // Best-effort reporting: the reservation stays for reconciliation.
@@ -292,6 +305,7 @@ async function renewLeaseOnce(args: RelayHandlerArgs, grant: ActiveGrant): Promi
       grantId: grant.grantId,
       leaseGeneration: grant.leaseGeneration,
     }),
+    signal: callbackSignal(args, true),
   });
   if (response.status !== 200) throw new RelayLeaseRenewalError();
   const value = await readBoundedCallbackJson(response);
@@ -441,6 +455,7 @@ export async function handleRelay(request: Request, args: RelayHandlerArgs): Pro
         method: "POST",
         headers,
         body: JSON.stringify({ version: 1, metadata }),
+        signal: callbackSignal(args),
       },
     );
   } catch {
