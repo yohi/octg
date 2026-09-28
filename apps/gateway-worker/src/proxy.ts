@@ -27,6 +27,7 @@ import {
   parseIdempotencyKey,
   quotaIdOf,
   resolveMaxInputBytes,
+  signRelayContext,
   toPoolLower,
   utcDayOf,
   type QuotaSnapshot,
@@ -37,6 +38,13 @@ import {
   type ReserveResult,
   type Usage,
 } from "@octg/shared";
+import { resolveRelayConfig } from "./relay-auth";
+import {
+  buildRelayIngressContext,
+  callDenoRelay,
+  relayIdempotencyKeyHash,
+  relayPublicResponse,
+} from "./relay-client";
 import { authenticate } from "./auth";
 import {
   completeRequestAuditBestEffort,
@@ -626,6 +634,26 @@ export async function handleProxy(
     const idempotencyKey = parsedIdempotencyKey.kind === "valid"
       ? parsedIdempotencyKey.value
       : undefined;
+    // Relay selection (design "Public Responses relay selection order"): the
+    // relay configuration is independent from the legacy Deno tokenizer and
+    // /prepare configuration, which are only resolved when relay is disabled.
+    const relayConfig = resolveRelayConfig(env);
+    if (endpoint === "responses" && relayConfig.kind === "enabled") {
+      const context = await buildRelayIngressContext({
+        environment: relayConfig.environment,
+        requestId,
+        clientId: auth.id,
+        idempotencyKeyHash: await relayIdempotencyKeyHash(auth.id, idempotencyKey),
+      });
+      const signedContext = await signRelayContext(context, relayConfig.contextHmacKey);
+      const relayed = await callDenoRelay(request, signedContext, relayConfig);
+      return relayPublicResponse(relayed, requestId, workerVersionHeaders(env.CF_VERSION_METADATA));
+    }
+    if (endpoint === "responses" && relayConfig.kind === "invalid") {
+      // A partial or invalid relay configuration fails closed and never
+      // silently falls back to the legacy route.
+      return errorResponse(errInternal(requestId));
+    }
     const denoRuntimeConfig = resolveDenoRuntimeConfig(env);
     if (denoRuntimeConfig.tokenizer.kind === "invalid") {
       const tokenizeStartedAt = startResourceStage(env, requestId, "tokenize");

@@ -50,7 +50,7 @@ export function resolveTokenBudget(args: TokenBudgetArguments): TokenBudgetOutco
           : { kind: "arithmetic_error" };
       }
       default:
-        return assertNever(output, "output decision");
+        return assertNever(output, "token budget outcome");
     }
   } catch {
     // no-excuse-ok: catch — invalid arithmetic is a typed fail-closed outcome.
