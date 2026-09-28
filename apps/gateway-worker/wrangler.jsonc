@@ -31,12 +31,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "QUOTA_CONTROLLER", "class_name": "QuotaController" },
-      { "name": "TOKENIZER_CONTROLLER", "class_name": "TokenizerController" }
+      { "name": "TOKENIZER_CONTROLLER", "class_name": "TokenizerController" },
+      { "name": "RELAY_DECISION_CONTROLLER", "class_name": "RelayDecisionController" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["QuotaController"] },
-    { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] }
+    { "tag": "v2", "new_sqlite_classes": ["TokenizerController"] },
+    { "tag": "v3", "new_sqlite_classes": ["RelayDecisionController"] }
   ],
   "d1_databases": [
     {

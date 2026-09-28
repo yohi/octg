@@ -1,5 +1,7 @@
 import { QuotaController } from "@octg/quota-controller";
 import { TokenizerController } from "@octg/tokenizer-controller";
+import { handleRelayCallback } from "./relay-callback";
+import { RelayDecisionController } from "./relay-decision-controller";
 import { handleProxy } from "./proxy";
 import { handleModels } from "./models";
 import { handleQuota } from "./quota-api";
@@ -9,11 +11,12 @@ import { handleAdmin } from "./admin";
 import { runScheduled } from "./scheduled";
 import { verifyAccessJwt } from "./access";
 
-export { QuotaController, TokenizerController };
+export { QuotaController, TokenizerController, RelayDecisionController };
 
 export interface Env {
   readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
   readonly TOKENIZER_CONTROLLER: DurableObjectNamespace<TokenizerController>;
+  readonly RELAY_DECISION_CONTROLLER: DurableObjectNamespace<RelayDecisionController>;
   readonly DB: D1Database;
   readonly CF_VERSION_METADATA?: WorkerVersionMetadata;
   readonly OCTG_KEY_PEPPER: string;
@@ -29,6 +32,12 @@ export interface Env {
   readonly DENO_PREPARE_ENDPOINT?: string;
   readonly DENO_PREPARE_THRESHOLD_BYTES?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly OCTG_RELAY_ENABLED?: string;
+  readonly OCTG_RELAY_ENVIRONMENT?: string;
+  readonly OCTG_RELAY_INGRESS_ENDPOINT?: string;
+  readonly OCTG_RELAY_INGRESS_AUTH_TOKEN?: string;
+  readonly OCTG_RELAY_SERVICE_AUTH_TOKEN?: string;
+  readonly OCTG_RELAY_CONTEXT_HMAC_KEY?: string;
   readonly IN_FLIGHT_LEASE_TTL_MS?: string;
   readonly IN_FLIGHT_LEASE_RENEWAL_MS?: string;
   readonly ACCESS_TEAM_DOMAIN: string;
@@ -46,6 +55,11 @@ export default {
     const url = new URL(request.url);
     let requestId: string | undefined;
     try {
+      // Relay callbacks are routed before public routes to keep internal paths
+      // isolated even if a future public route accidentally overlaps.
+      if (url.pathname.startsWith("/internal/relay/v1/")) {
+        return await handleRelayCallback(request, env, ctx);
+      }
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         requestId = `req_${ulid()}`;
         return await handleProxy(request, env, ctx, "chat", requestId);
@@ -75,5 +89,5 @@ export default {
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runScheduled(env, new Date(controller.scheduledTime)));
-  }
+  },
 } satisfies ExportedHandler<Env>;

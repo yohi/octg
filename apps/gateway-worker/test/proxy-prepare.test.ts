@@ -620,3 +620,144 @@ describe("prepare routing", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });
+
+const RELAY_BINDINGS = [
+  "OCTG_RELAY_ENABLED",
+  "OCTG_RELAY_ENVIRONMENT",
+  "OCTG_RELAY_INGRESS_ENDPOINT",
+  "OCTG_RELAY_INGRESS_AUTH_TOKEN",
+  "OCTG_RELAY_SERVICE_AUTH_TOKEN",
+  "OCTG_RELAY_CONTEXT_HMAC_KEY",
+] as const;
+
+const RELAY_INGRESS_ENDPOINT = "https://deno-relay.test/";
+const RELAY_HMAC_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+function encodeRelayBase64Url(input: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(input)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeRelayBase64UrlToJson(value: string): unknown {
+  const padded = value.padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
+  const binary = atob(padded.replaceAll("-", "+").replaceAll("_", "/"));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+const originalRelayBindings = new Map<string, PropertyDescriptor | undefined>();
+
+function configureRelay(enabled: string): void {
+  for (const name of RELAY_BINDINGS) originalRelayBindings.set(name, Object.getOwnPropertyDescriptor(env, name));
+  Object.defineProperties(env, {
+    OCTG_RELAY_ENABLED: { value: enabled, configurable: true },
+    OCTG_RELAY_ENVIRONMENT: { value: "preview", configurable: true },
+    OCTG_RELAY_INGRESS_ENDPOINT: { value: RELAY_INGRESS_ENDPOINT, configurable: true },
+    OCTG_RELAY_INGRESS_AUTH_TOKEN: { value: "ingress-token-0123456789abcdef0123456789ab", configurable: true },
+    OCTG_RELAY_SERVICE_AUTH_TOKEN: { value: "service-token-0123456789abcdef0123456789ab", configurable: true },
+    OCTG_RELAY_CONTEXT_HMAC_KEY: { value: RELAY_HMAC_KEY, configurable: true },
+  });
+}
+
+function restoreRelay(): void {
+  for (const name of RELAY_BINDINGS) {
+    const descriptor = originalRelayBindings.get(name);
+    if (descriptor === undefined) Reflect.deleteProperty(env, name);
+    else Object.defineProperty(env, name, descriptor);
+  }
+  originalRelayBindings.clear();
+}
+
+function relaySuccessFromContext(context: Record<string, unknown>): Response {
+  const requestId = typeof context.requestId === "string" ? context.requestId : "req_UNKNOWNREQUESTIDFORMAT00";
+  const meta = {
+    version: 1,
+    requestId,
+    pool: "STANDARD",
+    limit: 100,
+    used: 10,
+    remaining: 90,
+    resetAt: `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`,
+    route: "responses",
+  };
+  return new Response(JSON.stringify({ id: "resp_relay" }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      "x-octg-relay-response-meta": encodeRelayBase64Url(JSON.stringify(meta)),
+    },
+  });
+}
+
+
+describe("relay selection order", () => {
+  afterEach(() => {
+    restoreRelay();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("selects relay for Responses despite an invalid legacy prepare configuration", async () => {
+    // Given: relay is enabled while the legacy /prepare pair is incomplete.
+    Reflect.deleteProperty(env, "DENO_PREPARE_THRESHOLD_BYTES");
+    configureRelay("true");
+    const calls: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url !== RELAY_INGRESS_ENDPOINT) {
+        calls.push(url);
+        return new Response("{}", { status: 500 });
+      }
+      calls.push("deno-relay");
+      const headers = new Headers(init?.headers);
+      const contextToken = headers.get("x-octg-relay-context") ?? "";
+      const payloadSegment = contextToken.split(".")[0];
+      const context = payloadSegment === undefined
+        ? {}
+        : decodeRelayBase64UrlToJson(payloadSegment) as Record<string, unknown>;
+      return relaySuccessFromContext(context);
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    // When: a Responses request crosses the route.
+    const response = await responsesRequest();
+
+    // Then: the relay path answers without the legacy configuration error.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: "resp_relay" });
+    expect(response.headers.get("x-octg-route")).toBe("free_shared");
+    expect(calls).toEqual(["deno-relay"]);
+  });
+
+  it("preserves the legacy failure semantics when relay is disabled with the same invalid legacy configuration", async () => {
+    // Given: relay is disabled and the legacy /prepare pair is incomplete.
+    Reflect.deleteProperty(env, "DENO_PREPARE_THRESHOLD_BYTES");
+    configureRelay("false");
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchImpl);
+
+    // When: a Responses request crosses the route.
+    const response = await responsesRequest();
+
+    // Then: the existing fail-closed legacy configuration behavior remains.
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for Responses when the relay configuration is invalid", async () => {
+    // Given: the relay enable flag is an invalid value.
+    configureRelay("bogus");
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchImpl);
+
+    // When: a Responses request crosses the route.
+    const response = await responsesRequest();
+
+    // Then: the proxy never falls back to the legacy route.
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { code: "internal_error" } });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
