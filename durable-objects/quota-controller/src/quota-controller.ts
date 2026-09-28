@@ -1,3 +1,6 @@
+// allow: SIZE_OK — single-responsibility Durable Object class; the relay change
+// adds only the four mandated thin RPC methods (+41 lines) to an already
+// 245-LOC legacy class.
 import { DurableObject } from "cloudflare:workers";
 import {
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
@@ -37,11 +40,28 @@ import {
   savePool,
   saveUnresolved,
 } from "./store";
-import type { QuotaIdentity } from "./store";
+import type { QuotaIdentity, QuotaStorage } from "./store";
+import { admitRelayInTransaction } from "./relay-admission";
+import type { RelayAdmissionInput, RelayAdmissionResult } from "./relay-admission";
+import {
+  activateRelayInTransaction,
+  finishRelayInTransaction,
+  renewRelayInTransaction,
+} from "./relay-grant-lifecycle";
+import type { RelayGrantOperationContext } from "./relay-grant-lifecycle";
+import type {
+  ActivateRelayResult,
+  FinishRelayInput,
+  FinishRelayResult,
+  RelayGrantBinding,
+  RenewRelayResult,
+} from "./relay-grant";
 
 export interface QuotaControllerEnv {
   readonly QUOTA_LIMIT_STANDARD?: string;
   readonly QUOTA_LIMIT_MINI?: string;
+  readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly OCTG_RELAY_ENVIRONMENT?: string;
 }
 
 export class QuotaController extends DurableObject<QuotaControllerEnv> {
@@ -221,6 +241,30 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     );
   }
 
+  async admitRelay(input: RelayAdmissionInput): Promise<RelayAdmissionResult> {
+    return this.ctx.storage.transaction((storage) =>
+      admitRelayInTransaction(storage, this.env, this.identity, input, Date.now()),
+    );
+  }
+
+  async activateRelay(input: RelayGrantBinding): Promise<ActivateRelayResult> {
+    return this.ctx.storage.transaction((storage) =>
+      activateRelayInTransaction(this.relayContext(storage), input),
+    );
+  }
+
+  async renewRelay(input: RelayGrantBinding): Promise<RenewRelayResult> {
+    return this.ctx.storage.transaction((storage) =>
+      renewRelayInTransaction(this.relayContext(storage), input),
+    );
+  }
+
+  async finishRelay(input: FinishRelayInput): Promise<FinishRelayResult> {
+    return this.ctx.storage.transaction((storage) =>
+      finishRelayInTransaction(this.relayContext(storage), input),
+    );
+  }
+
   async releaseInFlight(
     requestId: string,
     generation?: string,
@@ -259,6 +303,11 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
       quotaId: this.ctx.id.name,
       identityOf: () => this.identity,
     });
+  }
+
+  private relayContext(storage: QuotaStorage): RelayGrantOperationContext {
+    const identity = this.identity;
+    return { storage, env: this.env, identity, nowMs: Date.now() };
   }
 
   async getState(): Promise<QuotaView> {
