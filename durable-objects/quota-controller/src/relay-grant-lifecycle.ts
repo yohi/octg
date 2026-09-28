@@ -70,6 +70,17 @@ async function expireAttemptedGrant(ctx: RelayGrantOperationContext, grant: Rela
   await putRelayGrant(ctx.storage, { ...grant, state: "uncertain" });
 }
 
+async function activeGrantLeases(ctx: RelayGrantOperationContext, grant: RelayGrant) {
+  const entry = await getEntry(ctx.storage, grant.requestId);
+  if (entry === undefined || entry.state !== "reserved") {
+    return { kind: "entry_missing" as const };
+  }
+  const inFlight = normalizeInFlightState(await loadInFlight(ctx.storage), ctx.nowMs);
+  const activeLeases = withoutExpiredLeases(inFlight.state.leases, ctx.nowMs);
+  const lease = activeLeases.find((candidate) => candidate.requestId === grant.requestId);
+  return { kind: "checked" as const, inFlight, activeLeases, lease };
+}
+
 export async function activateRelayInTransaction(
   ctx: RelayGrantOperationContext,
   input: RelayGrantBinding,
@@ -96,14 +107,11 @@ export async function activateRelayInTransaction(
     await putRelayGrant(ctx.storage, { ...grant, state: "released" });
     return { kind: "denied", code: "grant_expired" };
   }
-  const entry = await getEntry(ctx.storage, grant.requestId);
-  if (entry === undefined || entry.state !== "reserved") {
+  const leases = await activeGrantLeases(ctx, grant);
+  if (leases.kind === "entry_missing") {
     return { kind: "denied", code: "grant_not_found" };
   }
-  const inFlight = normalizeInFlightState(await loadInFlight(ctx.storage), ctx.nowMs);
-  const activeLeases = withoutExpiredLeases(inFlight.state.leases, ctx.nowMs);
-  const lease = activeLeases.find((candidate) => candidate.requestId === grant.requestId);
-  if (lease === undefined || lease.generation !== grant.leaseGeneration) {
+  if (leases.lease === undefined || leases.lease.generation !== grant.leaseGeneration) {
     return { kind: "denied", code: "lease_lost" };
   }
   const activated: RelayGrant = { ...grant, state: "attempted" };
@@ -132,23 +140,20 @@ export async function renewRelayInTransaction(
     await expireAttemptedGrant(ctx, grant);
     return { kind: "denied", code: "grant_expired" };
   }
-  const entry = await getEntry(ctx.storage, grant.requestId);
-  if (entry === undefined || entry.state !== "reserved") {
+  const leases = await activeGrantLeases(ctx, grant);
+  if (leases.kind === "entry_missing") {
     return { kind: "denied", code: "invalid_request" };
   }
-  const inFlight = normalizeInFlightState(await loadInFlight(ctx.storage), ctx.nowMs);
-  const activeLeases = withoutExpiredLeases(inFlight.state.leases, ctx.nowMs);
-  const lease = activeLeases.find((candidate) => candidate.requestId === grant.requestId);
-  if (lease === undefined || lease.generation !== grant.leaseGeneration) {
-    if (inFlight.migrated || activeLeases.length !== inFlight.state.leases.length) {
-      await saveInFlight(ctx.storage, { version: 1, leases: activeLeases });
+  if (leases.lease === undefined || leases.lease.generation !== grant.leaseGeneration) {
+    if (leases.inFlight.migrated || leases.activeLeases.length !== leases.inFlight.state.leases.length) {
+      await saveInFlight(ctx.storage, { version: 1, leases: leases.activeLeases });
     }
     return { kind: "denied", code: "lease_lost" };
   }
   const expiresAtMs = relayLeaseExpiry(ctx.nowMs);
   await saveInFlight(ctx.storage, {
     version: 1,
-    leases: activeLeases.map((candidate) =>
+    leases: leases.activeLeases.map((candidate) =>
       candidate.requestId === grant.requestId ? { ...candidate, expiresAtMs } : candidate),
   });
   return { kind: "renewed", grant, leaseExpiresAtMs: expiresAtMs };
