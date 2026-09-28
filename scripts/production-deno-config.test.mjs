@@ -250,3 +250,87 @@ test("CLI exits with a value-free error when required variables are missing", ()
   );
   assert.doesNotMatch(result.stderr, /https|4096|5000|password/);
 });
+
+const enabledRelayGroup = {
+  OCTG_RELAY_ENVIRONMENT: "production",
+  OCTG_RELAY_CALLBACK_ORIGIN: "https://worker.example/",
+  OCTG_RELAY_GATEWAY_B_BASE_URL: "https://gateway-b.example/openai",
+  OCTG_RELAY_MAX_REQUEST_DURATION_MS: "3600000",
+  OCTG_RELAY_LEASE_TTL_MS: "120000",
+  OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS: "30000",
+};
+
+test("treats an absent or false relay opt-in as disabled without relay variables", () => {
+  assert.deepEqual(validateProductionDenoConfig(completeProductionConfig), {
+    valid: true, missing: [], invalid: [],
+  });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "false",
+  }), { valid: true, missing: [], invalid: [] });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "",
+  }), { valid: true, missing: [], invalid: [] });
+});
+
+test("rejects a relay opt-in value outside the exact true/false set", () => {
+  for (const enabled of ["yes", "TRUE", "1", "true ", " true"]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      OCTG_RELAY_ENABLED: enabled,
+    });
+    assert.deepEqual(result, { valid: false, missing: [], invalid: ["OCTG_RELAY_ENABLED"] });
+  }
+});
+
+test("requires the complete production relay group when the relay is enabled", () => {
+  const result = validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "true",
+  });
+
+  assert.deepEqual(result, {
+    valid: false,
+    missing: [
+      "OCTG_RELAY_ENVIRONMENT",
+      "OCTG_RELAY_CALLBACK_ORIGIN",
+      "OCTG_RELAY_GATEWAY_B_BASE_URL",
+      "OCTG_RELAY_MAX_REQUEST_DURATION_MS",
+      "OCTG_RELAY_LEASE_TTL_MS",
+      "OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS",
+    ],
+    invalid: [],
+  });
+});
+
+test("accepts the canonical enabled production relay group", () => {
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "true",
+    ...enabledRelayGroup,
+  }), { valid: true, missing: [], invalid: [] });
+});
+
+test("rejects a preview environment and non-canonical relay values in production", () => {
+  for (const [name, value] of [
+    ["OCTG_RELAY_ENVIRONMENT", "preview"],
+    ["OCTG_RELAY_CALLBACK_ORIGIN", "http://worker.example/"],
+    ["OCTG_RELAY_CALLBACK_ORIGIN", "https://worker.example/internal"],
+    ["OCTG_RELAY_CALLBACK_ORIGIN", "https://user:pass@worker.example/"],
+    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/v1/acct/gw/openai"],
+    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/openai/"],
+    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "http://gateway-b.example/v1/acct/gw/openai"],
+    ["OCTG_RELAY_MAX_REQUEST_DURATION_MS", "3599999"],
+    ["OCTG_RELAY_LEASE_TTL_MS", "60000"],
+    ["OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS", "60000"],
+  ]) {
+    const result = validateProductionDenoConfig({
+      ...completeProductionConfig,
+      OCTG_RELAY_ENABLED: "true",
+      ...enabledRelayGroup,
+      [name]: value,
+    });
+    assert.deepEqual(result, { valid: false, missing: [], invalid: [name] });
+  }
+});

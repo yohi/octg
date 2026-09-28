@@ -151,6 +151,43 @@ test("Worker admission allows the observed three-request burst", () => {
   assert.equal(productionConfig.vars.MAX_IN_FLIGHT_REQUESTS, "3");
 });
 
+
+test("relay rollout documentation keeps ownership, sharding, admission and rollback contracts", () => {
+  const configuration = read("docs/configuration.md");
+  const denoDocumentation = read("docs/deno-tokenizer.md");
+  const operations = read("docs/operations.md");
+  const specification = read("SPEC.md");
+
+  // SPEC.md stays the canonical normative relay contract.
+  assert.match(specification, /relay-decision:v1:/);
+
+  // Configuration: binding, migration, namespace separation, opt-in flag.
+  for (const fragment of [
+    "`RELAY_DECISION_CONTROLLER` → `RelayDecisionController`",
+    "Migration tag `v3`",
+    "namespace_id",
+    "`OCTG_RELAY_ENABLED`",
+    "`relay-decision:v1:{environment}:{00..63}`",
+  ]) {
+    assert.match(configuration, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  // Deno documentation: relay route ownership and callback retention.
+  assert.match(denoDocumentation, /`POST \/relay\/v1\/responses`/);
+  assert.match(denoDocumentation, /never holds the relay HMAC key/);
+  assert.match(denoDocumentation, /while any\s+relay grant is/);
+
+  // Operations: same-SHA Deno-first order, CPU classes, rollback retention.
+  assert.match(operations, /Deploy Deno first for each immutable revision/);
+  assert.match(operations, /`v3` SQLite migration/);
+  assert.match(operations, /10 ms Free limit/);
+  assert.match(operations, /30,000 ms/);
+  assert.match(operations, /`QuotaController\.admitRelay`/);
+  assert.match(operations, /While any\s+relay grant is unresolved/);
+  assert.match(operations, /Reconcile or otherwise resolve outstanding grants first/);
+  assert.match(operations, /never depend on D1 writes/);
+});
+
 test("all Markdown documentation keeps relative links resolvable", () => {
   const documentationFiles = markdownFiles(root);
   const unresolved = [];

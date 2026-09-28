@@ -56,6 +56,47 @@ jobs:
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
           DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
           DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
+          OCTG_RELAY_ENABLED: ${{ vars.OCTG_RELAY_ENABLED }}
+          OCTG_RELAY_ENVIRONMENT: ${{ vars.OCTG_RELAY_ENVIRONMENT }}
+          OCTG_RELAY_CALLBACK_ORIGIN: ${{ vars.OCTG_RELAY_CALLBACK_ORIGIN }}
+          OCTG_RELAY_GATEWAY_B_BASE_URL: ${{ vars.OCTG_RELAY_GATEWAY_B_BASE_URL }}
+          OCTG_RELAY_MAX_REQUEST_DURATION_MS: ${{ vars.OCTG_RELAY_MAX_REQUEST_DURATION_MS }}
+          OCTG_RELAY_LEASE_TTL_MS: ${{ vars.OCTG_RELAY_LEASE_TTL_MS }}
+          OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS: ${{ vars.OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS }}
+
+      - name: Validate Production relay DO configuration
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from "node:fs";
+          import * as ts from "typescript";
+          const parsed = ts.parseConfigFileTextToJson(
+            "apps/gateway-worker/wrangler.jsonc",
+            readFileSync("apps/gateway-worker/wrangler.jsonc", "utf8"),
+          );
+          if (parsed.error) {
+            console.error("::error::wrangler.jsonc could not be parsed");
+            process.exit(1);
+          }
+          const config = parsed.config;
+          const migrations = Array.isArray(config.migrations) ? config.migrations : [];
+          const v3 = migrations.find((migration) => migration?.tag === "v3");
+          if (!v3 || !Array.isArray(v3.new_sqlite_classes) ||
+              !v3.new_sqlite_classes.includes("RelayDecisionController")) {
+            console.error("::error::wrangler.jsonc must define the v3 SQLite migration for RelayDecisionController");
+            process.exit(1);
+          }
+          const bindings = Array.isArray(config.durable_objects?.bindings) ? config.durable_objects.bindings : [];
+          const binding = bindings.find((entry) => entry?.name === "RELAY_DECISION_CONTROLLER");
+          if (!binding || binding.class_name !== "RelayDecisionController") {
+            console.error("::error::wrangler.jsonc must bind RELAY_DECISION_CONTROLLER to the RelayDecisionController class");
+            process.exit(1);
+          }
+          if (binding.namespace_id !== undefined) {
+            console.error("::error::RELAY_DECISION_CONTROLLER must bind the Worker-local class, not a namespace ID");
+            process.exit(1);
+          }
+          NODE
 
       - name: Validate Production Deno tokenizer authentication Secret
         env:
@@ -107,11 +148,25 @@ jobs:
           trap 'node -e '\''require("node:fs").rmSync(process.argv[1], { force: true })'\'' "$secrets_file"' EXIT
           node - "$secrets_file" <<'NODE'
           const fs = require("node:fs");
-          const token = process.env.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN;
-          if (!token) throw new Error("Production tokenizer authentication Secret is not configured");
+          const secrets = { DENO_TOKENIZER_AUTH_TOKEN: process.env.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN };
+          if (!secrets.DENO_TOKENIZER_AUTH_TOKEN) throw new Error("Production tokenizer authentication Secret is not configured");
+          const ingress = process.env.PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN;
+          const service = process.env.PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN;
+          const hmac = process.env.PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY;
+          const relaySecrets = [ingress, service, hmac];
+          const relayConfigured = relaySecrets.every((value) => value !== undefined && value.length > 0);
+          const relayPartial = relaySecrets.some((value) => value !== undefined && value.length > 0) && !relayConfigured;
+          if (relayPartial) {
+            throw new Error("Production relay authentication Secrets must all be configured together or all be absent");
+          }
+          if (relayConfigured) {
+            secrets.OCTG_RELAY_INGRESS_AUTH_TOKEN = ingress;
+            secrets.OCTG_RELAY_SERVICE_AUTH_TOKEN = service;
+            secrets.OCTG_RELAY_CONTEXT_HMAC_KEY = hmac;
+          }
           fs.writeFileSync(
             process.argv[2],
-            `${JSON.stringify({ DENO_TOKENIZER_AUTH_TOKEN: token })}\n`,
+            `${JSON.stringify(secrets)}\n`,
             { mode: 0o600 },
           );
           NODE
@@ -125,7 +180,9 @@ jobs:
             --var "DENO_TOKENIZER_THRESHOLD_BYTES:${DENO_TOKENIZER_THRESHOLD_BYTES}" \
             --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}" \
             --var "DENO_PREPARE_ENDPOINT:${DENO_PREPARE_ENDPOINT}" \
-            --var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}"
+            --var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}" \
+            --var "OCTG_RELAY_ENVIRONMENT:${OCTG_RELAY_ENVIRONMENT:-}" \
+            --var "OCTG_RELAY_INGRESS_ENDPOINT:${OCTG_RELAY_INGRESS_ENDPOINT:-}"
           version_id=$(jq -s -r '
             [.[] | select(.type == "version-upload") | .version_id // empty]
             | last // empty
@@ -143,6 +200,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY: ${{ secrets.PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/production-wrangler-output.ndjson
           MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
@@ -150,3 +210,5 @@ jobs:
           DENO_TOKENIZER_TIMEOUT_MS: ${{ vars.DENO_TOKENIZER_TIMEOUT_MS }}
           DENO_PREPARE_ENDPOINT: ${{ vars.DENO_PREPARE_ENDPOINT }}
           DENO_PREPARE_THRESHOLD_BYTES: ${{ vars.DENO_PREPARE_THRESHOLD_BYTES }}
+          OCTG_RELAY_ENVIRONMENT: ${{ vars.OCTG_RELAY_ENVIRONMENT }}
+          OCTG_RELAY_INGRESS_ENDPOINT: ${{ vars.OCTG_RELAY_INGRESS_ENDPOINT }}

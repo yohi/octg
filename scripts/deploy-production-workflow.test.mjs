@@ -172,6 +172,8 @@ test("deploy-production workflow sources all non-secret settings from GitHub Var
     "DENO_TOKENIZER_TIMEOUT_MS",
     "DENO_PREPARE_ENDPOINT",
     "DENO_PREPARE_THRESHOLD_BYTES",
+    "OCTG_RELAY_ENVIRONMENT",
+    "OCTG_RELAY_INGRESS_ENDPOINT",
   ]) {
     assert.match(
       workflow,
@@ -238,6 +240,42 @@ test("deploy-production workflow synchronizes the Worker auth Secret safely", ()
   const migrationIndex = workflow.indexOf("- name: Apply D1 migrations");
   assert.ok(secretIndex >= 0 && secretIndex < migrationIndex);
 });
+
+test("deploy-production workflow sources relay Worker authentication Secrets from GitHub Secrets", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const deployCommand = extractStepRun(workflow, "Deploy Worker");
+
+  assert.ok(deployCommand, "Deploy Worker step must contain a run command");
+  for (const secretName of [
+    "PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN",
+    "PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN",
+    "PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`${secretName}: \\\$\\{\\{ secrets\\.${secretName} \\}\\}`),
+      `Production workflow must source ${secretName} from GitHub Secrets`,
+    );
+    assert.ok(
+      deployCommand.includes(secretName),
+      `Deploy Worker run script must consume ${secretName} for the secrets-file`,
+    );
+  }
+  assert.ok(
+    deployCommand.includes("OCTG_RELAY_INGRESS_AUTH_TOKEN"),
+    "relay ingress Secret must be written to the Worker secrets-file",
+  );
+  assert.ok(
+    deployCommand.includes("OCTG_RELAY_SERVICE_AUTH_TOKEN"),
+    "relay service Secret must be written to the Worker secrets-file",
+  );
+  assert.ok(
+    deployCommand.includes("OCTG_RELAY_CONTEXT_HMAC_KEY"),
+    "relay HMAC Secret must be written to the Worker secrets-file",
+  );
+});
+
 
 test("deploy-production is a reusable workflow with a trusted checkout", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
@@ -353,4 +391,104 @@ test("deploy-deno-tokenizer deploys every master commit and probes its contract"
     denoWorkflow,
     /DENO_TOKENIZER_AUTH_TOKEN: \$\{\{ secrets\.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN \}\}/,
   );
+});
+
+test("deploy-production validates the relay DO migration and binding before remote mutation", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const stepName = "Validate Production relay DO configuration";
+  const stepRun = extractStepRun(workflow, stepName);
+
+  assert.ok(stepRun, "the relay DO configuration validation step must exist");
+  assert.match(stepRun, /wrangler\.jsonc/);
+  assert.match(stepRun, /"v3"/);
+  assert.match(stepRun, /RelayDecisionController/);
+  assert.match(stepRun, /RELAY_DECISION_CONTROLLER/);
+  assert.match(stepRun, /namespace_id/);
+  assertRemoteMutationsFollowValidation(workflow, stepName, [
+    "wrangler d1 migrations apply",
+    "wrangler versions upload",
+    "wrangler versions deploy",
+  ]);
+});
+
+test("deploy-production validates the relay opt-in group with the Deno configuration", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const validationStep = extractStepRun(workflow, "Validate Production Deno tokenizer configuration");
+
+  assert.ok(validationStep, "the Deno configuration validation step must exist");
+  assert.match(workflow, /OCTG_RELAY_ENABLED: \$\{\{ vars\.OCTG_RELAY_ENABLED \}\}/);
+  for (const name of [
+    "OCTG_RELAY_ENVIRONMENT",
+    "OCTG_RELAY_CALLBACK_ORIGIN",
+    "OCTG_RELAY_GATEWAY_B_BASE_URL",
+    "OCTG_RELAY_MAX_REQUEST_DURATION_MS",
+    "OCTG_RELAY_LEASE_TTL_MS",
+    "OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`${name}: \\$\\{\\{ vars\\.${name} \\}\\}`),
+      `the relay opt-in validation must receive ${name} from GitHub Variables`,
+    );
+  }
+  const validationEnv = workflow.slice(
+    workflow.indexOf("- name: Validate Production Deno tokenizer configuration"),
+    workflow.indexOf("- name: Validate Production relay DO configuration"),
+  );
+  for (const name of [
+    "OCTG_RELAY_ENABLED",
+    "OCTG_RELAY_ENVIRONMENT",
+    "OCTG_RELAY_CALLBACK_ORIGIN",
+    "OCTG_RELAY_GATEWAY_B_BASE_URL",
+    "OCTG_RELAY_MAX_REQUEST_DURATION_MS",
+    "OCTG_RELAY_LEASE_TTL_MS",
+    "OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS",
+  ]) {
+    assert.match(
+      validationEnv,
+      new RegExp(`${name}: \\$\\{\\{ vars\\.${name} \\}\\}`),
+      `the Deno configuration validation step env must map ${name}`,
+    );
+  }
+});
+
+test("deploy-production keeps the Worker relay opt-in out of automated deployment", () => {
+  const workflowPath = join(root, ".github/workflows/deploy-production.yml");
+  const workflow = readFileSync(workflowPath, "utf8");
+  const deployRun = extractStepRun(workflow, "Deploy Worker");
+
+  assert.ok(deployRun, "Deploy Worker must have a run command");
+  assert.doesNotMatch(
+    deployRun,
+    /OCTG_RELAY_ENABLED/,
+    "relay enablement is a canary-gated manual action, not a workflow variable",
+  );
+});
+
+test("deploy-deno-tokenizer deploys Deno before the Production Worker for the same revision", () => {
+  const denoWorkflow = readFileSync(
+    join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
+    "utf8",
+  );
+  const productionStart = denoWorkflow.indexOf("  deploy-production:");
+  assert.ok(productionStart >= 0, "the Deno workflow must own the Production deployment");
+  const productionJob = denoWorkflow.slice(productionStart);
+
+  assert.match(productionJob, /needs: deploy\n/);
+  assert.match(productionJob, /needs\.deploy\.result == 'success'/);
+  assert.match(productionJob, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
+  assert.match(productionJob, /secrets: inherit/);
+
+  const productionWorkflow = readFileSync(
+    join(root, ".github/workflows/deploy-production.yml"),
+    "utf8",
+  );
+  const gateIndex = productionWorkflow.indexOf(
+    "- name: Require master alignment with the Deno revision",
+  );
+  const denoCheckoutIndex = productionWorkflow.indexOf("- name: Checkout");
+  assert.ok(gateIndex > denoCheckoutIndex, "the same-SHA gate must follow checkout");
+  assert.match(productionWorkflow, /DENO_WORKFLOW_SHA: \$\{\{ github\.sha \}\}/);
 });

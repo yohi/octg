@@ -180,6 +180,69 @@ Changing a Worker runtime Secret must produce an active version containing both
 the Secret and its required Variables. A Secret-only update is not a complete
 Deno rollout.
 
+## Responses Relay Controls
+
+The Deno relay path for `POST /v1/responses` is opt-in per environment. The
+normative wire, routing, and failure contract is
+[SPEC.md section 19](../SPEC.md); this section only catalogues configuration
+surfaces. Ownership: the stateless
+Worker callback transports bounded bytes only; `RelayDecisionController`
+verifies context and policy and signs grants; `QuotaController.admitRelay` is
+the single atomic admission RPC and the only quota authority. D1 stays
+audit-only: no quota or audit state may depend on D1 writes.
+
+### Worker bindings
+
+`OCTG_RELAY_ENABLED` is exactly `true` to enable and `false` to disable; absent
+means disabled, and any other value is invalid. With the relay enabled, the
+complete Worker binding group is required and partial configuration fails
+closed; it never silently falls back to the legacy `/prepare` route:
+
+| Setting | Kind | Purpose |
+| --- | --- | --- |
+| `OCTG_RELAY_ENVIRONMENT` | variable | Exactly `preview` or `production` |
+| `OCTG_RELAY_INGRESS_ENDPOINT` | variable | Pinned HTTPS Deno relay endpoint |
+| `OCTG_RELAY_INGRESS_AUTH_TOKEN` | Worker secret | Ingress bearer |
+| `OCTG_RELAY_SERVICE_AUTH_TOKEN` | Worker secret | Callback bearer |
+| `OCTG_RELAY_CONTEXT_HMAC_KEY` | Worker secret | 32-byte key; never in Deno |
+
+`OCTG_RELAY_ENVIRONMENT` must match the bound Durable Object namespaces.
+
+Preview and Production use distinct secrets, endpoints, and Durable Object
+namespaces. A Preview credential is never valid against a Production DO, and
+the environment is never inferred from callback input.
+
+### Deno runtime keys
+
+The Deno relay starts only with the complete key set (fixed values are
+canonical):
+
+| Key | Value |
+| --- | --- |
+| `OCTG_RELAY_ENVIRONMENT` | `preview` or `production` |
+| `OCTG_RELAY_CALLBACK_ORIGIN` | HTTPS origin of the same Worker |
+| `OCTG_RELAY_SERVICE_AUTH_TOKEN` | Deno-to-Worker callback bearer |
+| `OCTG_RELAY_INGRESS_AUTH_TOKEN` | Worker-to-Deno ingress bearer |
+| `OCTG_RELAY_GATEWAY_B_BASE_URL` | HTTPS URL ending in `/openai` |
+| `OCTG_RELAY_GATEWAY_B_TOKEN` | Gateway B Run token |
+| `MAX_INPUT_BYTES` | exactly `1048576` for this release |
+| `OCTG_RELAY_MAX_REQUEST_DURATION_MS` | exactly `3600000` |
+| `OCTG_RELAY_LEASE_TTL_MS` | exactly `120000` |
+| `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` | exactly `30000` |
+
+The Production deploy workflow validates the relay opt-in and, when enabled,
+the complete canonical group through `scripts/production-deno-config.mjs`
+before any remote mutation. Relay Secrets are environment-unique and are never
+shared between Preview and Production.
+
+### Routing and isolation
+
+The stateless decision callback routes to one of 64 fixed shards named
+`relay-decision:v1:{environment}:{00..63}`; each environment names its own
+Durable Object namespace. Grant callbacks reconstruct the QuotaController
+identity only from the verified grant's pool and admission UTC day, so late
+callbacks stay on the admission-day object across UTC midnight.
+
 ## Preview Inputs
 
 Preview must use its own control-plane resources and credentials.
@@ -290,9 +353,21 @@ The fallback-model field does not create a Phase 1 paid route.
 The Worker requires:
 
 - `QUOTA_CONTROLLER` → `QuotaController`;
-- `TOKENIZER_CONTROLLER` → `TokenizerController`.
+- `TOKENIZER_CONTROLLER` → `TokenizerController`;
+- `RELAY_DECISION_CONTROLLER` → `RelayDecisionController`.
 
 Applied Durable Object migration tags are operational history. Existing applied tags must not be renamed, deleted, or rewritten. Add a new migration tag when changing Durable Object class migrations.
+
+Migration tag `v3` introduces `RelayDecisionController` as a new SQLite
+class and must be applied with the Worker rollout. Durable Object class
+migrations are separate from D1 migration history; one never implies the other.
+
+Preview and Production never share Durable Object namespaces.
+`scripts/preview-worker-config.mjs` generates the Preview Worker config with
+`QUOTA_CONTROLLER`, `TOKENIZER_CONTROLLER`, and `RELAY_DECISION_CONTROLLER`
+bound to Preview-local classes without any Production `namespace_id`, and
+rejects a base config that references a Production namespace ID or reuses the
+Production D1 database ID. That rejection happens before any remote mutation.
 
 ## Cron
 

@@ -9,11 +9,23 @@ export const PREVIEW_DENO_VARIABLE_NAMES = Object.freeze([
   "DENO_TOKENIZER_TIMEOUT_MS",
 ]);
 
+export const PREVIEW_DO_BINDING_NAMES = Object.freeze([
+  "RELAY_DECISION_CONTROLLER",
+  "QUOTA_CONTROLLER",
+  "TOKENIZER_CONTROLLER",
+]);
+
 const DENO_CONFIG_NAMES = Object.freeze([
   ...PREVIEW_DENO_VARIABLE_NAMES,
   "DENO_TOKENIZER_AUTH_TOKEN",
   "DENO_PREPARE_ENDPOINT",
   "DENO_PREPARE_THRESHOLD_BYTES",
+]);
+
+const RELAY_CONFIG_NAMES = Object.freeze([
+  "OCTG_RELAY_ENABLED",
+  "OCTG_RELAY_ENVIRONMENT",
+  "OCTG_RELAY_INGRESS_ENDPOINT",
 ]);
 
 export function buildPreviewWorkerConfig(baseConfig, options) {
@@ -33,6 +45,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     maxInputBytes,
     deno,
     prepare,
+    relay,
   } = options ?? {};
 
   requireNonEmpty("Preview database ID", databaseId);
@@ -50,6 +63,11 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   if (productionDatabase === undefined) {
     throw new Error("Expected a DB D1 binding in the base Worker configuration");
   }
+
+  if (databaseId === productionDatabase.database_id) {
+    throw new Error("Preview configuration must not reuse the Production database ID");
+  }
+  config.durable_objects = { bindings: resolvePreviewDurableObjectBindings(config) };
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
   const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
@@ -84,6 +102,9 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   for (const name of DENO_CONFIG_NAMES) {
     delete config.vars[name];
   }
+  for (const name of RELAY_CONFIG_NAMES) {
+    delete config.vars[name];
+  }
   delete config.triggers;
   config.d1_databases = [{
     ...productionDatabase,
@@ -107,7 +128,41 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     config.vars.DENO_PREPARE_THRESHOLD_BYTES = normalizedPrepare.thresholdBytes.trim();
   }
 
+  if (relay !== undefined) {
+    validatePreviewRelayConfig(relay);
+    config.vars.OCTG_RELAY_ENVIRONMENT = relay.environment.trim();
+    config.vars.OCTG_RELAY_INGRESS_ENDPOINT = relay.ingressEndpoint.trim();
+  }
+
   return config;
+}
+
+/**
+ * Resolves the three Preview-local Durable Object class bindings in base
+ * order. Any Production namespace_id reference fails generation before
+ * deployment.
+ */
+function resolvePreviewDurableObjectBindings(config) {
+  const bindings = Array.isArray(config.durable_objects?.bindings)
+    ? config.durable_objects.bindings
+    : [];
+  const missing = new Set(PREVIEW_DO_BINDING_NAMES);
+  const resolved = [];
+  for (const entry of bindings) {
+    if (entry === null || typeof entry !== "object" || !missing.has(entry.name)) continue;
+    missing.delete(entry.name);
+    if (typeof entry.namespace_id === "string" && entry.namespace_id.trim().length > 0) {
+      throw new Error(`Preview configuration must not reference a Production namespace_id for ${entry.name}`);
+    }
+    if (typeof entry.class_name !== "string" || entry.class_name.trim().length === 0) {
+      throw new Error(`Expected a class_name for the ${entry.name} Preview Durable Object binding`);
+    }
+    resolved.push({ name: entry.name, class_name: entry.class_name });
+  }
+  if (missing.size > 0) {
+    throw new Error(`Expected ${[...missing].join(", ")} Durable Object binding(s) in the base Worker configuration`);
+  }
+  return resolved;
 }
 
 function normalizeOptionalPrepare(prepare) {
@@ -133,6 +188,20 @@ function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
   requirePositiveSafeInteger("Deno Preview timeout", timeoutMs);
   if (Number(thresholdBytes.trim()) > Number(maxInputBytes.trim())) {
     throw new TypeError("Deno Preview threshold must not exceed Preview input limit");
+  }
+}
+
+function validatePreviewRelayConfig(relay) {
+  if (relay === null || typeof relay !== "object") {
+    throw new TypeError("Preview relay configuration must be an object");
+  }
+  const { environment, ingressEndpoint } = relay;
+  if (environment !== "preview" && environment !== "production") {
+    throw new TypeError("Preview relay environment must be preview or production");
+  }
+  requireHttpsEndpoint("Preview relay ingress endpoint", ingressEndpoint);
+  if (ingressEndpoint.trim().endsWith("/")) {
+    throw new TypeError("Preview relay ingress endpoint must not have a trailing slash");
   }
 }
 
@@ -228,6 +297,15 @@ if (isMainModule()) {
         ? {
             endpoint: process.env.PREVIEW_DENO_PREPARE_ENDPOINT,
             thresholdBytes: process.env.PREVIEW_DENO_PREPARE_THRESHOLD_BYTES,
+          }
+        : undefined,
+      relay: mode === "deno" && (
+        process.env.PREVIEW_OCTG_RELAY_ENVIRONMENT !== undefined ||
+        process.env.PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT !== undefined
+      )
+        ? {
+            environment: process.env.PREVIEW_OCTG_RELAY_ENVIRONMENT,
+            ingressEndpoint: process.env.PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT,
           }
         : undefined,
     });

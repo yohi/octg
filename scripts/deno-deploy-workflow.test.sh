@@ -283,6 +283,49 @@ end
 if runtime_secret_run.include?("${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}")
   fail_contract('the runtime Secret step must not interpolate Secret expressions in run')
 end
+
+relay_var_names = [
+  "OCTG_RELAY_ENABLED",
+  "OCTG_RELAY_ENVIRONMENT",
+  "OCTG_RELAY_CALLBACK_ORIGIN",
+  "OCTG_RELAY_GATEWAY_B_BASE_URL",
+  "OCTG_RELAY_MAX_REQUEST_DURATION_MS",
+  "OCTG_RELAY_LEASE_TTL_MS",
+  "OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS",
+]
+relay_var_names.each do |name|
+  unless runtime_secret_env[name] == "${{ vars.#{name} }}"
+    fail_contract("the runtime Secret step must receive #{name} from GitHub Variables")
+  end
+end
+
+relay_secret_names = [
+  "PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN",
+  "PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN",
+  "PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN",
+]
+relay_secret_names.each do |name|
+  unless runtime_secret_env[name] == "${{ secrets.#{name} }}"
+    fail_contract("the runtime Secret step must receive #{name} from GitHub Secrets")
+  end
+end
+
+unless runtime_secret_run.include?("OCTG_RELAY_ENABLED")
+  fail_contract('the runtime Secret step must conditionally load relay runtime variables')
+end
+unless runtime_secret_run.include?("PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN")
+  fail_contract('the runtime Secret step must reference relay service Secret for env load')
+end
+unless runtime_secret_run.include?("PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN")
+  fail_contract('the runtime Secret step must reference relay ingress Secret for env load')
+end
+unless runtime_secret_run.include?("PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN")
+fail_contract('the runtime Secret step must reference Gateway B Secret for env load')
+end
+if runtime_secret_run.include?("OCTG_RELAY_SERVICE_AUTH_TOKEN must be configured")
+  fail_contract('the runtime Secret step must validate the production-prefixed relay service Secret name, not the runtime name')
+end
+
 unless deploy_step["id"] == "deploy"
   fail_contract('the "Deploy" step must have id "deploy" for failed revision diagnostics')
 end

@@ -18,8 +18,23 @@ const baseConfig = {
     DENO_TOKENIZER_AUTH_TOKEN: "production-auth-secret",
     DENO_PREPARE_ENDPOINT: "https://production-tokenizer.example/prepare",
     DENO_PREPARE_THRESHOLD_BYTES: "1",
+    OCTG_RELAY_ENABLED: "true",
+    OCTG_RELAY_ENVIRONMENT: "production",
+    OCTG_RELAY_INGRESS_ENDPOINT: "https://production-relay.example/relay/v1/responses",
   },
   triggers: { crons: ["5 0 * * *"] },
+  durable_objects: {
+    bindings: [
+      { name: "QUOTA_CONTROLLER", class_name: "QuotaController" },
+      { name: "TOKENIZER_CONTROLLER", class_name: "TokenizerController" },
+      { name: "RELAY_DECISION_CONTROLLER", class_name: "RelayDecisionController" },
+    ],
+  },
+  migrations: [
+    { tag: "v1", new_sqlite_classes: ["QuotaController"] },
+    { tag: "v2", new_sqlite_classes: ["TokenizerController"] },
+    { tag: "v3", new_sqlite_classes: ["RelayDecisionController"] },
+  ],
   d1_databases: [{
     binding: "DB",
     database_name: "octg",
@@ -67,6 +82,9 @@ test("builds a DO-only Preview config without Deno values", () => {
   assert.equal(config.vars.DENO_TOKENIZER_TIMEOUT_MS, undefined);
   assert.equal(config.vars.DENO_PREPARE_ENDPOINT, undefined);
   assert.equal(config.vars.DENO_PREPARE_THRESHOLD_BYTES, undefined);
+  assert.equal(config.vars.OCTG_RELAY_ENABLED, undefined);
+  assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, undefined);
+  assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, undefined);
   assert.equal(config.triggers, undefined);
   assert.equal(config.d1_databases[0].database_id, validOptions.databaseId);
   assert.notEqual(config, baseConfig);
@@ -340,5 +358,107 @@ test("does not include production Deno or prepare endpoint values in the generat
   assert.equal(serialized.includes(baseConfig.vars.DENO_TOKENIZER_ENDPOINT), false);
   assert.equal(serialized.includes(baseConfig.vars.DENO_PREPARE_ENDPOINT), false);
   assert.equal(serialized.includes("production-tokenizer.example"), false);
+});
+
+test("generates the exact Preview-local DO bindings and SQLite migrations without namespace IDs", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, validOptions);
+
+  assert.deepEqual(config.durable_objects, {
+    bindings: [
+      { name: "QUOTA_CONTROLLER", class_name: "QuotaController" },
+      { name: "TOKENIZER_CONTROLLER", class_name: "TokenizerController" },
+      { name: "RELAY_DECISION_CONTROLLER", class_name: "RelayDecisionController" },
+    ],
+  });
+  assert.deepEqual(config.migrations, [
+    { tag: "v1", new_sqlite_classes: ["QuotaController"] },
+    { tag: "v2", new_sqlite_classes: ["TokenizerController"] },
+    { tag: "v3", new_sqlite_classes: ["RelayDecisionController"] },
+  ]);
+  assert.equal(JSON.stringify(config).includes("namespace_id"), false);
+});
+
+test("rejects a base binding that references a Production namespace ID", () => {
+  const config = {
+    ...baseConfig,
+    durable_objects: {
+      bindings: [
+        { name: "QUOTA_CONTROLLER", class_name: "QuotaController", namespace_id: "production-namespace-id" },
+        { name: "TOKENIZER_CONTROLLER", class_name: "TokenizerController" },
+        { name: "RELAY_DECISION_CONTROLLER", class_name: "RelayDecisionController" },
+      ],
+    },
+  };
+
+  assert.throws(
+    () => buildPreviewWorkerConfig(config, validOptions),
+    /namespace_id/,
+  );
+});
+
+test("requires every relay Durable Object binding in the base configuration", () => {
+  for (const name of ["RELAY_DECISION_CONTROLLER", "QUOTA_CONTROLLER", "TOKENIZER_CONTROLLER"]) {
+    const config = {
+      ...baseConfig,
+      durable_objects: {
+        bindings: baseConfig.durable_objects.bindings.filter((binding) => binding.name !== name),
+      },
+    };
+
+    assert.throws(
+      () => buildPreviewWorkerConfig(config, validOptions),
+      new RegExp(name),
+    );
+  }
+});
+
+test("rejects a Preview D1 database ID that equals the Production database ID", () => {
+  assert.throws(
+    () => buildPreviewWorkerConfig(baseConfig, {
+      ...validOptions,
+      databaseId: baseConfig.d1_databases[0].database_id,
+    }),
+    /Production database ID/,
+  );
+});
+
+test("keeps the Production D1 database ID out of the generated Preview config", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, validOptions);
+
+  assert.equal(JSON.stringify(config).includes(baseConfig.d1_databases[0].database_id), false);
+});
+
+test("strips production relay vars and applies Preview relay config when provided", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    deno: {
+      endpoint: "https://preview-tokenizer.deno.dev/tokenize",
+      thresholdBytes: "1",
+      timeoutMs: "5000",
+    },
+    relay: {
+      environment: "preview",
+      ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+    },
+  });
+
+  assert.equal(config.vars.OCTG_RELAY_ENABLED, undefined);
+  assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, "preview");
+  assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev/relay/v1/responses");
+  assert.equal(baseConfig.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://production-relay.example/relay/v1/responses");
+});
+
+test("rejects invalid Preview relay settings", () => {
+  for (const relay of [
+    { environment: "staging", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "http://preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "https://user:pass@preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses/" },
+  ]) {
+    assert.throws(
+      () => buildPreviewWorkerConfig(baseConfig, { ...validOptions, relay }),
+      /Preview relay/,
+    );
+  }
 });
 
