@@ -1,4 +1,10 @@
-import { buildOctgHeaders, type InFlightLease, type QuotaSnapshot, type Usage } from "@octg/shared";
+import {
+  buildOctgHeaders,
+  extractUsageFromEvent,
+  type InFlightLease,
+  type QuotaSnapshot,
+  type Usage,
+} from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 
 import { completeRequestAuditBestEffort } from "./db";
@@ -6,115 +12,10 @@ import type { Env } from "./index";
 import type { ResourceStageOutcome } from "./resource-observation";
 import { workerVersionHeaders } from "./version-metadata";
 
+export { extractUsageFromEvent };
+
 type Stub = DurableObjectStub<QuotaController>;
 export type { Usage };
-
-function findBraceOpen(event: string, colonIndex: number): number {
-  const limit = Math.min(event.length, colonIndex + 20);
-  for (let i = colonIndex + 1; i < limit; i++) {
-    const code = event.codePointAt(i);
-    if (code === 123) return i;
-    if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
-  }
-  return -1;
-}
-
-function findUsageColon(event: string, searchStart: number): number {
-  let stringStart = -1;
-  let escaped = false;
-  for (let i = searchStart; i < event.length; i++) {
-    const code = event.codePointAt(i);
-    if (stringStart === -1) {
-      if (code === 34) stringStart = i;
-      continue;
-    }
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (code === 92) {
-      escaped = true;
-      continue;
-    }
-    if (code !== 34) continue;
-
-    if (i - stringStart === 6 && event.startsWith("usage", stringStart + 1)) {
-      let colonIndex = i + 1;
-      while (colonIndex < event.length) {
-        const colonCode = event.codePointAt(colonIndex);
-        if (colonCode !== 32 && colonCode !== 9 && colonCode !== 10 && colonCode !== 13) {
-          if (colonCode === 58) return colonIndex;
-          break;
-        }
-        colonIndex++;
-      }
-    }
-    stringStart = -1;
-  }
-  return -1;
-}
-
-function findMatchingBraceClose(event: string, braceOpen: number): number {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = braceOpen; i < event.length; i++) {
-    const code = event.codePointAt(i);
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (code === 92) {
-        escaped = true;
-      } else if (code === 34) {
-        inString = false;
-      }
-      continue;
-    }
-    if (code === 34) {
-      inString = true;
-      continue;
-    }
-    if (code === 123) {
-      depth++;
-    } else if (code === 125) {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
-function tryParseUsageSnippet(event: string, braceOpen: number, braceClose: number): Usage | undefined {
-  try {
-    const snippet = event.slice(braceOpen, braceClose + 1);
-    const parsed = JSON.parse(snippet) as Record<string, unknown>;
-    if (typeof parsed.total_tokens === "number") {
-      return parsed as Usage;
-    }
-  } catch {
-    // continue searching
-  }
-  return undefined;
-}
-
-export function extractUsageFromEvent(event: string): Usage | undefined {
-  let searchStart = 0;
-  while (searchStart < event.length) {
-    const colonIndex = findUsageColon(event, searchStart);
-    if (colonIndex === -1) break;
-    searchStart = colonIndex + 1;
-
-    const braceOpen = findBraceOpen(event, colonIndex);
-    if (braceOpen === -1) continue;
-
-    const braceClose = findMatchingBraceClose(event, braceOpen);
-    if (braceClose === -1) continue;
-
-    const parsed = tryParseUsageSnippet(event, braceOpen, braceClose);
-    if (parsed) return parsed;
-  }
-  return undefined;
-}
 
 export function bytesIncludesAscii(bytes: Uint8Array, needle: string): boolean {
   const len = bytes.byteLength;

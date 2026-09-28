@@ -142,7 +142,7 @@ function decodeContextClaims(token: string): RelayContextV1 | undefined {
   try {
     const binary = atob(padded.replaceAll("-", "+").replaceAll("_", "/"));
     json = new TextDecoder("utf-8", { fatal: true })
-      .decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+      .decode(Uint8Array.from(binary, (character) => character.codePointAt(0) ?? 0));
   } catch {
     return undefined;
   }
