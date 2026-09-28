@@ -16,6 +16,8 @@ const REQUEST_ID_T = "req_01ARZ3NDEKTSV4RRFFQ69G5FTR";
 const REQUEST_ID_Q = "req_01ARZ3NDEKTSV4RRFFQ69G5FQH";
 const REQUEST_ID_S = "req_01ARZ3NDEKTSV4RRFFQ69G5FSJ";
 const REQUEST_ID_V = "req_01ARZ3NDEKTSV4RRFFQ69G5FVH";
+const REQUEST_ID_W = "req_01ARZ3NDEKTSV4RRFFQ69G5FWH";
+const REQUEST_ID_X = "req_01ARZ3NDEKTSV4RRFFQ69G5FXM";
 const NONCE = "bQ".repeat(21) + "b";
 const HMAC_KEY = Uint8Array.from({ length: 32 }, (_, index) => index);
 const HMAC_KEY_ENCODED = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
@@ -388,6 +390,34 @@ describe("activation, renewal, and terminal callbacks", () => {
     expect(await duplicate.json()).toEqual({ version: 1, activated: false, code: "grant_replayed" });
   });
 
+  it.each(["grantId", "leaseGeneration"] as const)(
+    "rejects activation when the body %s differs from the verified grant",
+    async (field) => {
+      // Given: a grant credential and a valid-shaped but mismatched body reference.
+      const requestId = field === "grantId" ? REQUEST_ID_W : REQUEST_ID_X;
+      const allow = await allowDecision(relayContext({ requestId }), relayMetadata());
+      const reference = {
+        version: 1,
+        grantId: allow.grantId,
+        leaseGeneration: allow.leaseGeneration,
+        [field]: "00000000-0000-4000-8000-000000000000",
+      };
+
+      // When: activation is requested with the mismatched reference.
+      const response = await SELF.fetch(callbackRequest("activation", {
+        headers: { "X-OCTG-Relay-Grant": allow.grantCredential },
+        body: JSON.stringify(reference),
+      }));
+
+      // Then: the callback is rejected before activation.
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ version: 1, error: { code: "invalid_request" } });
+      const grant = await runInDurableObject(quotaStub("STANDARD"), (_instance, state) =>
+        state.storage.get<RelayGrant>(`relay-grant:${requestId}`));
+      expect(grant?.state).toBe("authorized");
+    },
+  );
+
   it("rejects invalid and missing grant headers with 400", async () => {
     // Given: activation callbacks whose grant header is missing or foreign-signed.
     const missing = await SELF.fetch(
@@ -414,10 +444,22 @@ describe("activation, renewal, and terminal callbacks", () => {
     // When: renewal arrives before activation, then after activation.
     const before = await SELF.fetch(callbackRequest("renewal", { headers: renewalHeaders, body: renewalBody }));
     await activateGrant(allow);
+    const wrongGrantId = await SELF.fetch(callbackRequest("renewal", {
+      headers: renewalHeaders,
+      body: JSON.stringify({ version: 1, grantId: "00000000-0000-4000-8000-000000000000", leaseGeneration: allow.leaseGeneration }),
+    }));
+    const wrongLeaseGeneration = await SELF.fetch(callbackRequest("renewal", {
+      headers: renewalHeaders,
+      body: JSON.stringify({ version: 1, grantId: allow.grantId, leaseGeneration: "00000000-0000-4000-8000-000000000000" }),
+    }));
     const after = await SELF.fetch(callbackRequest("renewal", { headers: renewalHeaders, body: renewalBody }));
     // Then: the pre-activation renewal is denied and the post-activation one renews.
     expect(before.status).toBe(200);
     expect(await before.json()).toEqual({ version: 1, renewed: false, code: "invalid_request" });
+    expect(wrongGrantId.status).toBe(400);
+    expect(await wrongGrantId.json()).toEqual({ version: 1, error: { code: "invalid_request" } });
+    expect(wrongLeaseGeneration.status).toBe(400);
+    expect(await wrongLeaseGeneration.json()).toEqual({ version: 1, error: { code: "invalid_request" } });
     expect(after.status).toBe(200);
     expect(await after.json()).toEqual({ version: 1, renewed: true, code: null });
   });
@@ -457,7 +499,7 @@ describe("activation, renewal, and terminal callbacks", () => {
     expect(await conflict.json()).toEqual({
       version: 1,
       accepted: false,
-      state: "uncertain",
+      state: "released",
       code: "grant_terminalized",
     });
   });
@@ -499,7 +541,7 @@ describe("activation, renewal, and terminal callbacks", () => {
     expect(await conflict.json()).toEqual({
       version: 1,
       accepted: false,
-      state: "uncertain",
+      state: "settled",
       code: "grant_terminalized",
     });
   });

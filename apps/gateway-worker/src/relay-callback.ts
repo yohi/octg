@@ -201,6 +201,9 @@ async function handleGrantCallback(
     case "activation": {
       const reference = parseRelayActivation(parsedBody);
       if (reference === undefined) return errorEnvelope("invalid_request", 400);
+      if (reference.grantId !== grant.grantId || reference.leaseGeneration !== grant.leaseGeneration) {
+        return errorEnvelope("invalid_request", 400);
+      }
       const result = await stub.activateRelay(binding);
       return jsonEnvelope(
         {
@@ -214,6 +217,9 @@ async function handleGrantCallback(
     case "renewal": {
       const reference = parseRelayRenewal(parsedBody);
       if (reference === undefined) return errorEnvelope("invalid_request", 400);
+      if (reference.grantId !== grant.grantId || reference.leaseGeneration !== grant.leaseGeneration) {
+        return errorEnvelope("invalid_request", 400);
+      }
       const result = await stub.renewRelay(binding);
       return jsonEnvelope(
         {
@@ -236,7 +242,7 @@ async function handleGrantCallback(
         {
           version: 1,
           accepted: result.kind === "accepted",
-          state: result.kind === "accepted" ? result.grant.state : "uncertain",
+          state: result.kind === "accepted" ? result.grant.state : result.state,
           code: result.kind === "accepted" ? null : result.code,
         },
         200,
