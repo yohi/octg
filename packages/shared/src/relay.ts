@@ -169,7 +169,7 @@ export interface RelayTerminalV1 {
 export interface RelayTerminalResponseV1 {
   readonly version: 1;
   readonly accepted: boolean;
-  readonly state: RelayGrantState;
+  readonly state: RelayGrantState | null;
   readonly code: RelayErrorCode | null;
 }
 

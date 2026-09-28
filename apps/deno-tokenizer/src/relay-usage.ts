@@ -15,7 +15,7 @@
  * fixes this module, so it cannot be split without violating the assignment.
  */
 
-import { isRecord } from "@octg/shared";
+import { extractUsageFromEvent } from "@octg/shared";
 import type { RelayTerminalOutcome, RelayTerminalV1 } from "@octg/shared";
 
 const tailCapacityBytes = 32_768;
@@ -68,108 +68,13 @@ function isSafeTotalTokens(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function findBraceOpen(event: string, colonIndex: number): number {
-  const limit = Math.min(event.length, colonIndex + 20);
-  for (let i = colonIndex + 1; i < limit; i++) {
-    const code = event.codePointAt(i);
-    if (code === 123) return i;
-    if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
-  }
-  return -1;
-}
-
-function findUsageColon(event: string, searchStart: number): number {
-  let stringStart = -1;
-  let escaped = false;
-  for (let i = searchStart; i < event.length; i++) {
-    const code = event.codePointAt(i);
-    if (stringStart === -1) {
-      if (code === 34) stringStart = i;
-      continue;
-    }
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (code === 92) {
-      escaped = true;
-      continue;
-    }
-    if (code !== 34) continue;
-
-    if (i - stringStart === 6 && event.startsWith("usage", stringStart + 1)) {
-      let colonIndex = i + 1;
-      while (colonIndex < event.length) {
-        const colonCode = event.codePointAt(colonIndex);
-        if (colonCode !== 32 && colonCode !== 9 && colonCode !== 10 && colonCode !== 13) {
-          if (colonCode === 58) return colonIndex;
-          break;
-        }
-        colonIndex++;
-      }
-    }
-    stringStart = -1;
-  }
-  return -1;
-}
-
-function findMatchingBraceClose(event: string, braceOpen: number): number {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = braceOpen; i < event.length; i++) {
-    const code = event.codePointAt(i);
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (code === 92) {
-        escaped = true;
-      } else if (code === 34) {
-        inString = false;
-      }
-      continue;
-    }
-    if (code === 34) {
-      inString = true;
-      continue;
-    }
-    if (code === 123) {
-      depth++;
-    } else if (code === 125) {
-      depth--;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
-}
-
 /**
  * Scans a bounded text window for a `"usage":{...}` snippet whose
  * `total_tokens` is a safe non-negative integer; the last match wins.
  */
 function extractUsageTotalTokens(text: string): number | undefined {
-  let searchStart = 0;
-  while (searchStart < text.length) {
-    const colonIndex = findUsageColon(text, searchStart);
-    if (colonIndex === -1) break;
-    searchStart = colonIndex + 1;
-
-    const braceOpen = findBraceOpen(text, colonIndex);
-    if (braceOpen === -1) continue;
-
-    const braceClose = findMatchingBraceClose(text, braceOpen);
-    if (braceClose === -1) continue;
-
-    try {
-      const parsed: unknown = JSON.parse(text.slice(braceOpen, braceClose + 1));
-      if (isRecord(parsed) && isSafeTotalTokens(parsed.total_tokens)) {
-        return parsed.total_tokens;
-      }
-    } catch {
-      // Not a complete usage object; keep scanning the window.
-    }
-  }
-  return undefined;
+  const usage = extractUsageFromEvent(text);
+  return isSafeTotalTokens(usage?.total_tokens) ? usage.total_tokens : undefined;
 }
 
 /**

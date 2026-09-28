@@ -538,11 +538,14 @@ Deno.test("activates once and forwards exactly one clamped Gateway B request", a
   assertEquals(response.headers.get("content-type"), "application/json");
 
   const activationCall = onlyOfRoute(calls, "activation");
+  assertEquals(activationCall.init.signal instanceof AbortSignal, true);
   assertEquals(headerOf(activationCall, "authorization"), `Bearer ${serviceAuthToken}`);
   assertEquals(headerOf(activationCall, "x-octg-relay-grant"), grantCredential);
   assertEquals(jsonBodyOf(activationCall), { version: 1, grantId, leaseGeneration });
 
   const upstreamCall = onlyOfRoute(calls, "upstream");
+  const decisionCall = onlyOfRoute(calls, "decision");
+  assertEquals(decisionCall.init.signal instanceof AbortSignal, true);
   assertEquals(upstreamCall.url, `${gatewayBBaseUrl}/responses`);
   assertEquals(headerOf(upstreamCall, "cf-aig-authorization"), `Bearer ${gatewayBToken}`);
   assertEquals(headerOf(upstreamCall, "content-type"), "application/json");
@@ -618,6 +621,7 @@ Deno.test("sends terminal release on lease_lost denial with no upstream call", a
 
   await assertErrorEnvelope(response, 500, "lease_lost");
   const terminalCall = onlyOfRoute(calls, "terminal");
+  assertEquals(terminalCall.init.signal instanceof AbortSignal, true);
   assertEquals(headerOf(terminalCall, "x-octg-relay-grant"), grantCredential);
   assertEquals(jsonBodyOf(terminalCall), {
     version: 1,
@@ -911,6 +915,7 @@ Deno.test("renews the lease through the worker callback while the upstream strea
   const renewals = callsOfRoute(calls, "renewal");
   assertEquals(renewals.length >= 1, true);
   const renewalCall = renewals[0] as RecordedCall;
+  assertEquals(renewalCall.init.signal instanceof AbortSignal, true);
   assertEquals(headerOf(renewalCall, "x-octg-relay-grant"), grantCredential);
   assertEquals(jsonBodyOf(renewalCall), { version: 1, grantId, leaseGeneration });
   assertEquals(headerOf(renewalCall, "idempotency-key"), null);

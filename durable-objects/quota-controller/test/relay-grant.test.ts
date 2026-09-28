@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RelayTerminalV1 } from "@octg/shared";
 import { admitRelayInTransaction } from "../src/relay-admission";
@@ -6,21 +6,9 @@ import type { RelayAdmissionInput } from "../src/relay-admission";
 import { activateRelayInTransaction } from "../src/relay-grant-lifecycle";
 import type { QuotaController } from "../src/quota-controller";
 import type { RelayGrant, RelayGrantBinding } from "../src/relay-grant";
+import { grantBinding, nonce, quotaController, requestId } from "./relay-test-helpers";
 
-const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-const stub = (day: string): DurableObjectStub<QuotaController> =>
-  env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
-
-function requestId(seed: number): string {
-  let body = "";
-  for (let i = 0; i < 26; i += 1) body += ID_ALPHABET[(seed * 7 + i * 3) % 32];
-  return `req_${body}`;
-}
-
-function nonce(seed: number): string {
-  return `n${String(seed)}`.padEnd(43, "x");
-}
+const stub = quotaController;
 
 function admissionInput(seed: number): RelayAdmissionInput {
   return {
@@ -98,32 +86,6 @@ async function admitWithClock(
       if (activated.kind !== "activated") throw new Error(`expected activated, got ${activated.kind}`);
       return activated.grant;
     }));
-}
-
-function grantBinding(grant: RelayGrant, overrides: Partial<RelayGrantBinding> = {}): RelayGrantBinding {
-  return {
-    requestId: grant.requestId,
-    grantId: grant.grantId,
-    leaseGeneration: grant.leaseGeneration,
-    claims: {
-      version: 1,
-      audience: "octg-worker-relay",
-      environment: grant.environment,
-      route: "responses",
-      requestId: grant.requestId,
-      grantId: grant.grantId,
-      nonce: grant.nonce,
-      clientId: grant.clientId,
-      idempotencyKeyHash: grant.idempotencyKeyHash,
-      model: grant.model,
-      pool: grant.pool,
-      admissionUtcDay: grant.admissionUtcDay,
-      leaseGeneration: grant.leaseGeneration,
-      issuedAtMs: grant.issuedAtMs,
-      expiresAtMs: grant.credentialExpiresAtMs,
-    },
-    ...overrides,
-  };
 }
 
 function terminalReport(
@@ -410,7 +372,7 @@ describe("QuotaController.finishRelay", () => {
     });
 
     // Then: the illegal release is denied and the reservation stays.
-    expect(result).toEqual({ kind: "denied", code: "invalid_request" });
+    expect(result).toEqual({ kind: "denied", code: "invalid_request", state: "attempted" });
     expect((await readGrant(controller, grant))?.state).toBe("attempted");
     expect(await readPool(controller)).toMatchObject({ reservedTokens: 300 });
     expect(await readLeases(controller)).toHaveLength(1);
@@ -437,7 +399,7 @@ describe("QuotaController.finishRelay", () => {
     if (replay.kind !== "accepted") throw new Error("expected accepted");
     expect(replay.grant.state).toBe("settled");
     expect(replay.quota).toMatchObject({ actualTokens: 123 });
-    expect(conflict).toEqual({ kind: "denied", code: "grant_terminalized" });
+    expect(conflict).toEqual({ kind: "denied", code: "grant_terminalized", state: "settled" });
     expect(await readPool(controller)).toMatchObject({ confirmedTokens: 123 });
   });
 
@@ -472,7 +434,7 @@ describe("QuotaController.finishRelay", () => {
     });
 
     // Then: the report is denied and quota is untouched.
-    expect(result).toEqual({ kind: "denied", code: "grant_expired" });
+    expect(result).toEqual({ kind: "denied", code: "grant_expired", state: "authorized" });
     expect(await readPool(controller)).toMatchObject({ reservedTokens: 300, confirmedTokens: 0 });
   });
 
@@ -496,7 +458,7 @@ describe("QuotaController.finishRelay", () => {
 
     // Then: the cross-environment credential is rejected and nothing changed.
     expect(activation).toEqual({ kind: "denied", code: "grant_not_found" });
-    expect(terminal).toEqual({ kind: "denied", code: "grant_not_found" });
+    expect(terminal).toEqual({ kind: "denied", code: "grant_not_found", state: null });
     expect((await readGrant(controller, grant))?.state).toBe("authorized");
     expect(await readLeases(controller)).toHaveLength(1);
   });
@@ -577,7 +539,7 @@ describe("QuotaController.finishRelay", () => {
     });
 
     // Then: the late report cannot alter quota.
-    expect(lateReport).toEqual({ kind: "denied", code: "grant_terminalized" });
+    expect(lateReport).toEqual({ kind: "denied", code: "grant_terminalized", state: "reconciled_consumed" });
     expect(await readPool(controller)).toMatchObject({ confirmedTokens: 300 });
   });
 });

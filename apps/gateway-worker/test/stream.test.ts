@@ -424,6 +424,19 @@ describe("proxy stream finalization", () => {
     await controller.releaseInFlight(requestId, lease.generation).catch(() => undefined);
   });
 
+  it("settles usage from a response.completed event larger than the old tail buffer", async () => {
+    const padding = "p".repeat(40_000);
+    const event = `data: {"type":"response.completed","response":{"padding":"${padding}","usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}\n\n`;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(event));
+        controller.close();
+      },
+    });
+
+    await runStreamSettlementTest("stream-oversized-completed-event", "2026-10-24", stream, 150);
+  });
+
   const runStreamSettlementTest = async (
     requestId: string,
     day: string,

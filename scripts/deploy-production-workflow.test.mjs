@@ -160,6 +160,7 @@ test("deploy-production workflow preserves remote environment variables using --
     hasWranglerDeployKeepVars(runCommand),
     "'Deploy Worker' step must invoke 'wrangler deploy' with '--keep-vars' to prevent erasing remote variables like Deno settings",
   );
+  assert.match(runCommand, /--var "OCTG_RELAY_ENVIRONMENT:production"/);
 });
 
 test("deploy-production workflow sources all non-secret settings from GitHub Variables", () => {

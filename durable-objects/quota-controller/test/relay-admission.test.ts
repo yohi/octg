@@ -1,27 +1,13 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RelayContextV1, RelayRequestMetaV1 } from "@octg/shared";
 import type { QuotaController } from "../src/quota-controller";
 import type { RelayAdmissionInput } from "../src/relay-admission";
 import type { RelayGrant } from "../src/relay-grant";
 import { admitRelayInTransaction } from "../src/relay-admission";
+import { grantBinding, nonce, quotaController, requestId } from "./relay-test-helpers";
 
 const CONTEXT_ISSUED_AT_MS = 1_791_000_000_000;
-const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-const stub = (day: string): DurableObjectStub<QuotaController> =>
-  env.QUOTA_CONTROLLER.get(env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`));
-
-function requestId(seed: number): string {
-  let body = "";
-  for (let i = 0; i < 26; i += 1) body += ID_ALPHABET[(seed * 7 + i * 3) % 32];
-  return `req_${body}`;
-}
-
-function nonce(seed: number): string {
-  return `n${String(seed)}`.padEnd(43, "x");
-}
-
 function relayContext(overrides: Partial<RelayContextV1> = {}): RelayContextV1 {
   return {
     version: 1,
@@ -91,7 +77,7 @@ function expectUuid(value: string): void {
 describe("QuotaController.admitRelay", () => {
   it("commits entry, counters, mapping, lease and grant in one call", async () => {
     // Given: an unused pool and an admission with an idempotency key.
-    const controller = stub("2026-09-01");
+    const controller = quotaController("2026-09-01");
     const hash = await keyHash("client-a", "key-1");
     const before = Date.now();
 
@@ -155,7 +141,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("denies quota exhaustion without writing any admission state", async () => {
     // Given: a pool that cannot fit the reservation.
-    const controller = stub("2026-09-02");
+    const controller = quotaController("2026-09-02");
 
     // When: the reservation exceeds the remaining quota.
     const result = await controller.admitRelay(admissionInput({ reservedTokens: 2_000_000, upperBoundTokens: 2_000_000 }));
@@ -171,7 +157,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("denies concurrency exhaustion without writing admission state", async () => {
     // Given: the in-flight pool is already at the configured limit of three.
-    const controller = stub("2026-09-03");
+    const controller = quotaController("2026-09-03");
     for (const seed of [1, 2, 3]) {
       const admitted = await controller.admitRelay(admissionInput({ context: relayContext({ requestId: requestId(seed), nonce: nonce(seed) }) }));
       expect(admitted.kind).toBe("admitted");
@@ -190,7 +176,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("returns the saved authorized admission for an exact replay", async () => {
     // Given: one admitted request.
-    const controller = stub("2026-09-04");
+    const controller = quotaController("2026-09-04");
     const input = admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1) }) });
     const first = await controller.admitRelay(input);
     if (first.kind !== "admitted") throw new Error("expected admitted");
@@ -208,33 +194,12 @@ describe("QuotaController.admitRelay", () => {
 
   it("denies an exact replay once the grant is attempted", async () => {
     // Given: an admitted request whose grant was activated.
-    const controller = stub("2026-09-05");
+    const controller = quotaController("2026-09-05");
     const input = admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1) }) });
     const first = await controller.admitRelay(input);
     if (first.kind !== "admitted") throw new Error("expected admitted");
     const grant: RelayGrant = first.grant;
-    const activation = await controller.activateRelay({
-      requestId: grant.requestId,
-      grantId: grant.grantId,
-      leaseGeneration: grant.leaseGeneration,
-      claims: {
-        version: 1,
-        audience: "octg-worker-relay",
-        environment: grant.environment,
-        route: "responses",
-        requestId: grant.requestId,
-        grantId: grant.grantId,
-        nonce: grant.nonce,
-        clientId: grant.clientId,
-        idempotencyKeyHash: grant.idempotencyKeyHash,
-        model: grant.model,
-        pool: grant.pool,
-        admissionUtcDay: grant.admissionUtcDay,
-        leaseGeneration: grant.leaseGeneration,
-        issuedAtMs: grant.issuedAtMs,
-        expiresAtMs: grant.credentialExpiresAtMs,
-      },
-    });
+    const activation = await controller.activateRelay(grantBinding(grant));
     expect(activation.kind).toBe("activated");
 
     // When: the same decision is replayed after activation.
@@ -246,7 +211,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("rejects a conflicting replay with different reservation bounds", async () => {
     // Given: one admitted request.
-    const controller = stub("2026-09-06");
+    const controller = quotaController("2026-09-06");
     await controller.admitRelay(admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1) }) }));
 
     // When: the same request ID replays with a different token budget.
@@ -266,7 +231,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("rejects a different request ID with the same raw key while the mapped entry is active", async () => {
     // Given: request A admitted with idempotency key.
-    const controller = stub("2026-09-07");
+    const controller = quotaController("2026-09-07");
     const hash = await keyHash("client-a", "key-1");
     await controller.admitRelay(
       admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1), idempotencyKeyHash: hash }), rawIdempotencyKey: "key-1" }),
@@ -288,7 +253,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("refreshes the key mapping when the mapped entry is released", async () => {
     // Given: request A admitted with a key and then released.
-    const controller = stub("2026-09-08");
+    const controller = quotaController("2026-09-08");
     const hash = await keyHash("client-a", "key-1");
     await controller.admitRelay(
       admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1), idempotencyKeyHash: hash }), rawIdempotencyKey: "key-1" }),
@@ -314,7 +279,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("rejects a raw key that disagrees with the signed context hash", async () => {
     // Given: a context whose hash binds a different raw key.
-    const controller = stub("2026-09-09");
+    const controller = quotaController("2026-09-09");
     const hash = await keyHash("client-a", "other-key");
 
     // When: the raw key does not match the verified hash binding.
@@ -329,7 +294,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("admits without a key when the context hash is null and writes no mapping", async () => {
     // Given: a request without an effective idempotency key.
-    const controller = stub("2026-09-10");
+    const controller = quotaController("2026-09-10");
 
     // When: admission without a raw key.
     const result = await controller.admitRelay(admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1) }) }));
@@ -341,7 +306,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("denies an environment mismatch against the DO environment binding", async () => {
     // Given: a verified context for preview and a DO bound to production.
-    const controller = stub("2026-09-11");
+    const controller = quotaController("2026-09-11");
     const result = await runInDurableObject(controller, (_instance, state) =>
       state.storage.transaction((storage) =>
         admitRelayInTransaction(
@@ -361,7 +326,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("denies internal_error when the environment binding is absent", async () => {
     // Given: a DO environment without OCTG_RELAY_ENVIRONMENT.
-    const controller = stub("2026-09-12");
+    const controller = quotaController("2026-09-12");
     const result = await runInDurableObject(controller, (_instance, state) =>
       state.storage.transaction((storage) =>
         admitRelayInTransaction(
@@ -381,7 +346,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("rejects inverted or negative bounds but allows a zero reservation", async () => {
     // Given: a DO with an unused pool.
-    const controller = stub("2026-09-13");
+    const controller = quotaController("2026-09-13");
 
     // When: the admission carries zero, inverted, or negative bounds.
     const zero = await controller.admitRelay(admissionInput({ reservedTokens: 0 }));
@@ -398,7 +363,7 @@ describe("QuotaController.admitRelay", () => {
 
   it("accumulates independent admissions into the same pool/day controller", async () => {
     // Given: two decisions routed from different shards to one pool/day DO.
-    const controller = stub("2026-09-14");
+    const controller = quotaController("2026-09-14");
 
     // When: both requests are admitted.
     const first = await controller.admitRelay(admissionInput({ context: relayContext({ requestId: requestId(1), nonce: nonce(1) }) }));

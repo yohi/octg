@@ -114,3 +114,24 @@ test("Preview Worker secrets never include the production Deno auth token", () =
     false,
   );
 });
+
+test("Preview applies Durable Object migrations before uploading a Worker version", () => {
+  const migrationDeploy = blockBetween(
+    "      - name: Apply preview D1 migrations",
+    "      - name: Capture current 100% deployment",
+  );
+
+  const deployIndex = migrationDeploy.indexOf("wrangler deploy");
+  const d1MigrationIndex = migrationDeploy.indexOf("wrangler d1 migrations apply DB");
+  assert.ok(deployIndex > d1MigrationIndex, "Worker deployment must follow D1 migrations");
+  const deployCommandLines = [];
+  for (const line of migrationDeploy.slice(deployIndex).split("\n")) {
+    deployCommandLines.push(line);
+    if (!line.trimEnd().endsWith("\\")) break;
+  }
+  const deployCommand = deployCommandLines.join("\n");
+  assert.ok(
+    deployCommand.includes('--config "$PREVIEW_CONFIG"'),
+    "Worker deployment must use the isolated Preview configuration",
+  );
+});

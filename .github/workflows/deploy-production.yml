@@ -181,7 +181,7 @@ jobs:
             --var "DENO_TOKENIZER_TIMEOUT_MS:${DENO_TOKENIZER_TIMEOUT_MS}" \
             --var "DENO_PREPARE_ENDPOINT:${DENO_PREPARE_ENDPOINT}" \
             --var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}" \
-            --var "OCTG_RELAY_ENVIRONMENT:${OCTG_RELAY_ENVIRONMENT:-}" \
+            --var "OCTG_RELAY_ENVIRONMENT:production" \
             --var "OCTG_RELAY_INGRESS_ENDPOINT:${OCTG_RELAY_INGRESS_ENDPOINT:-}"
           version_id=$(jq -s -r '
             [.[] | select(.type == "version-upload") | .version_id // empty]
