@@ -89,7 +89,7 @@ export type FinishRelayInput = RelayGrantBinding & {
 
 export type FinishRelayResult =
   | { readonly kind: "accepted"; readonly grant: RelayGrant; readonly quota: RequestEntry }
-  | { readonly kind: "denied"; readonly code: RelayErrorCode };
+  | { readonly kind: "denied"; readonly code: RelayErrorCode; readonly state: RelayGrantState | null };
 
 const TERMINAL_GRANT_STATES: ReadonlySet<RelayGrantState> = new Set([
   "settled",

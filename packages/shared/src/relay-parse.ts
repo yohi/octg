@@ -235,9 +235,12 @@ export function parseRelayTerminalResponse(value: unknown): RelayTerminalRespons
     return undefined;
   }
   if (value.version !== 1 || typeof value.accepted !== "boolean") return undefined;
-  if (!isRelayGrantState(value.state)) return undefined;
-  if (value.code === null) return { version: 1, accepted: value.accepted, state: value.state, code: null };
+  if (value.code === null) {
+    if (!value.accepted || !isRelayGrantState(value.state)) return undefined;
+    return { version: 1, accepted: true, state: value.state, code: null };
+  }
   if (!isRelayErrorCode(value.code)) return undefined;
+  if (value.accepted || (value.state !== null && !isRelayGrantState(value.state))) return undefined;
   return { version: 1, accepted: value.accepted, state: value.state, code: value.code };
 }
 

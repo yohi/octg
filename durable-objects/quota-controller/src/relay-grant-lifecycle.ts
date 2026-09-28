@@ -171,39 +171,41 @@ export async function finishRelayInTransaction(
     input.reportFingerprint.length === 0 ||
     input.reportFingerprint.length > MAX_FINGERPRINT_BYTES
   ) {
-    return { kind: "denied", code: "invalid_request" };
+    return { kind: "denied", code: "invalid_request", state: null };
   }
   const grant = await getRelayGrant(ctx.storage, input.requestId);
   if (grant === undefined || grantBindingMismatch(grant, input, ctx.identity)) {
-    return { kind: "denied", code: "grant_not_found" };
+    return { kind: "denied", code: "grant_not_found", state: null };
   }
   if (ctx.nowMs >= grant.credentialExpiresAtMs) {
-    return { kind: "denied", code: "grant_expired" };
+    return { kind: "denied", code: "grant_expired", state: grant.state };
   }
   if (isTerminalGrantState(grant.state)) {
     if (grant.terminalFingerprint === input.reportFingerprint) {
       const entry = await getEntry(ctx.storage, grant.requestId);
-      if (entry === undefined) return { kind: "denied", code: "invalid_request" };
+      if (entry === undefined) return { kind: "denied", code: "invalid_request", state: grant.state };
       return { kind: "accepted", grant, quota: entry };
     }
-    return { kind: "denied", code: "grant_terminalized" };
+    return { kind: "denied", code: "grant_terminalized", state: grant.state };
   }
   // Release is legal only before activation may have occurred; settle is legal
   // only after the grant reached attempted (or is already uncertain).
   if (report.outcome === "release" && grant.state !== "authorized") {
+    let state = grant.state;
     if (grant.state === "attempted" && ctx.nowMs >= grant.authorizationExpiresAtMs) {
       await expireAttemptedGrant(ctx, grant);
+      state = "uncertain";
     }
-    return { kind: "denied", code: "invalid_request" };
+    return { kind: "denied", code: "invalid_request", state };
   }
   if (report.outcome === "settle" && grant.state === "authorized") {
-    return { kind: "denied", code: "invalid_request" };
+    return { kind: "denied", code: "invalid_request", state: grant.state };
   }
   const runtime = lifecycleRuntime(ctx);
   let applied: SettleResult | MarkUncertainResult | ReleaseResult;
   switch (report.outcome) {
     case "settle": {
-      if (report.totalTokens === null) return { kind: "denied", code: "invalid_request" };
+      if (report.totalTokens === null) return { kind: "denied", code: "invalid_request", state: grant.state };
       applied = await applyQuotaLifecycleTransition(runtime, ctx.storage, grant.requestId, {
         kind: "settle",
         actualTokens: report.totalTokens,
@@ -221,7 +223,7 @@ export async function finishRelayInTransaction(
       });
       break;
   }
-  if (!applied.ok) return { kind: "denied", code: "invalid_request" };
+  if (!applied.ok) return { kind: "denied", code: "invalid_request", state: grant.state };
   await releaseGrantLease(ctx, grant);
   const nextState: RelayGrant["state"] = report.outcome === "settle"
     ? "settled"
@@ -236,6 +238,6 @@ export async function finishRelayInTransaction(
   };
   await putRelayGrant(ctx.storage, finished);
   const entry = await getEntry(ctx.storage, grant.requestId);
-  if (entry === undefined) return { kind: "denied", code: "invalid_request" };
+  if (entry === undefined) return { kind: "denied", code: "invalid_request", state: finished.state };
   return { kind: "accepted", grant: finished, quota: entry };
 }

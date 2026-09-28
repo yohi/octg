@@ -406,6 +406,17 @@ describe("parseRelayTerminalResponse", () => {
   it("rejects an unknown grant state", () => {
     expect(parseRelayTerminalResponse({ version: 1, accepted: false, state: "opened", code: "grant_expired" })).toBeUndefined();
   });
+
+  it("accepts denied responses with the actual state or no known grant state", () => {
+    expect(parseRelayTerminalResponse({ version: 1, accepted: false, state: "released", code: "grant_terminalized" }))
+      .toEqual({ version: 1, accepted: false, state: "released", code: "grant_terminalized" });
+    expect(parseRelayTerminalResponse({ version: 1, accepted: false, state: null, code: "grant_not_found" }))
+      .toEqual({ version: 1, accepted: false, state: null, code: "grant_not_found" });
+  });
+
+  it("rejects accepted responses without a grant state", () => {
+    expect(parseRelayTerminalResponse({ version: 1, accepted: true, state: null, code: null })).toBeUndefined();
+  });
 });
 
 describe("parseRelayResponseMeta", () => {
