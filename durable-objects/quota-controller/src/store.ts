@@ -54,6 +54,8 @@ export interface QuotaStorage {
 export interface QuotaEnvLike {
   readonly QUOTA_LIMIT_STANDARD?: string;
   readonly QUOTA_LIMIT_MINI?: string;
+  readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly OCTG_RELAY_ENVIRONMENT?: string;
 }
 
 export interface QuotaIdentity {
@@ -157,7 +159,7 @@ function isLegacyInFlightState(state: InFlightState): state is readonly string[]
   return Array.isArray(state);
 }
 
-function normalizeInFlightState(
+export function normalizeInFlightState(
   state: InFlightState,
   nowMs: number,
 ): { readonly state: InFlightLeaseState; readonly migrated: boolean } {
@@ -175,7 +177,7 @@ function normalizeInFlightState(
   };
 }
 
-function withoutExpiredLeases(leases: readonly InFlightLease[], nowMs: number): readonly InFlightLease[] {
+export function withoutExpiredLeases(leases: readonly InFlightLease[], nowMs: number): readonly InFlightLease[] {
   return leases.filter((lease) => lease.expiresAtMs > nowMs);
 }
 
