@@ -136,12 +136,12 @@ function parseInput(rawBody: Uint8Array, mediaType?: string): TokenizeInput | un
   return tokenizeInputOf(parsed);
 }
 
-interface ParsedContentType {
+export interface ParsedContentType {
   readonly mediaType?: string;
   readonly charset?: string;
 }
 
-function parseContentType(request: Request): ParsedContentType {
+export function parseContentType(request: Request): ParsedContentType {
   const contentType = request.headers.get("content-type");
   if (!contentType) return {};
   const parts = contentType.split(";").map((p) => p.trim());
@@ -171,7 +171,7 @@ function acceptsPayload({ mediaType, charset }: ParsedContentType): boolean {
   return false;
 }
 
-async function isAuthorized(
+export async function isAuthorized(
   authorization: string | null,
   expectedToken: string,
 ): Promise<boolean> {
@@ -193,7 +193,7 @@ async function isAuthorized(
   return hasBearerPrefix && difference === 0;
 }
 
-type PrepareRawBodyResult =
+export type PrepareRawBodyResult =
   | { readonly ok: true; readonly bytes: Uint8Array }
   | { readonly ok: false; readonly reason: "too_large" | "read_failure" };
 
@@ -209,7 +209,7 @@ function isDeclaredOversize(contentLength: string, maxBytes: number): boolean {
   return Number.isSafeInteger(declaredBytes) && declaredBytes > maxBytes;
 }
 
-async function readBoundedRawBody(
+export async function readBoundedRawBody(
   request: Request,
   maxBytes: number,
 ): Promise<PrepareRawBodyResult> {
@@ -283,7 +283,7 @@ function generateMarker(): string {
   return `octg_prepare_${hex}`;
 }
 
-function base64urlEncode(bytes: Uint8Array): string {
+export function base64urlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCodePoint(byte);
@@ -301,7 +301,7 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-function acceptsPreparePayload({ mediaType, charset }: ParsedContentType): boolean {
+export function acceptsPreparePayload({ mediaType, charset }: ParsedContentType): boolean {
   if (mediaType === "application/json") {
     return charset === undefined || charset === "utf-8";
   }
@@ -428,6 +428,8 @@ async function handlePrepare(
 export function createTokenizerHandler(args: {
   readonly config: DenoTokenizerServiceConfig;
   readonly encoder: ExactEncoder;
+  /** Optional relay route handler; injected by main.ts from relay.ts. */
+  readonly relayHandler?: (request: Request) => Promise<Response>;
 }): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url);
@@ -441,6 +443,14 @@ export function createTokenizerHandler(args: {
     }
     if (url.pathname === "/prepare") {
       return handlePrepare(request, args.config, args.encoder);
+    }
+    if (url.pathname === "/relay/v1/responses") {
+      // Route constant and behavior are owned by relay.ts (RELAY_INGRESS_ROUTE).
+      const relayHandler = args.relayHandler;
+      if (relayHandler === undefined) {
+        return errorResponse(404);
+      }
+      return relayHandler(request);
     }
     if (url.pathname !== "/tokenize") {
       return errorResponse(404);

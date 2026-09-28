@@ -12,3 +12,4 @@ export * from "./relay-json.ts";
 export * from "./relay-parse.ts";
 export * from "./relay-claims.ts";
 export * from "./relay-credential.ts";
+export * from "./usage.ts";
