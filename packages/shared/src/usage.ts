@@ -1,4 +1,4 @@
-import type { Usage } from "./types";
+import type { Usage } from "./types.ts";
 
 function hasUsageTotal(value: unknown): value is Usage {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
