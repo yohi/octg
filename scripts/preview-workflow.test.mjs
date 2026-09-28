@@ -124,8 +124,14 @@ test("Preview applies Durable Object migrations before uploading a Worker versio
   const deployIndex = migrationDeploy.indexOf("wrangler deploy");
   const d1MigrationIndex = migrationDeploy.indexOf("wrangler d1 migrations apply DB");
   assert.ok(deployIndex > d1MigrationIndex, "Worker deployment must follow D1 migrations");
+  const deployCommandLines = [];
+  for (const line of migrationDeploy.slice(deployIndex).split("\n")) {
+    deployCommandLines.push(line);
+    if (!line.trimEnd().endsWith("\\")) break;
+  }
+  const deployCommand = deployCommandLines.join("\n");
   assert.ok(
-    migrationDeploy.slice(deployIndex).includes('--config "$PREVIEW_CONFIG"'),
+    deployCommand.includes('--config "$PREVIEW_CONFIG"'),
     "Worker deployment must use the isolated Preview configuration",
   );
 });
