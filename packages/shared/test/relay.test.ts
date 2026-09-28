@@ -133,7 +133,7 @@ describe("parseRelayRequestMeta", () => {
   });
 
   it("rejects negative estimatedInputTokens", () => {
-    expect(parseRelayRequestMeta({ model: "openai/test", estimatedInputTokens: -1 })).toBeUndefined();
+    expect(parseRelayRequestMeta({ ...VALID_META, estimatedInputTokens: -1 })).toBeUndefined();
   });
 
   it("rejects non-integer usage", () => {
