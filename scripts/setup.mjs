@@ -185,7 +185,7 @@ async function setupDeploy(environment) {
 
   const cloudflareEnv = putDeploySecrets(environment, values.accountId);
   run(node, [wrangler, "d1", "migrations", "apply", "octg", "--remote", "--config", config], { env: cloudflareEnv });
-  run(node, [wrangler, "deploy", "--config", config], { env: cloudflareEnv });
+  run(node, [wrangler, "deploy", "--config", config, "--var", "OCTG_RELAY_ENVIRONMENT:production"], { env: cloudflareEnv });
   console.log("\n本番セットアップが完了しました。");
   console.log("クライアントキーは seed:client で発行してください。");
 }
