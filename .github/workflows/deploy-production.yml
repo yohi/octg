@@ -170,8 +170,7 @@ jobs:
             { mode: 0o600 },
           );
           NODE
-          node -e 'require("node:fs").rmSync(process.argv[1], { force: true })' "$WRANGLER_OUTPUT_FILE_PATH"
-          ./node_modules/.bin/wrangler versions upload \
+          ./node_modules/.bin/wrangler deploy \
             --config apps/gateway-worker/wrangler.jsonc \
             --keep-vars \
             --secrets-file "$secrets_file" \
@@ -183,19 +182,6 @@ jobs:
             --var "DENO_PREPARE_THRESHOLD_BYTES:${DENO_PREPARE_THRESHOLD_BYTES}" \
             --var "OCTG_RELAY_ENVIRONMENT:production" \
             --var "OCTG_RELAY_INGRESS_ENDPOINT:${OCTG_RELAY_INGRESS_ENDPOINT:-}"
-          version_id=$(jq -s -r '
-            [.[] | select(.type == "version-upload") | .version_id // empty]
-            | last // empty
-          ' "$WRANGLER_OUTPUT_FILE_PATH")
-          if [ -z "$version_id" ]; then
-            echo "::error::Production Worker Version ID not found in Wrangler output"
-            exit 1
-          fi
-          ./node_modules/.bin/wrangler versions deploy \
-            "${version_id}@100%" \
-            --config apps/gateway-worker/wrangler.jsonc \
-            --message "Production Worker deployment" \
-            --yes
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -203,7 +189,6 @@ jobs:
           PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN }}
           PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN }}
           PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY: ${{ secrets.PRODUCTION_OCTG_RELAY_CONTEXT_HMAC_KEY }}
-          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/production-wrangler-output.ndjson
           MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
           DENO_TOKENIZER_ENDPOINT: ${{ vars.DENO_TOKENIZER_ENDPOINT }}
           DENO_TOKENIZER_THRESHOLD_BYTES: ${{ vars.DENO_TOKENIZER_THRESHOLD_BYTES }}

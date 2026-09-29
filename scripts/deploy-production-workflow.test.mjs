@@ -190,14 +190,13 @@ test("deploy-production validates prepare configuration before every remote muta
   const validationStepName = "Validate Production Deno tokenizer configuration";
   const changeCommands = [
     "wrangler d1 migrations apply",
-    "wrangler versions upload",
-    "wrangler versions deploy",
+    "wrangler deploy",
   ];
 
   assertRemoteMutationsFollowValidation(workflow, validationStepName, changeCommands);
 });
 
-test("deploy-production uploads the mandatory prepare pair directly", () => {
+test("deploy-production deploys the mandatory prepare pair directly", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
   const validationStep = extractStepRun(workflow, "Validate Production Deno tokenizer configuration");
@@ -227,12 +226,9 @@ test("deploy-production workflow synchronizes the Worker auth Secret safely", ()
     /PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: \$\{\{ secrets\.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN \}\}/,
   );
   assert.ok(deployCommand, "Deploy Worker step must contain a run command");
-  assert.match(deployCommand, /wrangler versions upload/);
+  assert.match(deployCommand, /wrangler deploy/);
+  assert.doesNotMatch(deployCommand, /wrangler versions upload|wrangler versions deploy/);
   assert.match(deployCommand, /--secrets-file "\$secrets_file"/);
-  assert.match(deployCommand, /wrangler versions deploy/);
-  assert.match(deployCommand, /WRANGLER_OUTPUT_FILE_PATH/);
-  assert.match(deployCommand, /version_id=\$\(jq/);
-  assert.match(deployCommand, /"\$\{version_id\}@100%"/);
   assert.match(deployCommand, /DENO_TOKENIZER_AUTH_TOKEN/);
   assert.match(deployCommand, /mode: 0o600/);
   assert.doesNotMatch(deployCommand, /\$\{\{\s*secrets\./);
@@ -408,8 +404,7 @@ test("deploy-production validates the relay DO migration and binding before remo
   assert.match(stepRun, /namespace_id/);
   assertRemoteMutationsFollowValidation(workflow, stepName, [
     "wrangler d1 migrations apply",
-    "wrangler versions upload",
-    "wrangler versions deploy",
+    "wrangler deploy",
   ]);
 });
 
