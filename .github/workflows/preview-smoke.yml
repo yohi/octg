@@ -264,11 +264,29 @@ jobs:
           NEW_VERSION_ID: ${{ steps.upload.outputs.version_id }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ./node_modules/.bin/wrangler versions deploy \
-            "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
-            --config "$PREVIEW_CONFIG" \
-            --message "PR ${PULL_REQUEST_NUMBER} smoke test" \
-            --yes
+          set -euo pipefail
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if output=$(./node_modules/.bin/wrangler versions deploy \
+              "${NEW_VERSION_ID}@0%" "${CURRENT_VERSION_ID}@100%" \
+              --config "$PREVIEW_CONFIG" \
+              --message "PR ${PULL_REQUEST_NUMBER} smoke test" \
+              --yes 2>&1); then
+              printf '%s\n' "$output"
+              exit 0
+            else
+              status=$?
+            fi
+
+            printf '%s\n' "$output"
+            if [[ "$output" != *"[code: 100146]"* ]] || [ "$attempt" -eq 3 ]; then
+              exit "$status"
+            fi
+
+            echo "::warning::Cloudflare has not published Worker version ${NEW_VERSION_ID}; retrying deploy (attempt ${attempt}/3)"
+            sleep "$attempt"
+            attempt=$((attempt + 1))
+          done
 
       - name: Run smoke test with Version Override
         id: smoke
