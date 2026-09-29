@@ -107,16 +107,27 @@ function isMissingValue(value) {
  */
 function validateProductionRelayOptIn(values, missing, invalid) {
   const enabled = values.OCTG_RELAY_ENABLED;
-  if (isMissingValue(enabled)) return;
-  if (enabled !== "true" && enabled !== "false") {
-    invalid.push("OCTG_RELAY_ENABLED");
-    return;
-  }
-  if (enabled === "false") return;
+  if (!isRelayOptedIn(enabled, invalid)) return;
 
+  collectMissingRelayVariables(values, missing);
+  validateRelayEndpointFormats(values, missing, invalid);
+  validateCanonicalRelayDurations(values, missing, invalid);
+}
+
+function isRelayOptedIn(enabled, invalid) {
+  if (enabled === undefined || enabled === "false") return false;
+  if (enabled === "true") return true;
+  invalid.push("OCTG_RELAY_ENABLED");
+  return false;
+}
+
+function collectMissingRelayVariables(values, missing) {
   for (const name of PRODUCTION_RELAY_VARIABLE_NAMES) {
     if (isMissingValue(values[name])) missing.push(name);
   }
+}
+
+function validateRelayEndpointFormats(values, missing, invalid) {
   if (!missing.includes("OCTG_RELAY_ENVIRONMENT") &&
       values.OCTG_RELAY_ENVIRONMENT !== CANONICAL_RELAY_ENVIRONMENT) {
     invalid.push("OCTG_RELAY_ENVIRONMENT");
@@ -129,6 +140,9 @@ function validateProductionRelayOptIn(values, missing, invalid) {
       !isGatewayBOpenAIBaseUrl(values.OCTG_RELAY_GATEWAY_B_BASE_URL)) {
     invalid.push("OCTG_RELAY_GATEWAY_B_BASE_URL");
   }
+}
+
+function validateCanonicalRelayDurations(values, missing, invalid) {
   const canonicalValues = new Map([
     ["OCTG_RELAY_MAX_REQUEST_DURATION_MS", CANONICAL_RELAY_MAX_REQUEST_DURATION_MS],
     ["OCTG_RELAY_LEASE_TTL_MS", CANONICAL_RELAY_LEASE_TTL_MS],
@@ -155,7 +169,8 @@ function isGatewayBOpenAIBaseUrl(value) {
   try {
     const url = new URL(value.trim());
     return url.protocol === "https:" && url.username.length === 0 && url.password.length === 0 &&
-      url.pathname === "/openai" && url.search === "" && url.hash === "";
+      (/^\/v1\/[^/]+\/[^/]+\/openai$/.test(url.pathname) || url.pathname === "/openai") &&
+      url.search === "" && url.hash === "";
   } catch {
     return false;
   }
@@ -190,7 +205,9 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  const result = validateProductionDenoConfig(process.env);
+  const environment = { ...process.env };
+  if (environment.OCTG_RELAY_ENABLED === "") delete environment.OCTG_RELAY_ENABLED;
+  const result = validateProductionDenoConfig(environment);
   if (!result.valid) {
     console.error(formatProductionDenoConfigError(result));
     process.exitCode = 1;

@@ -451,14 +451,16 @@ test("strips production relay vars and applies Preview relay config when provide
 test("rejects invalid Preview relay settings", () => {
   for (const relay of [
     { environment: "staging", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "production", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "https://production-relay.example/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "https://production-relay.example:443/relay/v1/responses" },
     { environment: "preview", ingressEndpoint: "http://preview-relay.deno.dev/relay/v1/responses" },
     { environment: "preview", ingressEndpoint: "https://user:pass@preview-relay.deno.dev/relay/v1/responses" },
     { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses/" },
   ]) {
     assert.throws(
       () => buildPreviewWorkerConfig(baseConfig, { ...validOptions, relay }),
-      /Preview relay/,
+      /Preview relay|Production relay/,
     );
   }
 });
-

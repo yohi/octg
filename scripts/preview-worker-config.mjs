@@ -70,6 +70,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   config.durable_objects = { bindings: resolvePreviewDurableObjectBindings(config) };
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
+  const productionRelayEndpoint = config.vars?.OCTG_RELAY_INGRESS_ENDPOINT;
   const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
     ? normalizeEndpoint(config.vars.DENO_PREPARE_ENDPOINT)
     : undefined;
@@ -129,7 +130,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   }
 
   if (relay !== undefined) {
-    validatePreviewRelayConfig(relay);
+    validatePreviewRelayConfig(relay, productionRelayEndpoint);
     config.vars.OCTG_RELAY_ENVIRONMENT = relay.environment.trim();
     config.vars.OCTG_RELAY_INGRESS_ENDPOINT = relay.ingressEndpoint.trim();
   }
@@ -191,17 +192,21 @@ function validatePreviewDenoConfig(deno, productionEndpoint, maxInputBytes) {
   }
 }
 
-function validatePreviewRelayConfig(relay) {
+function validatePreviewRelayConfig(relay, productionRelayEndpoint) {
   if (relay === null || typeof relay !== "object") {
     throw new TypeError("Preview relay configuration must be an object");
   }
   const { environment, ingressEndpoint } = relay;
-  if (environment !== "preview" && environment !== "production") {
-    throw new TypeError("Preview relay environment must be preview or production");
+  if (environment !== "preview") {
+    throw new TypeError("Preview relay environment must be preview");
   }
   requireHttpsEndpoint("Preview relay ingress endpoint", ingressEndpoint);
   if (ingressEndpoint.trim().endsWith("/")) {
     throw new TypeError("Preview relay ingress endpoint must not have a trailing slash");
+  }
+  if (typeof productionRelayEndpoint === "string" &&
+      normalizeEndpoint(ingressEndpoint) === normalizeEndpoint(productionRelayEndpoint)) {
+    throw new Error("Production relay ingress endpoint must not be used in Preview configuration");
   }
 }
 

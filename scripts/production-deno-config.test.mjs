@@ -251,6 +251,28 @@ test("CLI exits with a value-free error when required variables are missing", ()
   assert.doesNotMatch(result.stderr, /https|4096|5000|password/);
 });
 
+test("CLI treats an unset GitHub relay opt-in variable as absent", () => {
+  const environment = {
+    ...process.env,
+    MAX_INPUT_BYTES: "1048576",
+    DENO_TOKENIZER_ENDPOINT: "https://tokenizer.example/tokenize",
+    DENO_TOKENIZER_THRESHOLD_BYTES: "4096",
+    DENO_TOKENIZER_TIMEOUT_MS: "5000",
+    DENO_PREPARE_ENDPOINT: "https://prepare.example/prepare",
+    DENO_PREPARE_THRESHOLD_BYTES: "1",
+    OCTG_RELAY_ENABLED: "",
+  };
+
+  const result = spawnSync(process.execPath, [validatorPath], {
+    env: environment,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
 const enabledRelayGroup = {
   OCTG_RELAY_ENVIRONMENT: "production",
   OCTG_RELAY_CALLBACK_ORIGIN: "https://worker.example/",
@@ -271,7 +293,11 @@ test("treats an absent or false relay opt-in as disabled without relay variables
   assert.deepEqual(validateProductionDenoConfig({
     ...completeProductionConfig,
     OCTG_RELAY_ENABLED: "",
-  }), { valid: true, missing: [], invalid: [] });
+  }), { valid: false, missing: [], invalid: ["OCTG_RELAY_ENABLED"] });
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "  \t ",
+  }), { valid: false, missing: [], invalid: ["OCTG_RELAY_ENABLED"] });
 });
 
 test("rejects a relay opt-in value outside the exact true/false set", () => {
@@ -312,13 +338,23 @@ test("accepts the canonical enabled production relay group", () => {
   }), { valid: true, missing: [], invalid: [] });
 });
 
+test("accepts Cloudflare AI Gateway OpenAI URL paths for Gateway B", () => {
+  assert.deepEqual(validateProductionDenoConfig({
+    ...completeProductionConfig,
+    OCTG_RELAY_ENABLED: "true",
+    ...enabledRelayGroup,
+    OCTG_RELAY_GATEWAY_B_BASE_URL: "https://gateway-b.example/v1/account-123/gateway-abc/openai",
+  }), { valid: true, missing: [], invalid: [] });
+});
+
 test("rejects a preview environment and non-canonical relay values in production", () => {
   for (const [name, value] of [
     ["OCTG_RELAY_ENVIRONMENT", "preview"],
     ["OCTG_RELAY_CALLBACK_ORIGIN", "http://worker.example/"],
     ["OCTG_RELAY_CALLBACK_ORIGIN", "https://worker.example/internal"],
     ["OCTG_RELAY_CALLBACK_ORIGIN", "https://user:pass@worker.example/"],
-    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/v1/acct/gw/openai"],
+    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/v1/account-123/gateway-abc/openai?query=1"],
+    ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/v1/account-123/gateway-abc/openai#fragment"],
     ["OCTG_RELAY_GATEWAY_B_BASE_URL", "https://gateway-b.example/openai/"],
     ["OCTG_RELAY_GATEWAY_B_BASE_URL", "http://gateway-b.example/v1/acct/gw/openai"],
     ["OCTG_RELAY_MAX_REQUEST_DURATION_MS", "3599999"],
