@@ -79,7 +79,6 @@ describe("QuotaController.admitRelay", () => {
     // Given: an unused pool and an admission with an idempotency key.
     const controller = quotaController("2026-09-01");
     const hash = await keyHash("client-a", "key-1");
-    const before = Date.now();
 
     // When: the Decision DO admits the request.
     const result = await controller.admitRelay(
@@ -131,8 +130,7 @@ describe("QuotaController.admitRelay", () => {
     expect(lease).toBeDefined();
     if (lease) {
       expect(lease.generation).toBe(result.grant.leaseGeneration);
-      expect(lease.expiresAtMs - before).toBeGreaterThanOrEqual(119_000);
-      expect(lease.expiresAtMs - before).toBeLessThanOrEqual(120_500);
+      expect(lease.expiresAtMs).toBe(result.grant.issuedAtMs + 120_000);
     }
     const grantRecord = await readStorage<RelayGrant>(controller, `relay-grant:${requestId(1)}`);
     expect(grantRecord?.grantId).toBe(result.grant.grantId);
