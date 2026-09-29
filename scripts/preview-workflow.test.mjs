@@ -135,3 +135,15 @@ test("Preview applies Durable Object migrations before uploading a Worker versio
     "Worker deployment must use the isolated Preview configuration",
   );
 });
+
+test("Preview retries deploying an uploaded version only when Cloudflare has not published it yet", () => {
+  const deployStep = blockBetween(
+    "      - name: Add uploaded version at 0% traffic",
+    "      - name: Run smoke test with Version Override",
+  );
+
+  assert.match(deployStep, /attempt=1[\s\S]*while \[ "\$attempt" -le 3 \]/);
+  assert.match(deployStep, /code: 100146/);
+  assert.match(deployStep, /wrangler versions deploy/);
+  assert.match(deployStep, /exit "\$status"/);
+});

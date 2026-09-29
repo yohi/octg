@@ -14,7 +14,16 @@ describe("GET /v1/models", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { object: string; data: Array<{ id: string; object: string }> };
     expect(body.object).toBe("list");
-    expect(body.data.map((model) => model.id).sort()).toEqual(["gpt-5", "gpt-5-mini", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    expect(body.data.map((model) => model.id).sort()).toEqual([
+      "gpt-5",
+      "gpt-5-mini",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-6-astra",
+      "gpt-6-luna",
+      "gpt-6-sol",
+    ]);
   });
 
   it("excludes NONE models and requires authentication", async () => {
