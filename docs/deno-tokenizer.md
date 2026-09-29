@@ -79,6 +79,27 @@ Keep these concepts separate:
 
 The deployment workflow maps the protected shared-auth value into the two runtime sides. Do not put it in repository variables or committed files.
 
+## Responses Relay Route
+
+The relay adds `POST /relay/v1/responses` to the same Deno deployment. It is
+enabled only when the complete relay runtime key set from
+[configuration.md](./configuration.md) is present and valid; a partial or
+invalid set is a startup failure that never silently disables the route.
+
+Ownership on this route:
+
+- Deno normalizes and tokenizes the request, forwards the opaque context to the
+  Worker decision callback, activates the returned one-use grant exactly once,
+  forwards the original body exactly once to Gateway B, renews the lease while
+  the upstream response is open, and reports exactly one terminal outcome.
+- Deno never holds the relay HMAC key and never signs or verifies context or
+  grant credentials.
+- Deno never retries an upstream request after activation; ambiguous outcomes
+  report `uncertain` and rely on QuotaController reconciliation.
+
+`/prepare` remains available and unchanged during the relay rollout. See
+[SPEC.md section 19](../SPEC.md) for the normative contract.
+
 ## Service Properties
 
 The Deno service is stateless for tokenization requests.
@@ -325,5 +346,14 @@ values. Then verify that Chat Completions is unchanged and Responses uses the
 legacy tokenization route.
 
 Disabling Deno returns all accepted inputs to the Cloudflare `TokenizerController` path, so validate Worker resource behavior before sending large traffic.
+
+Relay rollback has one additional constraint: while any relay grant is
+unresolved, the Worker `/internal/relay/v1/*` callbacks and the
+`RELAY_DECISION_CONTROLLER`/`QUOTA_CONTROLLER` bindings must stay in place so
+outstanding grants can activate, renew, settle, or reconcile. Reconcile or
+otherwise resolve outstanding grants before removing relay secrets, callbacks,
+or the `v3` Durable Object migration. Never route unresolved requests to a
+different control plane. See [operations.md](./operations.md) for the relay
+rollback procedure.
 
 For the general Worker rollback procedure, see [operations.md](./operations.md).

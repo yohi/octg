@@ -149,7 +149,17 @@ jobs:
           DENO_DEPLOY_ORG: ${{ vars.DENO_DEPLOY_ORG }}
           DENO_DEPLOY_APP: ${{ vars.DENO_DEPLOY_APP }}
           PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN: ${{ secrets.PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN }}
+          PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN: ${{ secrets.PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN }}
           MAX_INPUT_BYTES: ${{ vars.MAX_INPUT_BYTES }}
+          OCTG_RELAY_ENABLED: ${{ vars.OCTG_RELAY_ENABLED }}
+          OCTG_RELAY_ENVIRONMENT: ${{ vars.OCTG_RELAY_ENVIRONMENT }}
+          OCTG_RELAY_CALLBACK_ORIGIN: ${{ vars.OCTG_RELAY_CALLBACK_ORIGIN }}
+          OCTG_RELAY_GATEWAY_B_BASE_URL: ${{ vars.OCTG_RELAY_GATEWAY_B_BASE_URL }}
+          OCTG_RELAY_MAX_REQUEST_DURATION_MS: ${{ vars.OCTG_RELAY_MAX_REQUEST_DURATION_MS }}
+          OCTG_RELAY_LEASE_TTL_MS: ${{ vars.OCTG_RELAY_LEASE_TTL_MS }}
+          OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS: ${{ vars.OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS }}
         run: |
           set -euo pipefail
           if [[ -z "$DENO_DEPLOY_TOKEN" || -z "$DENO_DEPLOY_ORG" || -z "$DENO_DEPLOY_APP" || -z "$PRODUCTION_DENO_TOKENIZER_AUTH_TOKEN" || -z "$MAX_INPUT_BYTES" ]]; then
@@ -166,9 +176,45 @@ jobs:
           if (!maxInputBytes || maxInputBytes.trim() !== "1048576") {
             throw new Error("MAX_INPUT_BYTES must be exactly 1048576");
           }
+          const lines = [
+            `OCTG_TOKENIZER_AUTH_TOKEN=${token}`,
+            `MAX_INPUT_BYTES=${maxInputBytes}`,
+            `OCTG_EXPECTED_MAX_INPUT_BYTES=${maxInputBytes}`,
+          ];
+          if (process.env.OCTG_RELAY_ENABLED === "true") {
+            const requiredVars = [
+              "OCTG_RELAY_ENVIRONMENT",
+              "OCTG_RELAY_CALLBACK_ORIGIN",
+              "OCTG_RELAY_GATEWAY_B_BASE_URL",
+              "OCTG_RELAY_MAX_REQUEST_DURATION_MS",
+              "OCTG_RELAY_LEASE_TTL_MS",
+              "OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS",
+            ];
+            const requiredSecrets = [
+              "PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN",
+              "PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN",
+              "PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN",
+            ];
+            for (const name of requiredVars) {
+              if (!process.env[name]) throw new Error(`${name} must be configured when OCTG_RELAY_ENABLED is true`);
+            }
+            for (const name of requiredSecrets) {
+              if (!process.env[name]) throw new Error(`${name} must be configured when OCTG_RELAY_ENABLED is true`);
+            }
+            lines.push("OCTG_RELAY_ENABLED=true");
+            lines.push(`OCTG_RELAY_ENVIRONMENT=${process.env.OCTG_RELAY_ENVIRONMENT}`);
+            lines.push(`OCTG_RELAY_CALLBACK_ORIGIN=${process.env.OCTG_RELAY_CALLBACK_ORIGIN}`);
+            lines.push(`OCTG_RELAY_SERVICE_AUTH_TOKEN=${process.env.PRODUCTION_OCTG_RELAY_SERVICE_AUTH_TOKEN}`);
+            lines.push(`OCTG_RELAY_INGRESS_AUTH_TOKEN=${process.env.PRODUCTION_OCTG_RELAY_INGRESS_AUTH_TOKEN}`);
+            lines.push(`OCTG_RELAY_GATEWAY_B_BASE_URL=${process.env.OCTG_RELAY_GATEWAY_B_BASE_URL}`);
+            lines.push(`OCTG_RELAY_GATEWAY_B_TOKEN=${process.env.PRODUCTION_OCTG_RELAY_GATEWAY_B_TOKEN}`);
+            lines.push(`OCTG_RELAY_MAX_REQUEST_DURATION_MS=${process.env.OCTG_RELAY_MAX_REQUEST_DURATION_MS}`);
+            lines.push(`OCTG_RELAY_LEASE_TTL_MS=${process.env.OCTG_RELAY_LEASE_TTL_MS}`);
+            lines.push(`OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS=${process.env.OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS}`);
+          }
           fs.writeFileSync(
             process.argv[2],
-            `OCTG_TOKENIZER_AUTH_TOKEN=${token}\nMAX_INPUT_BYTES=${maxInputBytes}\nOCTG_EXPECTED_MAX_INPUT_BYTES=${maxInputBytes}\n`,
+            `${lines.join("\n")}\n`,
             { mode: 0o600 },
           );
           NODE
@@ -185,7 +231,6 @@ jobs:
             echo "::error::Deno Deploy runtime Secret update failed; raw CLI output was suppressed"
           fi
           exit "$status"
-
       - name: Deploy
         id: deploy
         working-directory: ${{ github.workspace }}/.deno-deploy-source

@@ -716,3 +716,186 @@ resource stage outcomes, CPU/wall-time buckets, and safe `octg.canary.result`
 records. Prompt text, response bodies, markers, client keys, bearer tokens, and
 secrets MUST NOT be retained.
 The specification must be reviewed whenever those tests or externally visible contracts change.
+
+## 19. Responses Relay (v1)
+
+This section is the single internal wire and state contract for the optional free-worker Responses relay through Deno. Names, limits, semantics, and ownership are normative: no extra HTTP headers, envelope fields, route, or status remapping may be invented. The shared v1 types, stable error union, and strict parsers live in `packages/shared/src/relay.ts`; runtime behavior is implemented behind this contract and never changes legacy Chat Completions or legacy Responses behavior.
+
+### 19.1 Runtime configuration and environment isolation
+
+The Deno relay requires all of these exact environment keys; values are scoped to one environment and are never shared between Preview and Production:
+
+| Key | Meaning |
+| --- | --- |
+| `OCTG_RELAY_ENVIRONMENT` | Exactly `preview` or `production`; must match the Worker binding. |
+| `OCTG_RELAY_CALLBACK_ORIGIN` | HTTPS origin only, no path other than `/`, query, fragment, or userinfo; fixed Worker origin for the same environment. |
+| `OCTG_RELAY_SERVICE_AUTH_TOKEN` | Deno-to-Worker callback bearer secret. |
+| `OCTG_RELAY_INGRESS_AUTH_TOKEN` | Worker-to-Deno ingress bearer secret. |
+| `OCTG_RELAY_GATEWAY_B_BASE_URL` | Fixed HTTPS Gateway B `/openai` base URL; not client-selectable. |
+| `OCTG_RELAY_GATEWAY_B_TOKEN` | Gateway B Run token. |
+| `MAX_INPUT_BYTES` | Exactly `1048576` for this release. |
+| `OCTG_RELAY_MAX_REQUEST_DURATION_MS` | Exactly `3600000` (one hour). |
+| `OCTG_RELAY_LEASE_TTL_MS` | Exactly `120000`. |
+| `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` | Exactly `30000`; four renewals per lease TTL. |
+
+The Cloudflare Worker deployment alone stores `OCTG_RELAY_CONTEXT_HMAC_KEY`, an environment-unique base64url-no-padding encoding of exactly 32 random bytes. The ingress Worker uses it to sign context; RelayDecisionController uses the same environment key to verify context and sign grant credentials. It is never configured in Deno.
+
+Worker relay configuration is enabled only when all `OCTG_RELAY_*` Worker bindings are present and valid: `OCTG_RELAY_ENVIRONMENT`, `OCTG_RELAY_INGRESS_ENDPOINT`, `OCTG_RELAY_INGRESS_AUTH_TOKEN`, `OCTG_RELAY_SERVICE_AUTH_TOKEN`, and `OCTG_RELAY_CONTEXT_HMAC_KEY`. The `RELAY_DECISION_CONTROLLER` and `QUOTA_CONTROLLER` Durable Object bindings must resolve to the same environment; the relay environment must not be inferred from callback input. The endpoint must be HTTPS and environment-pinned. Deno starts the relay endpoint only when all keys in the table are present and valid. A partial or invalid configuration is a startup/configuration failure (`500 internal_error`); it MUST NOT silently disable authentication, mix environments, or fall back to the legacy route.
+
+The Decision DO also uses the same environment's D1 binding only for the existing read-only registry and policy lookups. D1 remains audit-only for quota mutation: the admission transaction and all quota/grant state writes are in QuotaController. `MAX_IN_FLIGHT_REQUESTS` and `IN_FLIGHT_LEASE_TTL_MS` are server-side Worker configuration consumed by QuotaController; they are never callback inputs.
+
+`OCTG_RELAY_ENABLED` is exactly `true` to enable and `false` to disable; absent means disabled, and any other value is invalid. When true, missing or partial relay config fails closed; it never silently switches to the legacy route. Existing legacy `/prepare` configuration is independent.
+
+### 19.2 Methods, headers, content and bounds
+
+All relay ingress and callback routes accept **POST only** and require `Content-Type: application/json` (case-insensitive media type, optional `charset=utf-8` only). Other methods return `405` with `Allow: POST`; any other content type returns `400 invalid_request`.
+
+| Direction / purpose | Exact route or header | Limit / rule |
+| --- | --- | --- |
+| Worker → Deno ingress | `POST /relay/v1/responses`; `Authorization: Bearer <OCTG_RELAY_INGRESS_AUTH_TOKEN>`; `X-OCTG-Relay-Context: <compact-context-token>`; optional `Idempotency-Key: <original value>` | Raw request body at most 1,048,576 bytes; context header at most 4,096 ASCII bytes; Idempotency-Key at most 255 UTF-8 bytes; content type is inherited as `application/json`. No other client headers are forwarded. |
+| Deno → Worker callbacks | `POST /internal/relay/v1/{decision,activation,renewal,terminal}`; `Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>` | JSON request and response body at most 8,192 bytes; context or grant credential header at most 4,096 ASCII bytes. |
+| Worker decision callback → RelayDecisionController | Internal DO RPC `decide(input)`; never exposed as a public HTTP route | Worker reads at most 8,192 callback-body bytes and passes them unchanged; context header at most 4,096 ASCII bytes; optional exact Idempotency-Key at most 255 UTF-8 bytes. The unverified request-ID hint only selects a shard; the DO verifies it. |
+| Deno → Worker callback identity | `X-OCTG-Relay-Context` on decision; `X-OCTG-Relay-Grant` on activation, renewal, terminal | Never put either credential in the JSON body, logs, or public response. |
+| Deno → Worker decision callback | Optional `Idempotency-Key: <exact original value>` on decision only | At most 255 UTF-8 bytes; absent when no effective public key was supplied. Never attach this header to activation, renewal or terminal callbacks. |
+| Deno → Worker ingress response | `X-OCTG-Relay-Response-Meta` | Base64url without padding of UTF-8 JSON; decoded JSON at most 2,048 bytes; header at most 2,800 ASCII bytes. |
+
+Both service tokens are 32–256 printable ASCII bytes without whitespace; each complete `Authorization` header is at most 263 ASCII bytes. HMAC keys are exactly 32 random bytes. All non-body headers in the table are ASCII and are subject to the listed per-header byte limit. Relay error-envelope bodies are at most 8,192 bytes.
+
+The signed `RelayContextV1` claims are exactly `version`, `audience`, `environment`, `route`, `requestId`, `clientId`, `idempotencyKeyHash`, `nonce`, `issuedAtMs`, and `expiresAtMs`. Values: `version=1`, `audience="octg-deno-relay"`, `route="responses"`, environment `preview|production`. The ingress context intentionally excludes model, pool, and quota day: the ingress Worker cannot learn those without parsing/buffering the streamed input. Following the Deno metadata callback, RelayDecisionController resolves the authoritative model, pool, and admission UTC day; QuotaController binds them into the durable grant and RelayDecisionController signs the grant credential.
+
+`idempotencyKeyHash` is `null` when absent, otherwise lowercase hex SHA-256(clientId || NUL || exact UTF-8 Idempotency-Key); raw keys and client credentials are never carried in the signed context. Ingress context lifetime is at most 60 seconds. Issuance must precede body forwarding.
+
+Deno transports the effective Idempotency-Key value unchanged and MUST NOT use signed context claims as authority before the decision callback. It sends the opaque context and exact key (or its absence) to the decision callback. The decision callback wire contract is `Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>`, `X-OCTG-Relay-Context: <opaque signed context>`, and optional `Idempotency-Key: <exact original value>`; the JSON body remains exactly `{version:1,metadata:...}`. The key header is accepted only on decision, is limited to 255 UTF-8 bytes, and is absent when there is no effective key. Existing `parseIdempotencyKey` semantics define absent as a missing, null, or empty value; an empty public header therefore has no effective key, yields a null signed hash, and is omitted on internal and upstream requests. Every non-empty valid key is forwarded byte-for-byte as its original string value.
+
+Before any reservation, lease acquisition or grant creation, the stateless Worker callback authenticates Deno and enforces the method/path, content type, and bounded header/body limits. It passes the bounded body bytes, opaque context, and exact optional Idempotency-Key to RelayDecisionController via internal RPC; it does not parse decision JSON or perform HMAC, policy, budget, or quota work.
+
+RelayDecisionController verifies the signed context and obtains the verified `clientId` and `idempotencyKeyHash`. It parses the callback key using the same 255-byte public rule, computes `null` when absent or lowercase hex SHA-256 over UTF-8(`clientId`) || NUL || UTF-8(exact raw key) when present, and compares that result with the signed hash. A malformed key, hash mismatch, or disagreement between key presence and signed hash is rejected fail-closed before any QuotaController call: no reservation, lease or grant is created. Only after successful verification does RelayDecisionController call the single `QuotaController.admitRelay` RPC with the exact raw key, verified client ID, verified context claims and server-derived budget. Before that RPC it may read the same QuotaController's current quota view solely to compute the budget; the final admission decision and all durable writes remain inside the atomic `admitRelay` transaction. QuotaController preserves its existing raw-key plus clientId mapping; it MUST NOT receive the hash as an idempotency key or create a relay-specific namespace. Duplicate keys retain the existing `duplicate_idempotency_key` result across legacy and relay routes.
+
+After allow, Deno may decode that same DecisionController-verified context as non-authoritative metadata, but performs no idempotency authorization check and does not issue a terminal release for key binding. It sends the identical effective raw key to Gateway B unchanged; when absent, it adds no upstream Idempotency-Key. The JSON decision body is unchanged.
+
+All identifiers are non-empty ASCII strings: requestId is the existing OCTG request identifier generated as `req_${ulid()}` (30 ASCII bytes, matching `req_[0-9A-HJKMNP-TV-Z]{26}`); it is not a UUID and relay does not introduce a separate request identity. grantId is a UUID (36 bytes), nonce is 43-character base64url encoding of 32 random bytes, and leaseGeneration is a UUID (36 bytes). clientId is 1–128 UTF-8 bytes; model is 1–256 UTF-8 bytes; idempotencyKeyHash is null or exactly 64 lowercase hexadecimal characters. Times are safe integer Unix epoch milliseconds, `issuedAtMs <= nowMs`, and expiry is strictly greater than now when verified. Context expiry MUST be no more than 60,000 ms after issue.
+
+Both signed context and grant credentials use the same compact representation: `base64url-no-padding(UTF8(RFC8785(claims))) + "." + base64url-no-padding(HMAC-SHA-256(key, purpose || 0x00 || canonicalPayload))`. Context purpose is ASCII `octg-relay-context-v1`; grant purpose is `octg-relay-grant-v1`. Tokens contain exactly two segments; reject padding, non-canonical JSON, duplicate keys, unknown claims, non-canonical base64url, oversize tokens, and additional segments. Cloudflare-side credential interfaces are exactly:
+
+```ts
+signRelayContext(context: RelayContextV1, key: Uint8Array): Promise<string>
+verifyRelayContext(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number): Promise<RelayContextV1 | undefined>
+signRelayGrantCredential(claims: RelayGrantCredentialV1, key: Uint8Array): Promise<string>
+verifyRelayGrantCredential(token: string, key: Uint8Array, expectedEnvironment: RelayEnvironment, nowMs: number): Promise<RelayGrantCredentialV1 | undefined>
+```
+
+The ingress Worker signs context; RelayDecisionController verifies context and signs grants; activation, renewal and terminal callbacks verify grants. Deno has no signing or verification-key capability. `RelayEnvironment` is exactly `"preview" | "production"`.
+
+`RelayGrantCredentialV1` uses the compact token representation above, with grant purpose, and UTF-8 canonical JSON (RFC 8785) containing exactly these claims: `version:1`, `audience:"octg-worker-relay"`, `environment`, `route:"responses"`, `requestId`, `grantId`, `nonce`, `clientId`, `idempotencyKeyHash`, `model`, `pool`, `admissionUtcDay`, `leaseGeneration`, `issuedAtMs`, `expiresAtMs`. No `kid` or algorithm negotiation is accepted. The model is selected by RelayDecisionController from the authoritative registry; pool and admission UTC day are derived from that classification and the Decision DO's trusted clock. They are never copied from Deno metadata or ingress claims. Keys are environment-unique, exactly 32 random bytes, and compared using constant-time verification.
+
+The grant credential is signed only after durable authorization. It expires at `issuedAtMs + 3,900,000` (one-hour maximum request duration plus five-minute callback grace); authorization expires at `issuedAtMs + 3,600,000`. No decision envelope controls either TTL. Every callback verifies all immutable claims against the stored grant, request entry, and environment.
+
+### 19.3 Callback and response envelopes
+
+All JSON objects reject unknown fields, missing required fields, duplicate JSON keys, invalid ranges, and invalid UTF-8. Raw request bodies are decoded by `parseRelayJsonBody(bytes: Uint8Array, maxBytes: number): unknown` using fatal UTF-8 decoding and a parser that detects duplicate object keys before the envelope-specific `parseRelay*` validator runs; malformed input throws only `RelayProtocolError("invalid_request")`, never a raw parser detail. No callback may supply a DO name, DO object ID, URL, environment override, quota pool override, client credential, or upstream credential.
+
+- Decision request: `{version:1, metadata:RelayRequestMetaV1}` where metadata has exactly `model:string`, `estimatedInputTokens:safe non-negative integer`, `maxOutputTokens:safe non-negative integer`, `inputBytes:integer 0..1048576`, `rawBodyBytes:integer 0..1048576`, `isToolUse:boolean`, and `stream:boolean`. Request header carries `X-OCTG-Relay-Context`.
+- Decision response: reject is `{version:1,kind:"reject",code:RelayErrorCode,status:integer}`. Allow is `{version:1,kind:"allow",grantId:string,leaseGeneration:string,maxOutputTokens:safe non-negative integer,cacheEnabled:boolean,quota:RelayQuotaSnapshotV1}`. Quota snapshot has exactly `pool:"STANDARD"|"MINI",limit,used,remaining` as safe non-negative integers and `resetAt:string` RFC3339 UTC. The grant credential is returned only in `X-OCTG-Relay-Grant` response header, never in the envelope. A reject status MUST equal the single status assigned to that code by the public mapping below; mismatched code/status pairs are invalid internal responses and map to public `500 internal_error`.
+- Activation request/response: request `{version:1,grantId:string,leaseGeneration:string}`; response `{version:1,activated:boolean,code:ActivationDenialCode|null}`. `activated:true` requires `code:null`; `activated:false` requires one of the listed denial codes. Any other shape or code is malformed and is treated as `unknown` by Deno. The Deno-local activation result is exactly `| {kind:"activated"} | {kind:"denied",code:ActivationDenialCode} | {kind:"unknown"}` where `ActivationDenialCode = "environment_mismatch" | "grant_not_found" | "grant_expired" | "grant_replayed" | "grant_terminalized" | "lease_lost"`. Worker returns a denial code only when its activation operation definitively did not transition the grant to `attempted`; a transport failure, malformed response, or lost acknowledgement is `unknown`. The denial action mapping is exact: `environment_mismatch` -> no terminal callback (wrong environment); `grant_not_found` -> no quota/grant action (no matching grant exists); `grant_expired` -> no terminal callback (the expired authorized grant is released atomically by the DO); `lease_lost` -> terminal `release` (Worker proved activation did not occur and the grant is still authorized); `grant_replayed` -> terminal `uncertain` best effort (activation may already have occurred; never release); `grant_terminalized` -> no action (the grant is already terminal). `unknown` -> terminal `uncertain` best effort. None of these paths calls Gateway B. Only `activated` permits the single upstream request.
+- Renewal request/response: request `{version:1,grantId:string,leaseGeneration:string}`; response `{version:1,renewed:boolean,code:RelayErrorCode|null}`. Each successful renewal extends the lease by exactly `OCTG_RELAY_LEASE_TTL_MS`; Deno renews every exactly `OCTG_RELAY_LEASE_RENEWAL_INTERVAL_MS` while upstream is active.
+- Terminal request: `{version:1,grantId:string,leaseGeneration:string,outcome:"settle"|"uncertain"|"release",totalTokens:safe non-negative integer|null}`. `settle` requires integer totalTokens; other outcomes require null. Response is `{version:1,accepted:boolean,state:RelayGrantState,code:RelayErrorCode|null}`. `release` is legal only before activation; post-activation termination is `uncertain`, never release.
+- `RelayResponseMetaV1` is exactly `{version:1,requestId:string,pool:"STANDARD"|"MINI",limit:safe integer,used:safe integer,remaining:safe integer,resetAt:string,route:"responses"}`. It MUST NOT contain grant credentials, service secrets, signed context, nonce, client key, request body, prompt, or upstream credential. `route: "responses"` is an internal protocol endpoint discriminator used only to validate the metadata; it is not the public `X-OCTG-Route` value. On a successful complimentary relay response, Worker constructs public headers with the existing route `free_shared`, equivalent to `buildOctgHeaders({ requestId, quota, route: "free_shared" })`. Never copy internal `"responses"` into `X-OCTG-Route`.
+
+Deno ingress rejection/failure responses use HTTP status mapped from the `RelayErrorCode` table below, `Content-Type: application/json`, and the exact `RelayInternalErrorV1` body; successful upstream responses preserve upstream status/body/allowed headers and carry `X-OCTG-Relay-Response-Meta`. A decision callback with a policy/quota rejection is still HTTP 200 with `RelayDecisionV1.kind="reject"`; Deno translates that result to the specified public OCTG status/code envelope, never 503. Callback transport status is 200 for valid callback envelopes (including business rejection), 400 for malformed envelope/context, 401 for invalid internal service auth, 405 for a non-POST method, 409 for replay or terminal conflict, 413 for body-size violation, and 500 for internal failure. Deno treats any non-200 callback transport response as internal relay failure; Worker translates internal auth/transport failures to public `500 internal_error`.
+
+### 19.4 RelayDecisionController authority and routing
+
+RelayDecisionController uses a fixed 64-shard map for v1. The stateless callback derives a routing hint only from the compact context payload's existing `requestId`, after enforcing token/header bounds and the existing request-ID syntax. It does not validate the HMAC or use the hint for authorization. The shard function starts with unsigned offset basis `2166136261`; for each ASCII `requestId` byte it computes `hash = Math.imul(hash ^ byte, 16777619) >>> 0`. The shard index is `hash & 63`, zero-padded to two decimal digits. The exact DO name is `relay-decision:v1:{environment}:{shard:00..63}`. The environment is selected from static deployment configuration and names a separate Preview or Production namespace; no Production namespace ID is used by Preview.
+
+The Worker exports class `RelayDecisionController`. Its Production SQLite namespace is introduced in `apps/gateway-worker/wrangler.jsonc` migration tag `v3` with `new_sqlite_classes: ["RelayDecisionController"]`. Preview configuration binds `RELAY_DECISION_CONTROLLER`, `QUOTA_CONTROLLER` and `TOKENIZER_CONTROLLER` to Preview-local class namespaces without explicit Production `namespace_id` values, alongside Preview D1 and Deno resources. A Preview config that can resolve any of these bindings/resources to Production must fail validation before deployment.
+
+```ts
+interface RelayDecisionDispatchInput {
+  readonly decisionBody: Uint8Array; // <= 8,192 bytes; exact bytes from Deno
+  readonly contextToken: string; // opaque X-OCTG-Relay-Context value
+  readonly rawIdempotencyKey?: string; // exact callback header value
+}
+
+type RelayDecisionDispatchResult =
+  | {
+      readonly kind: "allow";
+      readonly decision: Extract<RelayDecisionV1, { readonly kind: "allow" }>;
+      readonly grantCredential: string;
+    }
+  | {
+      readonly kind: "reject";
+      readonly decision: Extract<RelayDecisionV1, { readonly kind: "reject" }>;
+    }
+  | { readonly kind: "protocol_error"; readonly code: "invalid_request" | "invalid_context" | "environment_mismatch" }
+  | { readonly kind: "internal_error"; readonly code: "internal_error" };
+
+interface RelayDecisionControllerOperations {
+  decide(input: RelayDecisionDispatchInput): Promise<RelayDecisionDispatchResult>;
+}
+```
+
+`RelayDecisionDispatchInput` and `RelayDecisionDispatchResult` are exported Cloudflare-internal shared types so the stateless callback and DO compile against the same RPC contract. They do not change the Deno/Worker HTTP wire format.
+
+`kind:"allow"` and `kind:"reject"` are valid decisions serialized by the stateless callback with HTTP 200; the grant header is emitted only for allow. Malformed decision bodies, invalid signatures/claims and raw-key/hash binding mismatches return `protocol_error` (`invalid_request`, `invalid_context`, or `environment_mismatch`) and map to the existing HTTP 400 internal callback failure. Quota/model/policy denials use the exact v1 reject envelope. A lost or ambiguous QuotaController RPC result maps to `internal_error`/HTTP 500, never an allow. Deno therefore cannot activate or call Gateway B after any protocol or internal error.
+
+RelayDecisionController obtains environment from its own bound configuration, verifies the complete context HMAC and claims, recomputes the shard name from the verified request ID, and rejects a shard mismatch before policy reads or quota operations. It then strictly parses the decision envelope, validates raw key length and binding against the signed `idempotencyKeyHash`, performs authoritative registry/policy reads and model/tool classification, calculates the token budget, and derives the admission UTC day. No field from an unverified hint, request body, or Deno-selected URL can choose a pool, quota DO, environment or policy result.
+
+### 19.5 QuotaController.admitRelay boundary
+
+QuotaController exposes one relay admission RPC:
+
+```ts
+interface QuotaControllerEnv {
+  readonly QUOTA_LIMIT_STANDARD?: string;
+  readonly QUOTA_LIMIT_MINI?: string;
+  readonly MAX_IN_FLIGHT_REQUESTS?: string;
+  readonly OCTG_RELAY_ENVIRONMENT?: string; // required by admitRelay; preview|production only
+}
+
+interface RelayAdmissionInput {
+  readonly context: RelayContextV1; // verified by RelayDecisionController
+  readonly metadata: RelayRequestMetaV1; // strictly parsed by RelayDecisionController
+  readonly rawIdempotencyKey?: string; // exact value; absent when effectively absent
+  readonly reservedTokens: number;
+  readonly upperBoundTokens: number;
+  readonly maxOutputTokens: number;
+  readonly cacheEnabled: boolean;
+}
+
+type RelayAdmissionResult =
+  | { readonly kind: "admitted"; readonly grant: RelayGrant; readonly quota: RelayQuotaSnapshotV1 }
+  | { readonly kind: "denied"; readonly code: RelayErrorCode };
+
+interface QuotaControllerRelayOperations {
+  admitRelay(input: RelayAdmissionInput): Promise<RelayAdmissionResult>;
+}
+```
+
+`admitRelay` derives pool/day from that QuotaController's immutable `quota:{POOL}:{YYYY-MM-DD}` identity and validates the context environment against its environment binding. Its single `ctx.storage.transaction()` checks the existing raw-key/client idempotency mapping, finalized state, quota and in-flight capacity before writing. On admission it commits the RequestEntry, pool and unresolved counters, existing idempotency mapping, generation-bound lease, and initial `authorized` RelayGrant together. On quota, concurrency or duplicate-key rejection it writes no reservation, counter, idempotency mapping or grant; pruning expired leases may commit in the same transaction. An exact request replay returns the stored admission result only when request identity, metadata, key binding, and grant state match; a conflicting replay rejects. Different request IDs may reach different Decision shards, but all decisions for the same authoritative pool/day serialize in the same QuotaController; its existing raw-key/client mapping prevents cross-shard duplicate admission. The RPC accepts no pool, day, namespace, DO ID, expiry, environment override, or client-selected concurrency limit. It resolves `MAX_IN_FLIGHT_REQUESTS` from its bound Worker environment using the existing positive-integer/default-2 semantics and uses the fixed `DEFAULT_IN_FLIGHT_LEASE_TTL_MS` value of 120,000 ms. The bound environment also supplies the fixed `OCTG_RELAY_ENVIRONMENT`, which must be `preview` or `production` and match the verified context. These settings are not RPC inputs. QuotaController creates grant IDs, lease generations and timestamps inside the transaction. The Decision DO signs the grant claims returned by this RPC. QuotaController remains the sole quota and durable grant authority; the Decision DO persists no quota or grant ledger.
+
+QuotaController's existing `reserve`, `acquireInFlight`, and `authorizeRelay`-style split calls are not composed by the new decision path. Legacy routes retain their existing APIs. Relay admission uses only the atomic `admitRelay` RPC, with transaction-scoped helpers that do not open nested transactions. If an RPC acknowledgement is lost, an exact retry reaches the same Decision shard and calls `admitRelay` with the same request ID, context, metadata, and raw key; QuotaController returns the saved admission rather than reserving or authorizing twice. After activation, an exact decision replay cannot produce a second upstream attempt. Deno never retries an upstream request after activation; a transport failure before activation fails closed.
+
+The QuotaController DO grant record stores the immutable credential claim bindings, `authorizationExpiresAtMs` (issuedAt + 3,600,000), state, terminal report/fingerprint, and retention deadline. The credential's `expiresAtMs` remains issuedAt + 3,900,000. The state union is `authorized|attempted|settled|released|uncertain|reconciled_consumed|reconciled_unused`. Only `authorized -> attempted` permits upstream fetch. Activation atomically checks reservation exists and is unresolved, grant is authorized and unexpired, all immutable bindings match, and the in-flight lease exists and has the exact generation. `attempted` cannot activate again. A credential cannot mutate quota after reconciliation or terminalization.
+
+Terminal transitions are exact: `authorized -> released` only for a proven pre-activation failure; `authorized -> uncertain` for an unconfirmed activation result (retain reservation, remove lease); `attempted -> settled|uncertain`; `uncertain -> settled|uncertain` (a trustworthy late usage report may settle an uncertain quota entry); no state permits release after activation may have occurred. An exact terminal report replay returns the saved result, while a conflicting report fails `grant_terminalized`. Renewal is accepted only in `attempted` before authorization expiry. If an attempted grant is observed expired during renewal or terminal processing, atomically transition it to `uncertain` and release only the concurrency lease; keep its reservation. A credential-valid trustworthy terminal report may then settle that uncertain entry during the five-minute credential grace. After credential expiry, all callbacks are rejected.
+
+### 19.6 Stable failures and public mapping
+
+`RelayErrorCode` is exactly: `invalid_request | invalid_context | unauthorized_service | environment_mismatch | client_disabled | model_requires_paid | model_not_allowed | request_too_large | insufficient_quota | worker_concurrency_exceeded | duplicate_idempotency_key | grant_not_found | grant_expired | grant_replayed | grant_terminalized | lease_lost | upstream_error | upstream_timeout | upstream_invalid_response | internal_error`.
+
+Internal error envelope is exactly `{version:1,error:{code:RelayErrorCode}}`; it contains no free-form message or sensitive detail. Mapping at the Worker public `/v1/responses` boundary preserves existing OCTG status/code pairs:
+
+| HTTP | Code | Meaning |
+| ---: | --- | --- |
+| 400 | `invalid_request` | validation rejection |
+| 401 | `invalid_api_key` | external client authentication performed before relay |
+| 403 | `client_disabled` | disabled client |
+| 403 | `model_requires_paid` | no enabled complimentary route |
+| 403 | `model_not_allowed` | model/policy rejection |
+| 409 | `duplicate_idempotency_key` | key already associated with another request |
+| 413 | `request_too_large` | request size rejection |
+| 429 | `insufficient_quota` | complimentary reservation cannot fit |
+| 429 | `worker_concurrency_exceeded` | in-flight pool limit reached |
+| 500 | `internal_error` | all internal auth, configuration, callback, lease-lost, malformed relay, upstream transport, and unknown-reserve failures, unless public headers have already been sent |
+
+Upstream non-2xx status/body remains the existing public upstream response contract, not an internal relay error. Deno never maps policy or quota decisions to 503. Internal callback failures use HTTP 500; Worker maps them to public `500 internal_error`. Once response headers are sent, terminate the stream on later failure; never replace it with a new error response.

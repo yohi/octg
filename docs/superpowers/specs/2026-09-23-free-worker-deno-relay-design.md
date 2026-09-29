@@ -192,7 +192,7 @@ Deno -> Worker /decision callback: bounded metadata + opaque context + exact Ide
 Worker /decision callback: bounded transport validation + deterministic Decision DO dispatch
 Worker -> RelayDecisionController DO: bounded decision envelope and opaque signed context
 RelayDecisionController DO: verify context/binding, resolve policy/model/budget, choose pool/day
-RelayDecisionController DO -> QuotaController: one atomic admitRelay RPC
+RelayDecisionController DO -> QuotaController: read-only quota state for budget, then one atomic admitRelay RPC
 QuotaController: reserve + lease + authorized grant in one transaction
 RelayDecisionController DO -> Worker -> Deno: reject or allow + signed one-use grant
 Deno -> Gateway B: upstream request using Deno-held credential
@@ -568,7 +568,10 @@ hash mismatch, or disagreement between key presence and signed hash is rejected
 fail-closed before any QuotaController call: no reservation, lease or grant is
 created. Only after successful verification does RelayDecisionController call
 the single `QuotaController.admitRelay` RPC with the exact raw key, verified
-client ID, verified context claims and server-derived budget. QuotaController
+client ID, verified context claims and server-derived budget. Before that RPC it
+may read the same QuotaController's current quota view solely to compute the
+budget; the final admission decision and all durable writes remain inside the
+atomic `admitRelay` transaction. QuotaController
 preserves its existing raw-key plus clientId mapping; it MUST NOT receive the
 hash as an idempotency key or create a relay-specific namespace. Duplicate keys
 retain the existing `duplicate_idempotency_key` result across legacy and relay

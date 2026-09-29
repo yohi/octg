@@ -749,6 +749,77 @@ Treat these changes as production configuration changes:
 
 Mutating Admin calls from browsers must be same-origin. CLI calls without an `Origin` header are allowed after Access authentication.
 
+## Responses Relay Rollout and Rollback
+
+The relay moves decision orchestration to a `RelayDecisionController` Durable
+Object and upstream forwarding/usage extraction to Deno while QuotaController
+stays the only quota authority. [SPEC.md section 19](../SPEC.md) is the
+normative contract; this section covers rollout operations only.
+
+### Deployment order
+
+Deploy Deno first for each immutable revision, then roll the Worker with the
+Durable Object migration. The checked-in workflow chain encodes this: the Deno
+Deploy workflow deploys and probes the Deno revision, then calls
+`deploy-production.yml`, which re-checks out the same revision and gates remote
+mutations on the current `master` SHA matching the Deno workflow's SHA. The
+Worker rollout applies the `v3` SQLite migration for
+`RelayDecisionController`; its validation step refuses to mutate anything when
+the migration or the `RELAY_DECISION_CONTROLLER` binding is missing.
+
+Enable the relay with `OCTG_RELAY_ENABLED=true` only per environment. Start in
+Preview. A Production subset is a canary-gated manual action, never an
+automated workflow variable.
+
+### CPU evidence classes
+
+Record CPU as separate series and never pool them together:
+
+- each stateless Worker class (ingress buckets and the decision, activation,
+  renewal, and terminal callbacks): 10 ms Free limit, p99 at most 8 ms, max
+  below 10 ms;
+- `RelayDecisionController.decide` and every QuotaController RPC class
+  (`admitRelay`, activation, renewal, terminal): the documented 30,000 ms DO
+  default, p99 at most 24,000 ms, max below 30,000 ms;
+- record `exceededCpu`, sample counts, and tail margins per class; a DO pass
+  never excuses a stateless Worker failure.
+
+A rollout gate requires zero CPU failures in every required Worker and DO
+series, correct quota behavior for injected failures, and Gateway B matches,
+reservation/settlement/uncertainty counts, and Deno capacity recorded without
+payloads or credentials.
+
+### Fault windows the rollout must exercise
+
+At every matrix boundary assert the quota invariant: one grant causes at most
+one upstream attempt, one `QuotaController.admitRelay` transaction never
+leaves a partial reservation/lease/grant, and neither quota nor audit state
+depends on D1 writes. The required windows include Worker termination after
+atomic admission
+(identical retry returns the stored grant), lost `admitRelay` acknowledgement,
+duplicate shard dispatch, stale lease generation, Deno termination after
+activation (uncertain, never release), terminal conflicts, Preview credentials
+at Production callbacks, UTC-midnight late callbacks, reconciliation before and
+after terminalization, expired authorized/attempted grants, and terminal-record
+retention at day finalization.
+
+### Relay rollback
+
+Roll back the Worker to the legacy `/prepare` route only when it is safe, and
+keep Deno's relay endpoint compatible during the rollback window. While any
+relay grant is unresolved:
+
+- retain the `/internal/relay/v1/*` Worker callbacks;
+- retain the `RELAY_DECISION_CONTROLLER` and `QUOTA_CONTROLLER` Durable Object
+  bindings;
+- do not remove the `v3` migration tag or the relay secrets.
+
+Reconcile or otherwise resolve outstanding grants first: next-day
+reconciliation terminalizes grants that never resolved, and only then may the
+callbacks, secrets, or migrations be removed. Never route unresolved requests
+to a different control plane. Quota decisions never depend on D1 writes, so a
+D1 rollback cannot strand a grant that the Durable Object still owns.
+
 ## Rollback
 
 Prefer a Worker version rollback that preserves D1 and Durable Object compatibility.
