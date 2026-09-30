@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RelayContextV1, RelayRequestMetaV1 } from "@octg/shared";
@@ -108,9 +110,9 @@ describe("QuotaController.admitRelay", () => {
     expect(result.grant.retentionDeadlineMs).toBeGreaterThan(result.grant.issuedAtMs);
     expect(result.quota).toEqual({
       pool: "STANDARD",
-      limit: 1_000_000,
+      limit: POOL_LIMITS.STANDARD,
       used: 300,
-      remaining: 999_700,
+      remaining: POOL_LIMITS.STANDARD - 300,
       resetAt: "2026-09-02T00:00:00Z",
     });
 

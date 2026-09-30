@@ -1,7 +1,7 @@
 import type { PoolName, PoolNameLower, PoolState } from "./types.ts";
 
 export const POOL_LIMITS = {
-  STANDARD: 1_000_000,
+  STANDARD: 950_000,
   MINI: 10_000_000
 } as const satisfies Record<PoolName, number>;
 

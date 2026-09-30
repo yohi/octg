@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
@@ -22,7 +24,7 @@ describe("harness smoke", () => {
     // Then: the identity and default standard limit are exposed.
     expect(state.pool).toBe("STANDARD");
     expect(state.utcDay).toBe("2026-08-09");
-    expect(state.limit).toBe(1_000_000);
+    expect(state.limit).toBe(POOL_LIMITS.STANDARD);
   });
 
   it("D1 migrations are applied (registry seeded)", async () => {

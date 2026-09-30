@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RelayTerminalV1 } from "@octg/shared";
@@ -54,8 +56,8 @@ async function admit(
 
 /** The DO environment mirrored from wrangler vars and the vitest binding. */
 const TEST_DO_ENV = {
-  QUOTA_LIMIT_STANDARD: "1000000",
-  QUOTA_LIMIT_MINI: "9950000",
+  QUOTA_LIMIT_STANDARD: POOL_LIMITS.STANDARD.toString(),
+  QUOTA_LIMIT_MINI: POOL_LIMITS.MINI.toString(),
   MAX_IN_FLIGHT_REQUESTS: "3",
   OCTG_RELAY_ENVIRONMENT: "preview",
 } as const;

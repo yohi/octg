@@ -58,7 +58,7 @@ checked-in `wrangler.jsonc` の current defaults:
 
 | Variable | Value | 用途 |
 | --- | ---: | --- |
-| `QUOTA_LIMIT_STANDARD` | `1000000` | STANDARD operational ceiling |
+| `QUOTA_LIMIT_STANDARD` | `950000` | STANDARD operational ceiling |
 | `QUOTA_LIMIT_MINI` | `9950000` | MINI operational ceiling |
 | `MAX_INPUT_BYTES` | `1048576` | accepted input limit |
 | `MAX_IN_FLIGHT_REQUESTS` | `3` | pool/day in-flight limit |

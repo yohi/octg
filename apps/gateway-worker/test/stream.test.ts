@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
 import type { QuotaController } from "@octg/quota-controller";
 import type { InFlightLease, QuotaSnapshot } from "@octg/shared";
@@ -33,9 +35,9 @@ const streamOptions = (lease: InFlightLease, renewalMs = 30_000) => ({
 
 const quotaSnapshot = {
   pool: "STANDARD",
-  limit: 1_000_000,
+  limit: POOL_LIMITS.STANDARD,
   used: 0,
-  remaining: 1_000_000,
+  remaining: POOL_LIMITS.STANDARD,
   resetAt: "2026-10-08T00:00:00Z",
 } satisfies QuotaSnapshot;
 

@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -474,19 +476,19 @@ describe("RelayDecisionController.decide", () => {
     const fakeStub = {
       getState: async () => ({
         utcDay: utcDayOf(new Date()),
-        limit: 1_000_000,
+        limit: POOL_LIMITS.STANDARD,
         confirmedTokens: 0,
         reservedTokens: 0,
         uncertainTokens: 0,
         requestCount: 0,
         updatedAt: new Date().toISOString(),
         pool: "STANDARD" as const,
-        remaining: 1_000_000,
+        remaining: POOL_LIMITS.STANDARD,
       }),
       admitRelay: async () => ({
         kind: "admitted" as const,
         grant: poisonedGrant,
-        quota: { pool: "STANDARD", limit: 1_000_000, used: 300, remaining: 999_700, resetAt: "2026-09-28T00:00:00Z" },
+        quota: { pool: "STANDARD", limit: POOL_LIMITS.STANDARD, used: 300, remaining: POOL_LIMITS.STANDARD - 300, resetAt: "2026-09-28T00:00:00Z" },
       }),
       finishRelay: async (input: FinishRelayInput) => {
         finishCalls.push(input);
