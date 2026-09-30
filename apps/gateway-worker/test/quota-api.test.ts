@@ -29,9 +29,15 @@ describe("GET /quota", () => {
     await mini.reserve("m1", 5_000_000, 5_000_000);
     const response = await getQuota(TEST_CLIENT_KEY);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { pools: { standard: { confirmed: number; reserved: number; remaining: number; usage_percent: number }; mini: { remaining: number; usage_percent: number } } };
-    expect(body.pools.standard).toMatchObject({ confirmed: 200_000, reserved: 100_000, remaining: 700_000, usage_percent: 30 });
-    expect(body.pools.mini).toMatchObject({ remaining: 4_950_000, usage_percent: 50.25 });
+    const body = (await response.json()) as { pools: { standard: { confirmed: number; reserved: number; remaining: number; usage_percent: number }; mini: { limit: number; remaining: number; usage_percent: number } } };
+    const standardLimit = Number(env.QUOTA_LIMIT_STANDARD);
+    expect(body.pools.standard).toMatchObject({ confirmed: 200_000, reserved: 100_000, remaining: standardLimit - 300_000, usage_percent: 31.58 });
+    const miniLimit = Number(env.QUOTA_LIMIT_MINI);
+    expect(body.pools.mini).toMatchObject({
+      limit: miniLimit,
+      remaining: miniLimit - 5_000_000,
+      usage_percent: Math.round((5_000_000 / miniLimit) * 10_000) / 100,
+    });
     expect(JSON.stringify(body)).not.toContain("client");
   });
 });

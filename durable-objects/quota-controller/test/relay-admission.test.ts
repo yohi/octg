@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RelayContextV1, RelayRequestMetaV1 } from "@octg/shared";
 import type { QuotaController } from "../src/quota-controller";
@@ -108,9 +108,9 @@ describe("QuotaController.admitRelay", () => {
     expect(result.grant.retentionDeadlineMs).toBeGreaterThan(result.grant.issuedAtMs);
     expect(result.quota).toEqual({
       pool: "STANDARD",
-      limit: 1_000_000,
+      limit: Number(env.QUOTA_LIMIT_STANDARD),
       used: 300,
-      remaining: 999_700,
+      remaining: Number(env.QUOTA_LIMIT_STANDARD) - 300,
       resetAt: "2026-09-02T00:00:00Z",
     });
 

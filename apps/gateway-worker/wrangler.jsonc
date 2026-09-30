@@ -18,7 +18,7 @@
     "run_worker_first": ["/admin/*"]
   },
   "vars": {
-    "QUOTA_LIMIT_STANDARD": "1000000",
+    "QUOTA_LIMIT_STANDARD": "950000",
     "QUOTA_LIMIT_MINI": "9950000",
     "MAX_INPUT_BYTES": "1048576",
     "MAX_IN_FLIGHT_REQUESTS": "3",

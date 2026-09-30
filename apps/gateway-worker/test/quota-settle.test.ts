@@ -1,3 +1,5 @@
+import { POOL_LIMITS } from "@octg/shared";
+
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
@@ -46,10 +48,26 @@ describe("QuotaController.settle", () => {
   });
 
   it("accounts overage fail-closed and rejects later reservations", async () => {
-    // Given: a pool with a settled 900,000-token request.
     const controller = stub("2026-09-03");
-    await controller.reserve("seed", 900_000, 900_000);
-    await controller.settle("seed", 900_000);
+    await controller.reserve("seed", 800_000, 800_000);
+    await controller.settle("seed", 1_000_000);
+
+    // When: a later reservation is attempted against the over-limit pool.
+    const reqOver = await controller.reserve("req-over", 80_000, 80_000);
+    const state = await controller.getState();
+
+    // Then: the complete actual amount is accounted and the over-limit pool is closed.
+    expect(state.confirmedTokens).toBe(1_000_000);
+    expect(state.reservedTokens).toBe(0);
+    expect(state.remaining).toBeLessThan(0);
+    expect(reqOver.ok).toBe(false);
+  });
+
+  it("rejects a reservation after a reservation-settle overage", async () => {
+    // Given: a pool with one settled request and room for one more reservation.
+    const controller = stub("2026-09-05");
+    await controller.reserve("seed", 850_000, 850_000);
+    await controller.settle("seed", 850_000);
     await controller.reserve("req-over", 80_000, 80_000);
 
     // When: actual usage exceeds the second reservation.
@@ -58,7 +76,7 @@ describe("QuotaController.settle", () => {
     const afterOverage = await controller.reserve("req-after-over", 1, 1);
 
     // Then: the complete actual amount is accounted and the over-limit pool is closed.
-    expect(state.confirmedTokens).toBe(1_020_000);
+    expect(state.confirmedTokens).toBe(970_000);
     expect(state.reservedTokens).toBe(0);
     expect(state.remaining).toBeLessThan(0);
     expect(afterOverage.ok).toBe(false);
@@ -66,7 +84,7 @@ describe("QuotaController.settle", () => {
 
   it("settles uncertain usage without double-subtracting its reservation", async () => {
     // Given: a request moved to uncertain after its upstream result was unavailable.
-    const controller = stub("2026-09-04");
+    const controller = stub("2026-09-06");
     await controller.reserve("req-s4", 40_000, 40_000);
     await controller.markUncertain("req-s4");
 
@@ -82,7 +100,7 @@ describe("QuotaController.settle", () => {
 
   it("returns unknown_request without touching counters for an unknown settlement", async () => {
     // Given: an unused pool.
-    const controller = stub("2026-09-05");
+    const controller = stub("2026-09-07");
 
     // When: a settlement references no reservation.
     const result = await controller.settle("req-nope", 100);
@@ -117,7 +135,7 @@ describe("QuotaController.settle", () => {
 
   it("keeps the original reserve result after settlement", async () => {
     // Given: a reservation with an observable remaining balance.
-    const controller = stub("2026-09-06");
+    const controller = stub("2026-09-12");
     const reserved = await controller.reserve("req-reserve-result", 40_000, 40_000);
     await controller.settle("req-reserve-result", 25_000);
 
@@ -132,7 +150,7 @@ describe("QuotaController.settle", () => {
 describe("QuotaController.markUncertain", () => {
   it("keeps unknown outcomes reserved until an explicit later transition", async () => {
     // Given: a request whose upstream outcome cannot be determined.
-    const controller = stub("2026-09-07");
+    const controller = stub("2026-09-13");
     await controller.reserve("req-uncertain", 40_000, 40_000);
 
     // When: uncertainty is marked and the RPC is replayed.
@@ -149,7 +167,7 @@ describe("QuotaController.markUncertain", () => {
 
   it("does not move a settled request back to uncertain", async () => {
     // Given: a request with confirmed usage.
-    const controller = stub("2026-09-08");
+    const controller = stub("2026-09-14");
     await controller.reserve("req-settled", 40_000, 40_000);
     await controller.settle("req-settled", 25_000);
 

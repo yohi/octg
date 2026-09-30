@@ -352,7 +352,7 @@ The shared-code fallback limits are:
 - STANDARD: 1,000,000 tokens/day;
 - MINI: 10,000,000 tokens/day.
 
-Runtime environment configuration can set a different operational limit. The repository's checked-in Worker configuration currently uses 1,000,000 for STANDARD and 9,950,000 for MINI. Therefore program allowance and deployed operational ceiling MUST NOT be treated as the same concept.
+Runtime environment configuration can set a lower operational ceiling. The repository's checked-in Worker configuration currently uses 950,000 for STANDARD and 9,950,000 for MINI, retaining a 50,000-token safety margin below the shared-code STANDARD fallback and MINI allowance. Therefore program allowance and deployed operational ceiling MUST NOT be treated as the same concept.
 
 ### 10.2 Pool state
 
