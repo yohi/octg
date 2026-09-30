@@ -1,5 +1,3 @@
-import { POOL_LIMITS } from "@octg/shared";
-
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
@@ -7,6 +5,7 @@ const stub = (day: string) =>
   env.QUOTA_CONTROLLER.get(
     env.QUOTA_CONTROLLER.idFromName(`quota:STANDARD:${day}`),
   );
+const standardLimit = Number(env.QUOTA_LIMIT_STANDARD);
 
 interface UnvalidatedReconcileController {
   reconcileRequest(requestId: string, disposition: string): Promise<unknown>;
@@ -94,7 +93,7 @@ describe("QuotaController.release", () => {
     // Then: the reservation is released without confirmed usage.
     expect(result).toEqual({ ok: true });
     expect(state.reservedTokens).toBe(0);
-    expect(state.remaining).toBe(POOL_LIMITS.STANDARD);
+    expect(state.remaining).toBe(standardLimit);
   });
 
   it("does not alter settled usage when release arrives late", async () => {
@@ -140,7 +139,7 @@ describe("QuotaController.reconcileRequest", () => {
     expect(result).toEqual({ ok: true, applied: true });
     expect(state.reservedTokens).toBe(0);
     expect(state.uncertainTokens).toBe(0);
-    expect(state.remaining).toBe(POOL_LIMITS.STANDARD);
+    expect(state.remaining).toBe(standardLimit);
   });
 
   it("confirms a reserved request left after uncertainty marking failed", async () => {
@@ -189,7 +188,7 @@ describe("QuotaController.reconcileRequest", () => {
     expect(result).toEqual({ ok: true, applied: true });
     expect(state.uncertainTokens).toBe(0);
     expect(state.confirmedTokens).toBe(0);
-    expect(state.remaining).toBe(POOL_LIMITS.STANDARD);
+    expect(state.remaining).toBe(standardLimit);
   });
 
   it("returns no-op for an unknown request without recreating quota state", async () => {

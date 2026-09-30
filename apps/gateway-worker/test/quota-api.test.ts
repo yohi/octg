@@ -1,5 +1,3 @@
-import { POOL_LIMITS } from "@octg/shared";
-
 import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { usagePercentOf } from "../src/quota-api";
@@ -32,7 +30,8 @@ describe("GET /quota", () => {
     const response = await getQuota(TEST_CLIENT_KEY);
     expect(response.status).toBe(200);
     const body = (await response.json()) as { pools: { standard: { confirmed: number; reserved: number; remaining: number; usage_percent: number }; mini: { limit: number; remaining: number; usage_percent: number } } };
-    expect(body.pools.standard).toMatchObject({ confirmed: 200_000, reserved: 100_000, remaining: POOL_LIMITS.STANDARD - 300_000, usage_percent: 31.58 });
+    const standardLimit = Number(env.QUOTA_LIMIT_STANDARD);
+    expect(body.pools.standard).toMatchObject({ confirmed: 200_000, reserved: 100_000, remaining: standardLimit - 300_000, usage_percent: 31.58 });
     const miniLimit = Number(env.QUOTA_LIMIT_MINI);
     expect(body.pools.mini).toMatchObject({
       limit: miniLimit,

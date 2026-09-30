@@ -1,5 +1,3 @@
-import { POOL_LIMITS } from "@octg/shared";
-
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
@@ -7,15 +5,16 @@ const stub = (pool = "STANDARD", day = "2026-08-09") =>
   env.QUOTA_CONTROLLER.get(
     env.QUOTA_CONTROLLER.idFromName(`quota:${pool}:${day}`),
   );
+const standardLimit = Number(env.QUOTA_LIMIT_STANDARD);
 
 describe("QuotaController.reserve policy tiers", () => {
   it("rejects in STRICT when upperBoundTokens exceeds remaining", async () => {
     // Given: a STANDARD pool in STRICT with 47,500 tokens remaining.
     const controller = stub("STANDARD", "2026-08-20");
-    await controller.reserve("seed", POOL_LIMITS.STANDARD - Math.floor(POOL_LIMITS.STANDARD * 0.05), POOL_LIMITS.STANDARD - Math.floor(POOL_LIMITS.STANDARD * 0.05));
+    await controller.reserve("seed", standardLimit - Math.floor(standardLimit * 0.05), standardLimit - Math.floor(standardLimit * 0.05));
 
     // When: the immediate reservation fits but its upper bound does not.
-    const result = await controller.reserve("req-strict", 10_000, Math.floor(POOL_LIMITS.STANDARD * 0.05) + 10_000);
+    const result = await controller.reserve("req-strict", 10_000, Math.floor(standardLimit * 0.05) + 10_000);
 
     // Then: the conservative STRICT gate rejects the request.
     expect(result.ok).toBe(false);
@@ -24,10 +23,10 @@ describe("QuotaController.reserve policy tiers", () => {
   it("permits in STRICT when upperBoundTokens does not exceed remaining", async () => {
     // Given: a STANDARD pool in STRICT with 47,500 tokens remaining.
     const controller = stub("STANDARD", "2026-08-21");
-    await controller.reserve("seed", POOL_LIMITS.STANDARD - Math.floor(POOL_LIMITS.STANDARD * 0.05), POOL_LIMITS.STANDARD - Math.floor(POOL_LIMITS.STANDARD * 0.05));
+    await controller.reserve("seed", standardLimit - Math.floor(standardLimit * 0.05), standardLimit - Math.floor(standardLimit * 0.05));
 
     // When: the immediate reservation and its upper bound fit.
-    const result = await controller.reserve("req-strict-ok", 10_000, Math.floor(POOL_LIMITS.STANDARD * 0.05));
+    const result = await controller.reserve("req-strict-ok", 10_000, Math.floor(standardLimit * 0.05));
 
     // Then: the reservation succeeds.
     expect(result.ok).toBe(true);
@@ -36,7 +35,7 @@ describe("QuotaController.reserve policy tiers", () => {
   it("does not apply the STRICT upper-bound gate in CAUTION", async () => {
     // Given: a STANDARD pool in CAUTION with 150,000 tokens remaining.
     const controller = stub("STANDARD", "2026-08-22");
-    await controller.reserve("seed", POOL_LIMITS.STANDARD - 150_000, POOL_LIMITS.STANDARD - 150_000);
+    await controller.reserve("seed", standardLimit - 150_000, standardLimit - 150_000);
 
     // When: a reservation fits although its upper bound exceeds remaining.
     const result = await controller.reserve("req-caution", 10_000, 160_000);
@@ -50,7 +49,7 @@ describe("QuotaController.reserve concurrency", () => {
   it("permits only one 40,000-token reservation when 50,000 remains", async () => {
     // Given: a STANDARD pool with 50,000 tokens remaining.
     const controller = stub("STANDARD", "2026-08-23");
-    await controller.reserve("seed", POOL_LIMITS.STANDARD - 50_000, POOL_LIMITS.STANDARD - 50_000);
+    await controller.reserve("seed", standardLimit - 50_000, standardLimit - 50_000);
 
     // When: two concurrent 40,000-token reservations are submitted.
     const [first, second] = await Promise.all([
@@ -61,7 +60,7 @@ describe("QuotaController.reserve concurrency", () => {
 
     // Then: one succeeds and storage contains only one additional reservation.
     expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
-    expect(state.reservedTokens).toBe(POOL_LIMITS.STANDARD - 10_000);
+    expect(state.reservedTokens).toBe(standardLimit - 10_000);
   });
 });
 
@@ -84,9 +83,9 @@ describe("QuotaController.reserve UTC day boundary", () => {
     // Then: each date retains only its own counters and remaining value.
     expect(previousState.reservedTokens).toBe(700_000);
     expect(previousState.utcDay).toBe("2026-08-30");
-    expect(previousState.remaining).toBe(POOL_LIMITS.STANDARD - 700_000);
+    expect(previousState.remaining).toBe(standardLimit - 700_000);
     expect(nextState.reservedTokens).toBe(100_000);
     expect(nextState.utcDay).toBe("2026-08-31");
-    expect(nextState.remaining).toBe(POOL_LIMITS.STANDARD - 100_000);
+    expect(nextState.remaining).toBe(standardLimit - 100_000);
   });
 });

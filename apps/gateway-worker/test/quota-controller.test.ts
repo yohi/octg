@@ -1,5 +1,3 @@
-import { POOL_LIMITS } from "@octg/shared";
-
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuotaController } from "@octg/quota-controller";
@@ -12,6 +10,7 @@ const stub = (pool = "STANDARD", day = "2026-08-09") =>
   env.QUOTA_CONTROLLER.get(
     env.QUOTA_CONTROLLER.idFromName(`quota:${pool}:${day}`),
   );
+const standardLimit = Number(env.QUOTA_LIMIT_STANDARD);
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -79,7 +78,7 @@ describe("QuotaController.reserve", () => {
   it("permits most of the STANDARD pool + a 40,000-token reservation", async () => {
     // Given: a STANDARD pool with 50,000 tokens remaining.
     const controller = stub();
-    await useConfirmed(controller, POOL_LIMITS.STANDARD - 50_000);
+    await useConfirmed(controller, standardLimit - 50_000);
 
     // When: a reservation within the remaining amount is requested.
     const result = await controller.reserve("req-a", 40_000, 40_000);
@@ -95,7 +94,7 @@ describe("QuotaController.reserve", () => {
   it("rejects a reservation that would exceed the remaining STANDARD quota", async () => {
     // Given: a STANDARD pool with only 1,000 tokens remaining.
     const controller = stub("STANDARD", "2026-08-10");
-    await useConfirmed(controller, POOL_LIMITS.STANDARD - 1_000);
+    await useConfirmed(controller, standardLimit - 1_000);
 
     // When: a reservation greater than the remaining amount is requested.
     const result = await controller.reserve("req-b", 2_000, 2_000);
@@ -112,7 +111,7 @@ describe("QuotaController.reserve", () => {
   it("evaluates a smaller retry as new after an unsuccessful reservation", async () => {
     // Given: a STANDARD pool with 1,000 tokens remaining.
     const controller = stub("STANDARD", "2026-08-11");
-    await useConfirmed(controller, POOL_LIMITS.STANDARD - 1_000);
+    await useConfirmed(controller, standardLimit - 1_000);
 
     // When: an oversized reservation fails and the same request ID retries smaller.
     const first = await controller.reserve("req-c", 2_000, 2_000);
@@ -122,7 +121,7 @@ describe("QuotaController.reserve", () => {
     // Then: only the smaller reservation is retained.
     expect(first.ok).toBe(false);
     expect(second.ok).toBe(true);
-    expect(state.reservedTokens).toBe(POOL_LIMITS.STANDARD);
+    expect(state.reservedTokens).toBe(standardLimit);
   });
 
   it("returns the original result without double-counting a retransmission", async () => {

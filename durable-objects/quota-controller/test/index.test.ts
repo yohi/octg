@@ -1,5 +1,3 @@
-import { POOL_LIMITS } from "@octg/shared";
-
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { QuotaController } from "../src/quota-controller";
@@ -47,7 +45,7 @@ describe("QuotaController.reserve idempotency key", () => {
     // Then: both reservations consume quota independently.
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    if (second.ok) expect(second.remaining).toBe(POOL_LIMITS.STANDARD - 200);
+    if (second.ok) expect(second.remaining).toBe(Number(env.QUOTA_LIMIT_STANDARD) - 200);
     expect(state.reservedTokens).toBe(200);
     expect(state.requestCount).toBe(2);
   });
