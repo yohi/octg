@@ -71,7 +71,7 @@ Checked-in defaults live in `apps/gateway-worker/wrangler.jsonc`.
 | `IN_FLIGHT_LEASE_TTL_MS` | `120000` | In-flight lease TTL; runtime enforces a 120 s minimum |
 | `IN_FLIGHT_LEASE_RENEWAL_MS` | `30000` | Streaming lease renewal interval |
 
-The shared-code fallback pool allowances are 950,000 STANDARD and 10,000,000 MINI. A lower runtime value is an intentional operational ceiling, not a contradiction.
+The shared-code fallback pool allowances are 1,000,000 STANDARD and 10,000,000 MINI. The checked-in runtime ceilings are intentionally lower: 950,000 STANDARD and 9,950,000 MINI, each retaining a 50,000-token safety margin. These operational ceilings do not change the shared-code allowances.
 
 `MAX_INPUT_BYTES` is one canonical positive safe-integer deployment value. The
 Production Worker upload and the Production Deno runtime receive the same

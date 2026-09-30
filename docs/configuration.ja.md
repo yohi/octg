@@ -65,7 +65,7 @@ checked-in `wrangler.jsonc` の current defaults:
 | `IN_FLIGHT_LEASE_TTL_MS` | `120000` | lease TTL |
 | `IN_FLIGHT_LEASE_RENEWAL_MS` | `30000` | streaming renewal interval |
 
-shared-code fallback allowance と deployed operational ceiling は同一概念ではありません。MINI の fallback は 10,000,000 ですが、checked-in operational ceiling は 9,950,000 です。
+shared-code fallback allowance と deployed operational ceiling は同一概念ではありません。fallback allowance は STANDARD が 1,000,000、MINI が 10,000,000 です。checked-in operational ceiling はそれぞれ 950,000、9,950,000 で、各 pool に 50,000 tokens/day の安全枠を設けています。
 
 instance-specific account ID、D1 ID、Access audience、upstream URL を template repository から別 deployment へそのままコピーしないでください。
 
