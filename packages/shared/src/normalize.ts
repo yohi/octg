@@ -241,6 +241,11 @@ export function normalizeResponses(
           if (typeof entry.call_id !== "string" || typeof entry.name !== "string" || typeof entry.arguments !== "string") {
             return { ok: false, error: "invalid_body" };
           }
+          try {
+            JSON.parse(entry.arguments);
+          } catch {
+            return { ok: false, error: "invalid_body" };
+          }
           isToolUse = true;
           texts.push(entry.call_id, entry.name, entry.arguments);
           break;
