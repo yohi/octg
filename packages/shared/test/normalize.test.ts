@@ -409,6 +409,26 @@ describe("normalizeResponses", () => {
     });
   });
 
+  it.each([
+    ["missing closing brace", "{\"city\":\"Sapporo\""],
+    ["trailing comma", "{\"city\":\"Sapporo\",}"],
+    ["unquoted property name", "{city:\"Sapporo\"}"],
+  ])("rejects function-call arguments with invalid JSON: %s", (_caseName, argumentsValue) => {
+    expect(
+      normalizeResponses({
+        model: "gpt-5",
+        input: [
+          {
+            type: "function_call",
+            call_id: "call_invalid_json",
+            name: "lookup",
+            arguments: argumentsValue,
+          },
+        ],
+      }),
+    ).toEqual({ ok: false, error: "invalid_body" });
+  });
+
   it("accepts role-aware text history and meters tool and reasoning fields", () => {
     const result = normalizeResponses({
       model: "gpt-5.6-luna",
