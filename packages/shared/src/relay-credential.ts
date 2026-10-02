@@ -131,6 +131,35 @@ function compareCodeUnits(left: string, right: string): number {
   return 0;
 }
 
+let cachedRelayHmacKey: {
+  readonly keyBytes: Uint8Array;
+  readonly promise: Promise<CryptoKey>;
+} | undefined;
+
+function relayHmacCryptoKey(key: Uint8Array): Promise<CryptoKey> {
+  const cached = cachedRelayHmacKey;
+  if (cached !== undefined && constantTimeBytesEqual(cached.keyBytes, key)) {
+    return cached.promise;
+  }
+
+  // Fresh ArrayBuffer-backed copy: BufferSource rejects ArrayBufferLike views.
+  const keyBytes = new Uint8Array(key);
+  const promise = crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  cachedRelayHmacKey = { keyBytes, promise };
+  void promise.then(undefined, () => {
+    if (cachedRelayHmacKey?.promise === promise) {
+      cachedRelayHmacKey = undefined;
+    }
+  });
+  return promise;
+}
+
 async function computeRelayMac(
   key: Uint8Array,
   purposeBytes: Uint8Array,
@@ -139,15 +168,7 @@ async function computeRelayMac(
   const macInput = new Uint8Array(purposeBytes.byteLength + 1 + payloadBytes.byteLength);
   macInput.set(purposeBytes, 0);
   macInput.set(payloadBytes, purposeBytes.byteLength + 1);
-  // Fresh ArrayBuffer-backed copy: BufferSource rejects ArrayBufferLike views.
-  const keyBytes = new Uint8Array(key);
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    keyBytes,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
+  const cryptoKey = await relayHmacCryptoKey(key);
   return new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, macInput));
 }
 
