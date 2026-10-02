@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   RELAY_CONTEXT_PURPOSE,
   RELAY_GRANT_PURPOSE,
@@ -103,6 +103,19 @@ describe("signRelayContext and verifyRelayContext", () => {
     expect(verified).toEqual(CONTEXT);
     expect(token.split(".")).toHaveLength(2);
     expect(token).not.toContain("=");
+  });
+
+  it("reuses the imported HMAC key for equal relay key bytes", async () => {
+    const relayKey = new Uint8Array(32).fill(0x37);
+    const importKey = vi.spyOn(crypto.subtle, "importKey");
+    try {
+      await signRelayContext(CONTEXT, relayKey);
+      await signRelayContext(CONTEXT, new Uint8Array(relayKey));
+
+      expect(importKey).toHaveBeenCalledTimes(1);
+    } finally {
+      importKey.mockRestore();
+    }
   });
 
   it("produces an identical token for identical claims and key", async () => {
