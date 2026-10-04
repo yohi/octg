@@ -36,11 +36,10 @@
 ## Review Focus
 
 1. **HMAC key rotation/rejection race:** equal-byte keys must share one import, a rotated key must replace it, and rejection of an old import must never clear a newer cache entry. Task 1 owns the regression tests.
-2. **CPU-gate ambiguous setup acknowledgement:** a lost setup response must be recoverable by the runner-owned request ID without creating a second live fixture. Task 5 owns the route semantics; Task 6 owns runner retry/serialization tests.
-3. **Worker/DO gradual-deployment skew:** candidate Worker -> bridge-version QuotaController/lifecycle DO and bridge Worker -> candidate-version QuotaController must remain contract-compatible. Tasks 8 and 9 own manifest/bridge tests.
-4. **Missing application marker on CPU kill:** `exceededCpu` platform records must still fail the series even when no application finish marker exists. Task 6 owns evidence-reducer tests.
-5. **Post-gate secret teardown:** deleting only `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` creates a distinct hardening ScriptVersion; all other code/config/DO contracts must remain equivalent. Tasks 9 and 12 own rollout/hardening assertions.
-
+2. **CPU-gate ambiguous setup acknowledgement:** a lost setup response must be recoverable by the runner-owned request ID without creating a second live fixture. Task 4 owns route/recovery semantics; Task 5 owns runner retry/serialization tests; Task 6 executes the remote Stage 1 gate.
+3. **Worker/DO gradual-deployment skew:** candidate Worker -> bridge-version QuotaController/lifecycle DO and bridge Worker -> candidate-version QuotaController must remain contract-compatible. Task 9 owns the compatibility manifest; Task 10 owns exact bridge/candidate version construction and rollout verification.
+4. **Missing application marker on CPU kill:** `exceededCpu` platform records must still fail the series even when no application finish marker exists. Task 5 owns telemetry normalization/evidence-reducer tests; Task 6 executes the evidence gate.
+5. **Post-gate secret teardown:** deleting only `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` creates a distinct hardening ScriptVersion; all other code/config/DO contracts must remain equivalent. Task 9 owns manifest equivalence, Task 10 owns version/hardening tooling, and Task 12 performs the authorized remote teardown and verification.
 ---
 
 ## File and interface map
@@ -63,10 +62,12 @@
 | `apps/gateway-worker/src/index.ts` | Export/bind new DO, CPU-gate route precedence, exact env contract. |
 | `apps/gateway-worker/wrangler.jsonc` | Phase-2-active binding/migration `v4`; 100% telemetry sampling remains required. |
 | `scripts/relay-cpu-workloads.mjs` | Canonical workload builders and execution-condition definitions. |
-| `scripts/relay-cpu-evidence.mjs` | Pure platform-telemetry series classifier and PASS/FAIL/BLOCKED reducer. |
+| `scripts/relay-cpu-evidence.mjs` | Pure normalized platform-telemetry series classifier and PASS/FAIL/BLOCKED reducer. |
+| `scripts/relay-cpu-telemetry.mjs` | Workers Observability REST API producer: exact-window invocation query, pagination/completeness checks, protected normalized JSONL. |
 | `scripts/run-relay-cpu-gate.mjs` | Protected Stage 1/Stage 2 driver, runner-owned request IDs, one-operation serialization, candidate version override. |
 | `scripts/do-compatibility-manifest.mjs` | Runtime bundle digest + type/source contract closure digest for bridge/candidate DO compatibility. |
-| `scripts/relay-cpu-rollout.mjs` | Validated bridge/candidate/hardening Wrangler command orchestration; no implicit production execution. |
+| `scripts/relay-cpu-version-config.mjs` | Deterministically generate complete temporary Production bridge/candidate Wrangler configs from canonical non-secret inputs; never contains secret values. |
+| `scripts/relay-cpu-rollout.mjs` | Validated bridge/candidate/hardening Wrangler command orchestration using generated exact version configs; no implicit production execution. |
 | `scripts/preview-worker-config.mjs` | Preview DO/config isolation including optional lifecycle DO and CPU-gate fixture variables. |
 | `.github/workflows/deploy-production.yml` | Prevent direct unsafe 100% candidate deploy; call validated Issue #121 staging path after source merge. |
 | `docs/operations.md` | Operator sequence, evidence fields, rollback, Stage 1/bridge/Stage 2/hardening runbook. |
@@ -82,7 +83,7 @@ Task 3  QuotaController read-only inspection
    |
 Task 4  Worker CPU-gate control plane + safe marker
    |
-Task 5  CPU workload/evidence runner
+Task 5  CPU workload / telemetry / evidence tooling
    |
 Task 6  Production recurrence attribution + Stage 1 execution gate
    |
@@ -93,7 +94,7 @@ Task 6  Production recurrence attribution + Stage 1 execution gate
                                                                   |
 Task 9  DO compatibility manifest --------------------------------+
    |
-Task 10 bridge/candidate/hardening rollout tooling + workflow
+Task 10 exact Production version configs + bridge/candidate/hardening rollout
    |
 Task 11 local full verification + operations documentation
    |
@@ -102,6 +103,23 @@ Task 12 authorized remote Stage 2 / promotion / hardening evidence
 
 If Task 6 reports ingress or decision FAIL, STOP. Do not run Tasks 7-12 until a separately reviewed remediation changes that invocation class.
 
+A **Stage 2 lifecycle FAIL discovered in Task 12 after a Phase-2-inactive Stage 1** is a full branch transition, not a simple jump back to Task 6:
+
+```text
+Task 12 lifecycle FAIL
+  -> stop candidate rollout
+  -> restore current compatibility bridge to 100%
+  -> invalidate old Phase-2-inactive candidate/version/evidence/manifest/preflight artifacts
+  -> Task 7
+  -> Task 8
+  -> rerun Task 6 completely
+  -> rerun Task 9 with --phase2=active
+  -> rerun Task 10 Phase-2-active config/rollout verification
+  -> rerun Task 11 complete local verification
+  -> restart Task 12 from compatibility-bridge creation
+```
+
+Old Phase-2-inactive bridge/candidate version IDs, manifests, preflight results, Stage 1 evidence, Stage 2 evidence, or local-verification results MUST NOT be reused after that transition.
 ---
 
 ### Task 1: Cache the relay HMAC CryptoKey import
@@ -478,11 +496,13 @@ git commit -m "feat: add protected relay CPU gate control plane"
 
 ---
 
-### Task 5: Build canonical CPU workload driver and evidence reducer
+### Task 5: Build canonical CPU workload, telemetry acquisition, and evidence tooling
 
 **Files:**
 - Create: `scripts/relay-cpu-workloads.mjs`
 - Create: `scripts/relay-cpu-workloads.test.mjs`
+- Create: `scripts/relay-cpu-telemetry.mjs`
+- Create: `scripts/relay-cpu-telemetry.test.mjs`
 - Create: `scripts/relay-cpu-evidence.mjs`
 - Create: `scripts/relay-cpu-evidence.test.mjs`
 - Create: `scripts/run-relay-cpu-gate.mjs`
@@ -490,12 +510,30 @@ git commit -m "feat: add protected relay CPU gate control plane"
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Task 4 CPU-gate HTTP contract; public `/v1/responses`; existing lifecycle callback routes; Cloudflare platform telemetry exported as protected JSONL.
+- Consumes: Task 4 CPU-gate HTTP contract; public `/v1/responses`; existing lifecycle callback routes; Cloudflare Workers Observability REST API.
 - Produces:
   - `WORKLOAD_CLASSES = ["baseline-small","baseline-large","incident-regression-stream","incident-regression-nonstream"]`
   - `CONCURRENCIES = [1,2,3]`
+  - `fetchRelayCpuTelemetry(options): Promise<RelayCpuTelemetryExportResult>`
   - `evaluateCpuSeries(records, expected): RelayCpuSeriesResult`
-  - executable `npm run gate:relay-cpu -- ...`.
+  - executable `npm run gate:relay-cpu -- ...`
+  - executable `npm run telemetry:relay-cpu -- ...`
+  - protected normalized platform JSONL consumed by `relay-cpu-evidence.mjs`.
+
+The only authoritative telemetry producer is the Workers Observability REST API endpoint:
+
+```text
+POST https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/observability/telemetry/query
+```
+
+Authentication comes only from environment variables:
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_API_TOKEN
+```
+
+The token is never accepted as a CLI argument or written to output.
 
 - [ ] **Step 1: Write RED workload tests**
 
@@ -509,7 +547,71 @@ Pin deterministic, synthetic builders:
 
 The public ingress/decision fixture uses a runner-provided canary client key and the exact synthetic model string `octg-cpu-gate-reject-v1`. Before any measured series, one unmeasured preflight request must prove that this model receives the normal `model_requires_paid` rejection and creates no admission/grant. If it is enabled or produces any other outcome, the series is `BLOCKED / INCOMPLETE`; do not select a different model ad hoc.
 
-- [ ] **Step 2: Write RED evidence-reducer tests**
+- [ ] **Step 2: Write RED telemetry-acquisition tests**
+
+Define this exact normalized JSONL record:
+
+```ts
+interface RelayCpuPlatformRecord {
+  readonly eventId: string;
+  readonly eventTimestampMs: number;
+  readonly scriptName: string;
+  readonly scriptVersionId: string;
+  readonly cpuTimeMs: number;
+  readonly outcome: string;
+  readonly eventType: string;
+  readonly routeDiscriminator: string;
+  readonly executionModel: "stateless";
+  readonly requestId?: string;
+}
+```
+
+The producer accepts exactly:
+
+```text
+scriptName
+expectedScriptVersionId
+windowStartMs
+windowEndMs
+expectedExecutionModel=stateless
+outputPath
+```
+
+plus `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` from the environment.
+
+Tests must pin:
+
+- query `view="invocations"`;
+- exact timeframe from `windowStartMs` through `windowEndMs`;
+- dataset `cloudflare-workers`;
+- server-side filters for the expected script plus, when exposed by the Observability keys API, exact ScriptVersion and `executionModel=stateless`;
+- hard post-normalization requirements that `$workers.scriptName`, `$workers.scriptVersion.id`, and `$workers.executionModel` equal the expected values even if a server-side filter is unavailable;
+- `cpuTimeMs` comes only from `$workers.cpuTimeMs`;
+- `outcome` comes only from `$workers.outcome`;
+- `eventTimestampMs` comes only from the platform event timestamp;
+- `eventType` comes only from `$workers.eventType`;
+- `routeDiscriminator` is the URL pathname from `$metadata.url`, or the path parsed from `$metadata.trigger` only when URL is absent;
+- URL/trigger disagreement or an unassignable route is `BLOCKED`;
+- `executionModel="durableObject"` is never normalized into the stateless gate;
+- `outcome="exceededCpu"` is retained even when no application finish marker exists;
+- missing `cpuTimeMs`, ScriptVersion, outcome, event timestamp, script name, or execution model on an in-scope invocation is `BLOCKED`;
+- any in-scope platform record with `$workers.truncated=true` is `BLOCKED`;
+- exact duplicate `eventId` records are deterministically de-duplicated once; conflicting duplicates are `BLOCKED`;
+- HTTP/API failure, `success=false`, malformed response, or query parse failure is `BLOCKED`.
+
+Pagination is exact:
+
+```text
+limit=2000
+offset=<last returned $metadata.id>
+offsetDirection=next
+```
+
+Continue until a subsequent page returns zero new invocation events. A non-empty page without a usable final `$metadata.id`, repeated cursor, or any state where complete retrieval cannot be proven is `BLOCKED`. The producer post-filters timestamps to `windowStartMs <= timestamp < windowEndMs` so adjacent series cannot share one boundary event.
+
+The protected output file is created mode `0600`; raw API responses are not committed.
+
+- [ ] **Step 3: Write RED evidence-reducer tests**
 
 For one exact series identity:
 
@@ -524,6 +626,16 @@ windowStart
 windowEnd
 ```
 
+Route mapping is exact:
+
+```text
+/v1/responses                        -> ingress
+/internal/relay/v1/decision          -> decision
+/internal/relay/v1/activation        -> activation
+/internal/relay/v1/renewal           -> renewal
+/internal/relay/v1/terminal          -> terminal
+```
+
 Assert:
 
 - 499 successes => BLOCKED;
@@ -532,11 +644,12 @@ Assert:
 - max >7 => FAIL;
 - any `exceededCpu` => FAIL even without app marker;
 - telemetry count mismatch => BLOCKED unless an observed CPU violation already makes it FAIL;
-- wrong ScriptVersion => not counted and possibly BLOCKED;
-- ambiguous route/classification => BLOCKED;
-- overlapping required windows => harness rejects the run ledger before evaluation.
+- wrong ScriptVersion => rejected/not counted and completeness may become BLOCKED;
+- missing/ambiguous route classification => BLOCKED;
+- overlapping required windows => harness rejects the run ledger before evaluation;
+- application `octg.relay_invocation` markers may enrich attribution but are never required for a normalized platform record and never turn incomplete platform telemetry into PASS.
 
-- [ ] **Step 3: Write RED runner serialization tests**
+- [ ] **Step 4: Write RED runner serialization tests**
 
 Pin:
 
@@ -548,21 +661,25 @@ Pin:
 - lost/expired grant token does not prevent requestId-based recovery;
 - compatibility-preflight operations are never counted as measurement samples.
 
-- [ ] **Step 4: Run RED**
+- [ ] **Step 5: Run RED**
 
 ```bash
-node --test scripts/relay-cpu-workloads.test.mjs scripts/relay-cpu-evidence.test.mjs scripts/run-relay-cpu-gate.test.mjs
+node --test \
+  scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.test.mjs
 ```
 
 Expected RED: files/exports do not exist.
 
-- [ ] **Step 5: Implement the pure workload/evidence modules**
+- [ ] **Step 6: Implement workload, telemetry, and evidence modules**
 
-The reducer must not fetch Cloudflare APIs itself. It consumes a protected telemetry export so platform retrieval and series evaluation remain separable/auditable.
+`relay-cpu-telemetry.mjs` performs the programmatic Observability query and normalization; `relay-cpu-evidence.mjs` remains pure and performs no network access.
 
-The runner writes only a protected run ledger containing safe identifiers/timestamps/counts. It never writes request bodies, grant tokens, client keys, or bearer values.
+The driver writes only a protected run ledger containing safe identifiers/timestamps/counts. It never writes request bodies, grant tokens, client keys, API tokens, or bearer values.
 
-- [ ] **Step 6: Implement the driver modes**
+- [ ] **Step 7: Implement the driver modes**
 
 Required modes:
 
@@ -582,23 +699,40 @@ Cloudflare-Workers-Version-Overrides:
 
 and require the observed Worker version to equal the candidate before accepting a sample.
 
-- [ ] **Step 7: GREEN**
+- [ ] **Step 8: Add executable package commands**
+
+```json
+"gate:relay-cpu": "node scripts/run-relay-cpu-gate.mjs",
+"telemetry:relay-cpu": "node scripts/relay-cpu-telemetry.mjs"
+```
+
+The telemetry CLI accepts identifiers/window/output path only; credentials remain environment-only.
+
+- [ ] **Step 9: GREEN**
 
 ```bash
-node --test scripts/relay-cpu-workloads.test.mjs scripts/relay-cpu-evidence.test.mjs scripts/run-relay-cpu-gate.test.mjs
+node --test \
+  scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.test.mjs
 npm run test:scripts
 ```
 
-Expected GREEN: pure reducer and runner-control tests pass without network access.
+Expected GREEN: workload, mocked-API telemetry normalization/pagination, pure reducer, and runner-control tests pass without live network access.
 
-- [ ] **Step 8: Commit boundary**
+- [ ] **Step 10: Commit boundary**
 
 ```bash
-git add scripts/relay-cpu-workloads.mjs scripts/relay-cpu-workloads.test.mjs scripts/relay-cpu-evidence.mjs scripts/relay-cpu-evidence.test.mjs scripts/run-relay-cpu-gate.mjs scripts/run-relay-cpu-gate.test.mjs package.json
-git commit -m "feat: add relay CPU gate workload and evidence tooling"
+git add \
+  scripts/relay-cpu-workloads.mjs scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.mjs scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.mjs scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.mjs scripts/run-relay-cpu-gate.test.mjs \
+  package.json
+git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
 ```
 
----
 
 ### Task 6: Attribute the Production recurrence and execute the Stage 1 gate
 
@@ -607,16 +741,18 @@ git commit -m "feat: add relay CPU gate workload and evidence tooling"
 - Evidence output remains outside the repository except sanitized review/runbook summaries explicitly approved by the user.
 
 **Interfaces:**
-- Consumes: Tasks 1-5, exact candidate source revision, protected Preview environment, Cloudflare platform invocation telemetry.
+- Consumes: Tasks 1-5, exact candidate source revision, protected Preview environment, Workers Observability REST API.
 - Produces: Production recurrence attribution plus Stage 1 PASS/FAIL/BLOCKED matrix that selects the Phase 2 branch.
 
-- [ ] **Step 1: Record immutable candidate identity**
+- [ ] **Step 1: Require explicit telemetry authorization and record immutable candidate identity**
+
+Remote Worker execution **and** Workers Observability API queries require explicit authorization for this task.
 
 Record source SHA, Worker version/revision, harness fingerprint/version, workload definitions, and CPU threshold `5/7/0`.
 
 - [ ] **Step 2: Attribute the historical/current Production CPU recurrence**
 
-Using platform invocation records first and safe markers only as supplemental evidence, assign the recurrence to exactly one of:
+Using normalized platform invocation records first and safe markers only as supplemental evidence, assign the recurrence to exactly one of:
 
 ```text
 ingress
@@ -626,28 +762,68 @@ renewal
 terminal
 ```
 
-If attribution remains ambiguous, Issue #121 cannot close; record BLOCKED but Task 1 HMAC work remains valid.
+The executable acquisition sequence is:
+
+```bash
+umask 077
+export CLOUDFLARE_ACCOUNT_ID=...
+export CLOUDFLARE_API_TOKEN=...
+
+npm run telemetry:relay-cpu -- \
+  --script-name=<production-worker-name> \
+  --script-version=<known-production-version-id> \
+  --window-start-ms=<closed-window-start> \
+  --window-end-ms=<closed-window-end> \
+  --execution-model=stateless \
+  --out=<protected-attribution-jsonl>
+```
+
+If complete retrieval cannot be proven, a required field is absent, or attribution remains ambiguous, record `BLOCKED / INCOMPLETE`; Issue #121 cannot close.
 
 - [ ] **Step 3: Run Stage 1 in isolated Preview/temporary resources**
 
 Remote execution requires explicit authorization.
 
-Run all required workload/concurrency series with >=500 successes per series and non-overlapping windows.
+Run one required workload/concurrency series at a time. For each series the runner records an exact non-overlapping half-open window `[windowStartMs, windowEndMs)`, expected attempt/success counts, candidate ScriptVersion, workload class, invocation class, and concurrency.
 
-- [ ] **Step 4: Evaluate Stage 1**
+- [ ] **Step 4: Acquire authoritative platform telemetry immediately after each closed series**
 
-Run the evidence reducer against platform telemetry. Expected outcomes:
+For every series:
 
-- PASS: all required series satisfy 5/7/0 and completeness.
+```bash
+npm run telemetry:relay-cpu -- \
+  --script-name=<stage1-worker-name> \
+  --script-version=<candidate-version-id> \
+  --window-start-ms=<series-window-start> \
+  --window-end-ms=<series-window-end> \
+  --execution-model=stateless \
+  --out=<protected-series-jsonl>
+```
+
+No raw telemetry file is added to Git. Query/API failure, incomplete pagination, truncation, missing required platform fields, or missing expected records makes that series `BLOCKED / INCOMPLETE`.
+
+- [ ] **Step 5: Evaluate each Stage 1 series**
+
+Run:
+
+```bash
+node scripts/relay-cpu-evidence.mjs \
+  --ledger=<protected-run-ledger> \
+  --telemetry=<protected-series-jsonl> \
+  --out=<protected-series-summary>
+```
+
+Expected outcomes:
+
+- PASS: all required series satisfy 5/7/0, >=500 successful invocations, and complete authoritative telemetry.
 - lifecycle FAIL: any activation/renewal/terminal required series violates the gate -> proceed to Tasks 7-8, then rerun **all** Task 6 evidence.
-- ingress/decision FAIL: STOP for a new reviewed remediation.
-- BLOCKED: fix evidence collection only; do not weaken gate.
+- ingress/decision FAIL: STOP for a separately reviewed remediation; do not enable lifecycle offload.
+- BLOCKED: repair evidence acquisition only; do not weaken the gate.
 
-- [ ] **Step 5: Review boundary**
+- [ ] **Step 6: Review boundary**
 
-No commit is required for raw runtime evidence. Preserve only sanitized aggregates and exact version/window identifiers in the review record.
+Preserve only sanitized aggregates, exact ScriptVersion/source SHA, manifest/harness identifiers, and exact windows in the review record. Protected normalized JSONL/raw API material remains temporary and is never committed.
 
----
 
 ### Task 7 (conditional): Implement RelayGrantLifecycleController contract and trust-processing DO
 
@@ -804,7 +980,7 @@ All prior Stage 1 evidence is invalid because implementation changed.
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Worker source tree and Wrangler dry-run bundle.
+- Consumes: Worker source tree plus an explicit Wrangler config path representing the exact bridge or candidate effective non-secret configuration.
 - Produces deterministic `DoCompatibilityManifest` with `runtimeBundleSha256`, per-root `sourceClosureSha256`, file lists, and `contractSha256`.
 
 Exact source roots:
@@ -844,7 +1020,7 @@ Expected RED: manifest tool missing.
 Create a protected temporary directory and run exactly:
 
 ```bash
-npx wrangler deploy --dry-run --outdir "$OUTDIR" --config apps/gateway-worker/wrangler.jsonc
+npx wrangler deploy --dry-run --outdir "$OUTDIR" --config "$WRANGLER_CONFIG"
 ```
 
 Digest every regular file emitted under `$OUTDIR`, sorted by relative path, using `relativePath + NUL + fileBytes + NUL`. Delete the temporary directory in `finally`.
@@ -866,9 +1042,12 @@ Support only:
 ```text
 --phase2=inactive
 --phase2=active
+--config=<exact-generated-wrangler-config>
 --out=<path>
 --help
 ```
+
+`--config` is mandatory except for `--help`; the manifest tool must never silently fall back to `apps/gateway-worker/wrangler.jsonc`.
 
 Invalid mode, missing root, unresolved repository import, or output failure exits non-zero without a partial manifest.
 
@@ -890,9 +1069,11 @@ git commit -m "build: add Durable Object compatibility manifest"
 
 ---
 
-### Task 10: Implement bridge/candidate/hardening rollout tooling and make Production deployment fail-safe
+### Task 10: Implement exact Production version configuration and bridge/candidate/hardening rollout tooling
 
 **Files:**
+- Create: `scripts/relay-cpu-version-config.mjs`
+- Create: `scripts/relay-cpu-version-config.test.mjs`
 - Create: `scripts/relay-cpu-rollout.mjs`
 - Create: `scripts/relay-cpu-rollout.test.mjs`
 - Modify: `.github/workflows/deploy-production.yml`
@@ -902,97 +1083,238 @@ git commit -m "build: add Durable Object compatibility manifest"
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Tasks 3-5 and optional Tasks 7-8; Task 9 manifest.
-- Produces validated operator commands/modes:
-  - `bridge`
-  - `candidate-upload`
-  - `candidate-deployment`
-  - `preflight`
-  - `promote`
-  - `hardening-create`
-  - `hardening-verify`
-  - `hardening-promote`
-  - `rollback-bridge`.
+- Consumes: Tasks 3-5 and optional Tasks 7-8; Task 9 manifest; canonical Production non-secret inputs.
+- Produces:
+  - `buildRelayCpuProductionVersionConfigs(baseConfig, productionInputs, phase2)`
+  - protected temporary `bridge-wrangler.json`
+  - protected temporary `candidate-wrangler.json`
+  - validated rollout modes: `bridge`, `candidate-upload`, `candidate-deployment`, `preflight`, `promote`, `hardening-create`, `hardening-verify`, `hardening-promote`, `rollback-bridge`.
 
-- [ ] **Step 1: Write RED command-construction tests**
+### Exact version-configuration construction
 
-Pin the non-interactive Wrangler command shapes:
+The implementation is fixed to one mechanism:
+
+```text
+apps/gateway-worker/wrangler.jsonc
+        +
+canonical Production non-secret inputs
+        |
+        +--> temporary bridge Wrangler config
+        |
+        +--> temporary candidate Wrangler config
+```
+
+`relay-cpu-version-config.mjs` parses the repository base config, copies required invariant bindings/migrations/compatibility settings, and creates **complete** effective Production `vars` maps. It never copies a secret value into either config.
+
+Required base-config invariants that must exist and be preserved exactly:
+
+```text
+QUOTA_LIMIT_STANDARD
+QUOTA_LIMIT_MINI
+MAX_IN_FLIGHT_REQUESTS
+IN_FLIGHT_LEASE_TTL_MS
+IN_FLIGHT_LEASE_RENEWAL_MS
+OCTG_UPSTREAM_BASE_URL
+ACCESS_TEAM_DOMAIN
+ACCESS_AUD
+durable_objects bindings
+migrations
+compatibility_date
+compatibility_flags
+observability
+```
+
+Required explicit Production inputs, sourced by the Production workflow/operator and rejected when absent/empty:
+
+```text
+OCTG_RELAY_ENABLED
+MAX_INPUT_BYTES
+DENO_TOKENIZER_ENDPOINT
+DENO_TOKENIZER_THRESHOLD_BYTES
+DENO_TOKENIZER_TIMEOUT_MS
+DENO_PREPARE_ENDPOINT
+DENO_PREPARE_THRESHOLD_BYTES
+OCTG_RELAY_INGRESS_ENDPOINT
+OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
+OCTG_RELAY_CPU_GATE_STANDARD_MODEL
+OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
+OCTG_RELAY_CPU_GATE_MINI_MODEL
+```
+
+The generator always writes:
+
+```text
+OCTG_RELAY_ENVIRONMENT=production
+```
+
+and never accepts `OCTG_RELAY_ENVIRONMENT` as caller-controlled input.
+
+Phase 2 inactive:
+
+```text
+bridge normal-routing vars == candidate normal-routing vars
+OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD absent in both
+```
+
+Phase 2 active:
+
+```text
+bridge:
+  OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD=false
+
+candidate:
+  OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD=true
+```
+
+That offload variable is the **only normal-routing var difference** between bridge and candidate in Phase 2 active.
+
+The separate trust-class difference remains:
+
+```text
+bridge:
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent from secrets file
+
+candidate:
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN present in secrets file
+```
+
+No secret value is ever written into generated Wrangler config.
+
+- [ ] **Step 1: Write RED exact-config tests**
+
+Prove:
+
+```text
+bridge OCTG_RELAY_ENVIRONMENT == production
+candidate OCTG_RELAY_ENVIRONMENT == production
+all required Production vars are present
+base quota/max-in-flight/lease/upstream/access settings are preserved
+all DO bindings/migrations/compatibility settings are exact
+no Preview environment/value can survive into a Production version
+missing required Production input fails before file creation
+
+Phase 2 inactive:
+  bridge/candidate normal vars are byte-for-byte equal
+
+Phase 2 active:
+  bridge/candidate normal vars differ only by offload=false/true
+
+secret sentinel values never appear in generated config
+secret sentinel values never appear in command arguments
+```
+
+Also assert generated files are mode `0600`, written only under a protected temporary directory, and removed on every success/failure exit path.
+
+- [ ] **Step 2: Write RED command-construction tests**
+
+Pin these exact config-driven command shapes; **do not use `--keep-vars`**:
 
 ```text
 npx wrangler deploy
-  --config apps/gateway-worker/wrangler.jsonc
-  --keep-vars
+  --config <bridge-config>
   --strict
   --secrets-file <protected-bridge-secrets-file>
 
 npx wrangler versions upload
-  --config apps/gateway-worker/wrangler.jsonc
-  --keep-vars
+  --config <candidate-config>
   --strict
   --secrets-file <protected-candidate-secrets-file>
 
 npx wrangler versions deploy
   <bridge-id>@100%
   <candidate-id>@0%
-  --config apps/gateway-worker/wrangler.jsonc
+  --config <candidate-config>
   --yes
 
 npx wrangler versions secret delete
   OCTG_RELAY_CPU_GATE_AUTH_TOKEN
-  --config apps/gateway-worker/wrangler.jsonc
+  --config <candidate-config>
 ```
 
-The bridge secrets file contains the existing Production Worker secrets and no CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Both are created as mode 0600 temporary files, are never printed, and are removed on every exit path.
+The bridge secrets file contains the existing Production Worker secrets and no CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Both are mode `0600`, are never printed, and are deleted on every exit path.
 
-Reject the non-versioned `wrangler secret delete` in this rollout. Do not place secret values in command arguments or logs.
+Reject:
 
-- [ ] **Step 2: Write RED bridge/candidate config tests**
+- non-versioned `wrangler secret delete`;
+- any `--keep-vars` dependency in Issue #121 bridge/candidate construction;
+- secret values in command arguments/logs;
+- repository base config used directly as a Production bridge/candidate upload config.
+
+- [ ] **Step 3: Write RED bridge/candidate compatibility tests**
 
 Phase 2 inactive:
 
-- bridge and candidate share QuotaController CPU-gate code/contracts;
+- bridge/candidate share QuotaController CPU-gate code/contracts;
 - no v4/lifecycle binding is required;
-- bridge has control secret absent/disabled;
-- candidate has control secret enabled.
+- normal non-secret configuration is exact/equal;
+- bridge CPU-gate secret absent, candidate CPU-gate secret present.
 
 Phase 2 active:
 
 - bridge applies v4 and exports full lifecycle DO;
-- bridge `OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD=false`;
-- candidate `...=true`;
-- same code artifact / exact DO compatibility manifest;
+- bridge offload=false, candidate offload=true;
+- every other normal-routing var/binding/compatibility setting is exact/equal;
 - candidate upload contains no new migration.
 
-- [ ] **Step 3: Write RED workflow-safety tests**
-
-The master Production workflow must not silently deploy the CPU-tested candidate directly to 100%.
-
-Require a validated rollout mode/input or equivalent fail-closed staging path so the sequence is always:
-
-```text
-bridge 100%
-candidate upload
-bridge 100 / candidate 0
-manual/authorized Stage 2
-promotion
-hardening
-```
-
-- [ ] **Step 4: Run RED**
+Generate manifests from the **exact generated configs**:
 
 ```bash
-node --test scripts/relay-cpu-rollout.test.mjs scripts/deploy-production-workflow.test.mjs scripts/preview-worker-config.test.mjs
+npm run manifest:do-compat -- \
+  --phase2=<inactive|active> \
+  --config=<bridge-config> \
+  --out=<bridge-manifest>
+
+npm run manifest:do-compat -- \
+  --phase2=<inactive|active> \
+  --config=<candidate-config> \
+  --out=<candidate-manifest>
 ```
 
-- [ ] **Step 5: Implement rollout validation**
+Fail before candidate upload on any applicable source-root/`contractSha256` mismatch. Runtime bundle code digest must also match; config-only routing differences do not authorize different Worker code.
 
-Before candidate upload, generate manifests from the exact bridge/candidate checked-out inputs and fail on any root, `contractSha256`, or runtime bundle digest mismatch. This implementation keeps the code artifact identical and expresses bridge/candidate routing differences only through versioned bindings/variables.
+- [ ] **Step 4: Write RED workflow-safety tests**
 
-Before Stage 2 preflight, verify current deployment membership is exactly bridge 100% + candidate 0%.
+The Production workflow must source every explicit Production input above from its existing GitHub Environment/Variables contract, invoke the version-config generator, and never silently deploy the CPU-tested candidate directly to 100%.
+
+Required sequence:
+
+```text
+generate exact bridge/candidate configs
+-> bridge 100%
+-> candidate upload
+-> bridge 100 / candidate 0
+-> manual/authorized Stage 2
+-> exact candidate promotion
+-> hardening
+```
+
+- [ ] **Step 5: Run RED**
+
+```bash
+node --test \
+  scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.test.mjs \
+  scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.test.mjs
+```
+
+Expected RED: exact Production version generator/rollout contracts do not exist.
+
+- [ ] **Step 6: Implement exact config generation and rollout validation**
+
+Before bridge deployment/candidate upload:
+
+1. generate protected bridge/candidate configs;
+2. validate their effective vars/bindings/migrations;
+3. generate Task 9 manifests using those exact config files;
+4. prove required equivalence/differences;
+5. only then construct remote Wrangler commands.
+
+Before Stage 2 preflight, verify active deployment membership is exactly bridge 100% + candidate 0%.
 
 Version override checks prove only incoming Worker ScriptVersion; do not claim they pin DO code.
 
-- [ ] **Step 6: Implement exact compatibility-preflight closure**
+- [ ] **Step 7: Implement exact compatibility-preflight closure**
 
 The preflight driver must:
 
@@ -1012,21 +1334,29 @@ Preflight request IDs and invocations are excluded from measurement windows/coun
 
 The first Stage 2 measurement fixture MUST use a newly generated runner-owned `requestId` distinct from the compatibility-preflight `requestId`; the runner test must assert that the two IDs differ.
 
-- [ ] **Step 7: GREEN**
+- [ ] **Step 8: GREEN**
 
 ```bash
-node --test scripts/relay-cpu-rollout.test.mjs scripts/deploy-production-workflow.test.mjs scripts/preview-worker-config.test.mjs
+node --test \
+  scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.test.mjs \
+  scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.test.mjs
 npm run test:scripts
 ```
 
-- [ ] **Step 8: Commit boundary**
+- [ ] **Step 9: Commit boundary**
 
 ```bash
-git add scripts/relay-cpu-rollout.mjs scripts/relay-cpu-rollout.test.mjs .github/workflows/deploy-production.yml scripts/deploy-production-workflow.test.mjs scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs package.json
-git commit -m "feat: stage relay CPU compatibility rollout"
+git add \
+  scripts/relay-cpu-version-config.mjs scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.mjs scripts/relay-cpu-rollout.test.mjs \
+  .github/workflows/deploy-production.yml scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs \
+  package.json
+git commit -m "feat: stage exact relay CPU Production versions"
 ```
 
----
 
 ### Task 11: Synchronize operations documentation and run the complete local verification gate
 
@@ -1069,9 +1399,15 @@ HMAC cache
 -> hardening bounded verification
 ```
 
-- [ ] **Step 3: Document secrets and evidence retention**
+- [ ] **Step 3: Document exact version construction, telemetry acquisition, secrets, and evidence retention**
 
-Explicitly separate HMAC/service/CPU-gate credentials and state that raw runtime artifacts stay protected/temporary.
+Document:
+
+- `relay-cpu-version-config.mjs` as the only Issue #121 bridge/candidate Production config constructor;
+- complete Production non-secret var construction and forced `OCTG_RELAY_ENVIRONMENT=production`;
+- Workers Observability REST query endpoint, environment-only API authentication, pagination/completeness rules, normalized platform JSONL, and reducer command order;
+- HMAC/service/CPU-gate credential separation;
+- raw platform responses, normalized JSONL, run ledgers, and credentials as protected temporary artifacts that are never committed.
 
 - [ ] **Step 4: Run all local verification**
 
@@ -1107,59 +1443,136 @@ git commit -m "docs: add Worker CPU headroom rollout runbook"
 - Runtime evidence remains outside the repository except explicitly approved sanitized review records.
 
 **Interfaces:**
-- Consumes: accepted Stage 1 evidence, compatibility bridge/candidate artifacts, Task 9 manifests, Task 10 rollout tool, Task 11 runbook.
+- Consumes: accepted Stage 1 evidence, exact generated bridge/candidate configs, compatibility manifests, Task 10 rollout tool, Task 11 runbook.
 - Produces: Stage 2 PASS and hardening verification needed to close Issue #121.
 
-- [ ] **Step 1: Require explicit Production authorization**
+- [ ] **Step 1: Require explicit Production mutation and telemetry authorization**
 
-Do not execute any remote command until the user/operator explicitly authorizes Production mutation and measurement.
+Do not execute any remote mutation, measured request, or Workers Observability API query until the user/operator explicitly authorizes it.
 
-- [ ] **Step 2: Deploy/verify compatibility bridge at 100%**
+Create protected temporary config/secrets/evidence directories with `umask 077`.
+
+- [ ] **Step 2: Generate exact configs and deploy/verify compatibility bridge at 100%**
+
+Regenerate the bridge/candidate configs from canonical current Production inputs immediately before remote use.
 
 Phase 2 inactive: candidate-compatible QuotaController inspection RPCs, stable normal behavior.
 
-Phase 2 active: same plus append-only v4/full lifecycle DO, offload false for normal bridge traffic.
+Phase 2 active: same plus append-only v4/full lifecycle DO, offload=false for normal bridge traffic.
 
-Record bridge version ID and manifest.
+Generate/verify the bridge manifest from the exact bridge config, deploy that bridge config, then record bridge ScriptVersion ID and manifest hash.
 
-- [ ] **Step 3: Upload CPU-tested candidate and create 100/0 deployment**
+- [ ] **Step 3: Upload the CPU-tested candidate from the exact candidate config and create 100/0 deployment**
 
-Use `wrangler versions upload`, then:
+Generate/verify the candidate manifest from the exact candidate config and require Task 10 equivalence rules.
+
+Then:
 
 ```text
 bridge 100%
 CPU-tested candidate 0%
 ```
 
-Verify both are in the active deployment.
+Verify both exact version IDs are in the active deployment before preflight.
 
 - [ ] **Step 4: Run compatibility preflight**
 
 Require exact candidate ScriptVersion on incoming Worker and terminalize the preflight fixture before measurement begins.
 
-If any preflight operation remains non-terminal, STOP as BLOCKED.
+If any preflight operation remains non-terminal, STOP as `BLOCKED / INCOMPLETE`.
 
-- [ ] **Step 5: Run Stage 2 matrix**
+The first measured Stage 2 fixture uses a fresh runner-owned requestId distinct from preflight.
 
-Run all canonical workload classes and concurrency 1/2/3 series, >=500 successes each, sequential/non-overlapping windows, no upstream model traffic for the 500-sample gate.
+- [ ] **Step 5: Run each Stage 2 series and acquire authoritative telemetry**
 
-Evaluate with platform telemetry.
+For every canonical workload/invocation-class/concurrency series:
 
-Any lifecycle FAIL after a prior Phase-2-inactive Stage 1 activates Tasks 7-8 and invalidates prior Stage 1/Stage 2 evidence; return to Task 6.
+1. run exactly one measured series;
+2. close and record the exact half-open window `[windowStartMs, windowEndMs)`;
+3. query Workers Observability with `scripts/relay-cpu-telemetry.mjs` for the candidate ScriptVersion and `executionModel=stateless`;
+4. write protected normalized JSONL;
+5. run `relay-cpu-evidence.mjs`;
+6. record PASS / FAIL / BLOCKED before starting the next non-overlapping series.
 
-- [ ] **Step 6: Promote only the exact tested candidate**
+Executable acquisition/evaluation shape:
 
-If Stage 2 PASS, gradually promote the same ScriptVersion to 100%. Do not rebuild or delete the CPU-gate secret during this promotion.
+```bash
+npm run telemetry:relay-cpu -- \
+  --script-name=<production-worker-name> \
+  --script-version=<candidate-version-id> \
+  --window-start-ms=<series-window-start> \
+  --window-end-ms=<series-window-end> \
+  --execution-model=stateless \
+  --out=<protected-series-jsonl>
 
-Complete normal rollout acceptance.
+node scripts/relay-cpu-evidence.mjs \
+  --ledger=<protected-run-ledger> \
+  --telemetry=<protected-series-jsonl> \
+  --out=<protected-series-summary>
+```
 
-- [ ] **Step 7: Prove all CPU-gate operations absent/terminal**
+No upstream model traffic is generated by the 500-sample CPU matrix.
+
+If telemetry pagination/completeness cannot be proven, the series is BLOCKED; do not infer PASS from driver success.
+
+- [ ] **Step 6: Apply the exact Stage 2 failure transition**
+
+If **ingress or decision** FAIL:
+
+```text
+STOP
+-> do not enable lifecycle offload
+-> separately reviewed remediation required
+```
+
+If **activation, renewal, or terminal** FAIL while the current branch is Phase 2 inactive:
+
+```text
+STOP candidate rollout
+-> restore/verify current compatibility bridge at 100%
+-> invalidate old Phase-2-inactive candidate ScriptVersion
+-> invalidate old Phase-2-inactive Stage 1 and Stage 2 evidence
+-> invalidate old bridge/candidate compatibility manifests
+-> invalidate old compatibility-preflight artifacts/results
+-> invalidate old Task 11 local-verification result
+-> Task 7
+-> Task 8
+-> rerun Task 6 completely from fresh Stage 1 evidence
+-> rerun Task 9 with --phase2=active
+-> rerun Task 10 using new Phase-2-active bridge/candidate configs
+-> rerun Task 11 complete local verification gate
+-> restart Task 12 from Step 2
+```
+
+The restarted remote sequence is necessarily new:
+
+```text
+new Phase-2-active compatibility bridge
+  -> apply v4
+  -> new bridge 100%
+  -> new CPU-tested candidate upload
+  -> new bridge 100 / new candidate 0
+  -> new compatibility preflight
+  -> new Stage 2
+```
+
+The old Phase-2-inactive bridge version ID, candidate version ID, manifests, preflight result, Stage 1 evidence, Stage 2 evidence, and local-verification result are forbidden inputs to the Phase-2-active rollout.
+
+If Phase 2 is already active and a lifecycle series still FAILs, STOP for a separately reviewed remediation; do not loosen the CPU gate or add another authority layer.
+
+- [ ] **Step 7: Promote only the exact tested candidate**
+
+Only after every Stage 2 series PASS, gradually promote the same tested candidate ScriptVersion to 100%.
+
+Do not rebuild, change generated normal-routing config, or delete the CPU-gate secret during this promotion.
+
+- [ ] **Step 8: Prove all CPU-gate operations absent/terminal**
 
 Use runner-owned operation IDs and canonical inspection. Do not use global quota-counter equality.
 
-- [ ] **Step 8: Create the distinct hardening version**
+- [ ] **Step 9: Create the distinct hardening version**
 
-Run:
+Run the Task 10 versioned-secret operation against the exact tested candidate version/config:
 
 ```text
 wrangler versions secret delete OCTG_RELAY_CPU_GATE_AUTH_TOKEN
@@ -1172,37 +1585,37 @@ source revision identical
 runtime code artifact digest identical
 DO compatibility manifest identical
 compatibility settings identical
-all non-CPU-gate bindings/secrets equivalent
-only CPU-gate secret absent
+complete normal non-secret Production configuration identical
+all non-CPU-gate secrets equivalent
+only OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent
 ```
 
-- [ ] **Step 9: Run bounded hardening verification**
+- [ ] **Step 10: Run bounded hardening verification**
 
 At 0% with version override verify:
 
 ```text
 hardening ScriptVersion observed
 all CPU-gate routes -> 404
-normal relay configuration enabled
-normal lifecycle service auth valid
-one bounded ordinary Production Responses smoke succeeds
+normal relay configuration remains enabled
+normal lifecycle service auth remains valid
+one bounded ordinary Production Responses relay smoke succeeds
 ```
 
 No full 500-sample rerun.
 
-- [ ] **Step 10: Promote hardening or rollback**
+- [ ] **Step 11: Promote hardening or rollback**
 
 PASS -> hardening 100%.
 
-FAIL -> restore CPU-tested candidate 100%; Issue #121 remains open.
+FAIL -> restore the CPU-tested candidate 100%; Issue #121 remains open.
 
-- [ ] **Step 11: Final evidence/review boundary**
+- [ ] **Step 12: Final evidence/review boundary**
 
-Record only sanitized aggregates, version IDs, source SHA, manifest hashes, exact windows, and PASS/FAIL/BLOCKED outcomes. Do not retain credentials or payloads.
+Record only sanitized aggregates, version IDs, source SHA, manifest hashes, exact windows, and PASS/FAIL/BLOCKED outcomes. Delete protected raw API responses/normalized JSONL/config/secrets temporary artifacts according to the runbook.
 
 Issue #121 is close-eligible only when the design's complete completion criteria are satisfied.
 
----
 
 ## Plan self-review
 
@@ -1212,14 +1625,14 @@ Issue #121 is close-eligible only when the design's complete completion criteria
 - Exact shared lifecycle/control contracts and shard identity: Task 2.
 - Read-only canonical quota inspection: Task 3.
 - CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, grant-token-independent recovery: Task 4.
-- Canonical workloads, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
-- Production recurrence attribution and Stage 1 branching: Task 6.
+- Canonical workloads, Workers Observability acquisition/normalization, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
+- Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
 - Conditional lifecycle DO: Tasks 7-8.
-- Always-required bridge and Worker/DO version skew: Tasks 9-10.
+- Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 exact Production version construction/rollout.
 - Type-only + runtime DO equivalence: Task 9.
 - Preflight terminalization/fresh measurement operation: Task 10.
-- Operations/rollback/secret teardown: Tasks 11-12.
-- Stage 2 exact candidate promotion and distinct hardening version: Task 12.
+- Operations, exact telemetry/version-config runbook, rollback, and secret teardown: Tasks 11-12.
+- Stage 2 exact candidate promotion, full Phase-2-active restart after lifecycle FAIL, and distinct hardening version: Task 12.
 
 No spec section intentionally authorizes Workers Paid, direct DO storage mutation, D1 quota authority, public CPU-gate routes, or source implementation before this plan is separately reviewed.
 
@@ -1229,5 +1642,5 @@ The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 
 
 ### Proportion / task boundaries
 
-The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass.
+The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements the telemetry producer/reducer seam; Task 10 implements deterministic Production version construction. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
 
