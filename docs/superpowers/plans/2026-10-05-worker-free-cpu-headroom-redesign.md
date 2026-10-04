@@ -571,6 +571,7 @@ Define this exact normalized JSONL record:
 ```ts
 interface RelayCpuPlatformRecord {
   readonly eventId: string;
+  readonly requestId: string;
   readonly eventTimestampMs: number;
   readonly scriptName: string;
   readonly scriptVersionId: string;
@@ -579,7 +580,6 @@ interface RelayCpuPlatformRecord {
   readonly eventType: string;
   readonly routeDiscriminator: string;
   readonly executionModel: "stateless";
-  readonly requestId?: string;
 }
 ```
 
@@ -595,6 +595,70 @@ outputPath
 ```
 
 plus `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` from the environment.
+
+The `view="invocations"` response is normalized **per invocation group**, never per raw event:
+
+```text
+response.invocations:
+  <groupRequestId>:
+    [event, event, ...]
+
+one group
+  -> find authoritative Worker CPU event
+  -> exactly one RelayCpuPlatformRecord
+```
+
+The map key `groupRequestId` is the canonical platform invocation identity and becomes `RelayCpuPlatformRecord.requestId`.
+
+An event is an authoritative Worker CPU event for that group only when it contains all of:
+
+```text
+$workers.cpuTimeMs
+$workers.outcome
+$workers.scriptName
+$workers.scriptVersion.id
+$workers.executionModel
+$workers.eventType
+platform event timestamp
+```
+
+and the event matches the expected:
+
+```text
+scriptName
+ScriptVersion
+executionModel=stateless
+windowStartMs <= platform timestamp < windowEndMs
+```
+
+Application `octg.relay_invocation` start/finish markers are supplementary only. A marker without the authoritative Worker CPU fields is never eligible to become a `RelayCpuPlatformRecord`.
+
+Per-group cardinality is exact:
+
+```text
+0 authoritative CPU events
+  -> BLOCKED / INCOMPLETE
+
+exactly 1 authoritative CPU event
+  -> exactly 1 RelayCpuPlatformRecord
+
+>1 authoritative CPU events
+  -> exact duplicates with the same eventId and byte-for-byte-equivalent normalized authoritative fields may collapse to one
+  -> any other multiplicity/conflict is BLOCKED / INCOMPLETE
+```
+
+The implementation MUST NOT select an arbitrary first/last CPU-bearing event.
+
+Request identity consistency is exact. When present on any event in the invocation group:
+
+```text
+$metadata.requestId == groupRequestId
+$workers.requestId == groupRequestId
+```
+
+Any contradiction is `BLOCKED / INCOMPLETE`, including contradictions on supplementary marker events.
+
+`normalizedInvocationCount` means the number of invocation groups that successfully normalize to exactly one `RelayCpuPlatformRecord`. It is never raw event count.
 
 Tests must pin:
 
@@ -618,6 +682,14 @@ Tests must pin:
 - any in-scope platform record with `$workers.truncated=true` is `BLOCKED`;
 - exact duplicate `eventId` records are deterministically de-duplicated once; conflicting duplicates are `BLOCKED`;
 - HTTP/API failure, `success=false`, malformed response, or query parse failure is `BLOCKED`.
+- one invocation group containing one CPU event plus start/finish markers normalizes to exactly one CPU record;
+- a marker event without `$workers.cpuTimeMs` never becomes the CPU record;
+- zero authoritative CPU-bearing events in a group => `BLOCKED / INCOMPLETE`;
+- two conflicting CPU-bearing events in one group => `BLOCKED / INCOMPLETE`;
+- an exact duplicate of the same CPU event ID with byte-for-byte-equivalent authoritative fields de-duplicates to one record;
+- two invocation groups containing many raw events produce `normalizedInvocationCount == 2`;
+- `groupRequestId != $metadata.requestId` when metadata request ID is present => `BLOCKED / INCOMPLETE`;
+- `groupRequestId != $workers.requestId` when Worker request ID is present => `BLOCKED / INCOMPLETE`.
 
 Pagination is exact:
 
@@ -670,6 +742,8 @@ aggregate.sampleInterval == 1
 aggregate.value is a non-negative integer
 platformInvocationCount = aggregate.value
 platformInvocationCount == normalizedInvocationCount
+  # normalizedInvocationCount = successfully normalized invocation-group count,
+  # not raw event count
 paginationComplete == true
 truncationObserved == false
 ```
@@ -736,6 +810,10 @@ Assert:
 - `sampleInterval>1`, missing sampling metadata, or unverifiable sampling metadata => BLOCKED unless a directly observed CPU violation already makes the series FAIL;
 - `head_sampling_rate=1` with API `sampleInterval>1` => BLOCKED;
 - `platformInvocationCount != normalizedInvocationCount` when `sampleInterval=1` => BLOCKED;
+- `platformInvocationCount == normalizedInvocationCount` compares the calculation result against normalized invocation-group count, never against raw event count;
+- one CPU event + start marker + finish marker in one group contributes exactly one normalized record;
+- zero CPU-bearing events or conflicting multiple CPU-bearing events in any in-scope group => BLOCKED;
+- canonical group/request identity contradiction => BLOCKED;
 - a sampled `exceededCpu` record may still make the series FAIL because a direct gate violation is observed, but sampled/incomplete telemetry can never produce PASS.
 
 - [ ] **Step 4: Write RED runner serialization tests**
@@ -764,7 +842,7 @@ Expected RED: files/exports do not exist.
 
 - [ ] **Step 6: Implement workload, telemetry, and evidence modules**
 
-`relay-cpu-telemetry.mjs` performs the programmatic Observability query and normalization; `relay-cpu-evidence.mjs` remains pure and performs no network access.
+`relay-cpu-telemetry.mjs` performs the programmatic Observability query and group-aware normalization: iterate `response.invocations` by map entry, validate canonical request identity, select exactly one authoritative CPU event under the cardinality rules above, and emit exactly one normalized record per successful invocation group. `relay-cpu-evidence.mjs` remains pure and performs no network access.
 
 The driver writes only a protected run ledger containing safe identifiers/timestamps/counts. It never writes request bodies, grant tokens, client keys, API tokens, or bearer values.
 
@@ -817,7 +895,7 @@ node --test \
 npm run test:scripts
 ```
 
-Expected GREEN: workload, mocked-API telemetry normalization/pagination, pure reducer, and runner-control tests pass without live network access.
+Expected GREEN: workload, mocked grouped-invocation normalization/cardinality/identity tests, pagination/sampling tests, pure reducer, and runner-control tests pass without live network access.
 
 - [ ] **Step 10: Commit boundary**
 
@@ -1845,7 +1923,7 @@ Issue #121 is close-eligible only when the design's complete completion criteria
 - Exact shared lifecycle/control contracts and shard identity: Task 2.
 - Read-only canonical quota inspection: Task 3.
 - CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, grant-token-independent recovery: Task 4.
-- Canonical workloads, exact Workers Observability invocation/completeness query IDs, `chartType="aggregate"`, Bearer-only `Workers Observability Write` API Token auth, sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
+- Canonical workloads, exact Workers Observability invocation/completeness query IDs, grouped invocation -> exactly one authoritative CPU record normalization, canonical request-identity checks, `chartType="aggregate"`, Bearer-only `Workers Observability Write` API Token auth, sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
 - Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
 - Conditional lifecycle DO: Tasks 7-8.
 - Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 complete base-config-preserving Production version construction, secret-presence verification, and rollout.
@@ -1862,5 +1940,5 @@ The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 
 
 ### Proportion / task boundaries
 
-The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition with exact queryId/chartType/auth contracts plus platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
+The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition with exact queryId/chartType/auth contracts, grouped invocation cardinality/identity normalization, and platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
 
