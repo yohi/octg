@@ -721,7 +721,7 @@ git commit -m "feat: add relay grant lifecycle controller"
 
 ---
 
-### Task 8 (conditional): Move lifecycle callbacks behind the DO and add Preview/Production v4 configuration
+### Task 8 (conditional): Move lifecycle callbacks behind the DO and synchronize Preview routing
 
 **Condition:** Run only after Task 7.
 
@@ -733,7 +733,6 @@ git commit -m "feat: add relay grant lifecycle controller"
 - Modify: `scripts/preview-worker-config.mjs`
 - Modify: `scripts/preview-worker-config.test.mjs`
 - Modify: `scripts/preview-workflow.test.mjs`
-- Modify: `scripts/deploy-production-workflow.test.mjs`
 
 **Interfaces:**
 - Consumes: Task 7 lifecycle DO.
@@ -769,7 +768,7 @@ Task 7 owns the exact Production binding and append-only v4 migration. This task
 
 ```bash
 npm test -w apps/gateway-worker -- relay-callback.test.ts
-node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs scripts/deploy-production-workflow.test.mjs
+node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs
 ```
 
 - [ ] **Step 4: Implement minimal offload path/config**
@@ -787,7 +786,7 @@ node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test
 - [ ] **Step 6: Commit boundary**
 
 ```bash
-git add apps/gateway-worker/src/relay-callback.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-callback.test.ts scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs scripts/deploy-production-workflow.test.mjs
+git add apps/gateway-worker/src/relay-callback.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-callback.test.ts scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs
 git commit -m "feat: offload relay lifecycle callbacks conditionally"
 ```
 
@@ -917,18 +916,35 @@ git commit -m "build: add Durable Object compatibility manifest"
 
 - [ ] **Step 1: Write RED command-construction tests**
 
-Pin current Wrangler command forms:
+Pin the non-interactive Wrangler command shapes:
 
 ```text
-wrangler deploy
-wrangler versions upload
-wrangler versions deploy <bridge-id>@100% <candidate-id>@0%
-wrangler versions secret delete OCTG_RELAY_CPU_GATE_AUTH_TOKEN
+npx wrangler deploy
+  --config apps/gateway-worker/wrangler.jsonc
+  --keep-vars
+  --strict
+  --secrets-file <protected-bridge-secrets-file>
+
+npx wrangler versions upload
+  --config apps/gateway-worker/wrangler.jsonc
+  --keep-vars
+  --strict
+  --secrets-file <protected-candidate-secrets-file>
+
+npx wrangler versions deploy
+  <bridge-id>@100%
+  <candidate-id>@0%
+  --config apps/gateway-worker/wrangler.jsonc
+  --yes
+
+npx wrangler versions secret delete
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN
+  --config apps/gateway-worker/wrangler.jsonc
 ```
 
-and reject the non-versioned `wrangler secret delete` in this rollout.
+The bridge secrets file contains the existing Production Worker secrets and no CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Both are created as mode 0600 temporary files, are never printed, and are removed on every exit path.
 
-Every generated remote command must retain `--config apps/gateway-worker/wrangler.jsonc` and required account/worker context without placing secret values on the command line.
+Reject the non-versioned `wrangler secret delete` in this rollout. Do not place secret values in command arguments or logs.
 
 - [ ] **Step 2: Write RED bridge/candidate config tests**
 
@@ -970,7 +986,7 @@ node --test scripts/relay-cpu-rollout.test.mjs scripts/deploy-production-workflo
 
 - [ ] **Step 5: Implement rollout validation**
 
-Before candidate upload, compare bridge/candidate `do-compatibility-manifest` and fail on any applicable mismatch.
+Before candidate upload, generate manifests from the exact bridge/candidate checked-out inputs and fail on any root, `contractSha256`, or runtime bundle digest mismatch. This implementation keeps the code artifact identical and expresses bridge/candidate routing differences only through versioned bindings/variables.
 
 Before Stage 2 preflight, verify current deployment membership is exactly bridge 100% + candidate 0%.
 
