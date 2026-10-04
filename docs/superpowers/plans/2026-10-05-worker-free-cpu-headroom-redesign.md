@@ -1010,6 +1010,8 @@ Phase 2 inactive uses `reconcile-unused`. Phase 2 active accepts a normal settle
 
 Preflight request IDs and invocations are excluded from measurement windows/counts.
 
+The first Stage 2 measurement fixture MUST use a newly generated runner-owned `requestId` distinct from the compatibility-preflight `requestId`; the runner test must assert that the two IDs differ.
+
 - [ ] **Step 7: GREEN**
 
 ```bash
