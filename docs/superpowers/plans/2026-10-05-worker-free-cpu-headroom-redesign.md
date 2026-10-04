@@ -656,8 +656,10 @@ No commit is required for raw runtime evidence. Preserve only sanitized aggregat
 **Files:**
 - Create: `apps/gateway-worker/src/relay-grant-lifecycle-controller.ts`
 - Create: `apps/gateway-worker/test/relay-grant-lifecycle-controller.test.ts`
+- Create: `scripts/relay-do-config.test.mjs`
 - Modify: `apps/gateway-worker/src/index.ts`
 - Modify: `apps/gateway-worker/test/env.d.ts`
+- Modify: `apps/gateway-worker/wrangler.jsonc`
 
 **Interfaces:**
 - Consumes: Task 2 `RelayGrantLifecycleDispatchInput/Result`, `relayGrantLifecycleShardName`; existing grant verification/parsers; QuotaController lifecycle RPCs.
@@ -685,29 +687,35 @@ For activation/renewal/terminal:
 - QuotaController throw -> `internal_error`;
 - no durable lifecycle state is written by the lifecycle DO itself.
 
-- [ ] **Step 3: Run RED**
+- [ ] **Step 3: Write RED binding/migration test**
+
+Create `scripts/relay-do-config.test.mjs` to parse `apps/gateway-worker/wrangler.jsonc` and require the exact Worker-local binding `RELAY_GRANT_LIFECYCLE_CONTROLLER -> RelayGrantLifecycleController`, no `namespace_id`, and append-only migration `v4` with `new_sqlite_classes: ["RelayGrantLifecycleController"]`. v1-v3 must remain unchanged and ordered before v4.
+
+- [ ] **Step 4: Run RED**
 
 ```bash
 npm test -w apps/gateway-worker -- relay-grant-lifecycle-controller.test.ts
+node --test scripts/relay-do-config.test.mjs
 ```
 
-Expected RED: class/module/export missing.
+Expected RED: class/export/binding/migration are missing.
 
-- [ ] **Step 4: Implement minimum DO**
+- [ ] **Step 5: Implement minimum DO plus binding/migration**
 
-The class may call QuotaController; it must not own grant/quota/idempotency/conflict state.
+The class may call QuotaController; it must not own grant/quota/idempotency/conflict state. Add the exact local binding and append-only v4 migration so the Cloudflare Vitest pool can instantiate the class. This repository change does not deploy the migration.
 
-- [ ] **Step 5: GREEN**
+- [ ] **Step 6: GREEN**
 
 ```bash
 npm test -w apps/gateway-worker -- relay-grant-lifecycle-controller.test.ts
+node --test scripts/relay-do-config.test.mjs
 npm run typecheck -w apps/gateway-worker
 ```
 
-- [ ] **Step 6: Commit boundary**
+- [ ] **Step 7: Commit boundary**
 
 ```bash
-git add apps/gateway-worker/src/relay-grant-lifecycle-controller.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-grant-lifecycle-controller.test.ts apps/gateway-worker/test/env.d.ts
+git add apps/gateway-worker/src/relay-grant-lifecycle-controller.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-grant-lifecycle-controller.test.ts apps/gateway-worker/test/env.d.ts apps/gateway-worker/wrangler.jsonc scripts/relay-do-config.test.mjs
 git commit -m "feat: add relay grant lifecycle controller"
 ```
 
@@ -722,7 +730,6 @@ git commit -m "feat: add relay grant lifecycle controller"
 - Modify: `apps/gateway-worker/src/relay-auth.ts`
 - Modify: `apps/gateway-worker/src/index.ts`
 - Modify: `apps/gateway-worker/test/relay-callback.test.ts`
-- Modify: `apps/gateway-worker/wrangler.jsonc`
 - Modify: `scripts/preview-worker-config.mjs`
 - Modify: `scripts/preview-worker-config.test.mjs`
 - Modify: `scripts/preview-workflow.test.mjs`
@@ -754,22 +761,9 @@ and does not call Worker-side grant HMAC verification or lifecycle JSON parsers.
 
 With offload=false prove old callback behavior is byte/status compatible.
 
-- [ ] **Step 2: Write RED migration/config tests**
+- [ ] **Step 2: Write RED Preview/bridge routing config tests**
 
-Pin exact binding/class:
-
-```text
-RELAY_GRANT_LIFECYCLE_CONTROLLER
-RelayGrantLifecycleController
-```
-
-and exact append-only migration:
-
-```json
-{ "tag": "v4", "new_sqlite_classes": ["RelayGrantLifecycleController"] }
-```
-
-Preview config must include a Preview-local binding with no Production namespace ID.
+Task 7 owns the exact Production binding and append-only v4 migration. This task proves Preview config includes the same class as a Preview-local binding with no Production namespace ID, preserves v1-v4 migration order, and enforces the offload toggle: absent/`false` keeps Worker-side lifecycle handling, `true` dispatches to the lifecycle DO, any other value fails closed.
 
 - [ ] **Step 3: Run RED**
 
@@ -793,7 +787,7 @@ node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test
 - [ ] **Step 6: Commit boundary**
 
 ```bash
-git add apps/gateway-worker/src/relay-callback.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-callback.test.ts apps/gateway-worker/wrangler.jsonc scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs scripts/deploy-production-workflow.test.mjs
+git add apps/gateway-worker/src/relay-callback.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-callback.test.ts scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs scripts/deploy-production-workflow.test.mjs
 git commit -m "feat: offload relay lifecycle callbacks conditionally"
 ```
 
