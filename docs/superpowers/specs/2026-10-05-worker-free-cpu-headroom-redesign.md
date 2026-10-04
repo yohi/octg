@@ -967,8 +967,31 @@ bridge/candidate do-compatibility-manifest = exact match
 bridge QuotaController exposes candidate-compatible CPU-gate RPCs
 ```
 
-Then, outside all CPU measurement windows, run a bounded control smoke through
-the exact candidate version override:
+Then, outside all CPU measurement windows, run one bounded compatibility
+preflight operation through the exact candidate version override.
+
+The preflight operation uses a fresh runner-owned request ID and is **not**
+reused as Stage 2 CPU measurement evidence.
+
+The common sequence is:
+
+```text
+candidate override confirmed
+    ->
+CPU-gate setup(preflight requestId)
+    ->
+operation-inspection proves canonical CPU-gate fixture
+    ->
+required compatibility smoke
+    ->
+terminalize preflight fixture
+    ->
+operation-inspection proves terminal state and no active lease
+    ->
+only then Stage 2 CPU measurement may begin
+```
+
+For Phase 2 inactive, the exact control smoke is:
 
 ```text
 candidate Worker
@@ -976,7 +999,23 @@ candidate Worker
   -> CPU-gate snapshot / setup / operation inspection
 ```
 
-The smoke MUST succeed before Stage 2 begins.
+After the smoke, call:
+
+```text
+reconcile-unused(preflight pool, preflight requestId)
+```
+
+and require:
+
+```text
+kind = fixture
+cpuGateFixture = true
+state = reconciled_unused
+requestState = released
+activeLease = false
+```
+
+before the preflight operation is closed.
 
 When Phase 2 is active, additionally prove:
 
@@ -988,10 +1027,41 @@ candidate Worker
   -> QuotaController
 ```
 
-with a bounded CPU-gate fixture/control smoke outside the measurement windows.
+with the same preflight fixture outside the CPU measurement windows.
+
+If the lifecycle smoke has already completed the fixture through the normal
+terminal callback path, require the canonical terminal inspection instead:
+
+```text
+kind = fixture
+cpuGateFixture = true
+state = settled
+requestState = settled
+actualTokens = 0
+activeLease = false
+```
+
+and perform no additional reconcile mutation.
+
+If the Phase-2-active control smoke leaves the fixture in any non-terminal
+CPU-gate state, use the existing protected
+`reconcile-unused(preflight pool, preflight requestId)` recovery seam and
+require `reconciled_unused / released / activeLease=false`.
+
+The compatibility-preflight request ID, setup invocation, callback invocations,
+cleanup invocation, and inspections are all excluded from Stage 2 CPU series
+measurement windows and sample counts.
+
+Stage 2 CPU measurement MUST NOT begin while any compatibility-preflight
+CPU-gate operation is non-terminal.
+
+The first Stage 2 measurement fixture is therefore a fresh runner-owned
+operation created only after the preflight operation is authoritative terminal
+or absent.
 
 Failure is `BLOCKED / INCOMPLETE`; it is not repaired by weakening the CPU
-gate or bypassing the Durable Object path.
+gate, reusing the preflight fixture as measurement evidence, or bypassing the
+Durable Object path.
 
 ### Bridge rollback baseline
 
@@ -1795,7 +1865,7 @@ maxInFlight >= 3
 It does not require `activeLeaseCount=0` and does not use global counter
 equality as Stage 2 PASS evidence.
 
-Normal Production traffic remains active on the bridge/stable version and may
+Normal Production traffic remains active on the Stage 2 compatibility bridge and may
 legitimately change:
 
 - `confirmedTokens`;
@@ -2327,6 +2397,27 @@ candidate Worker -> bridge-compatible CPU-gate inspection/setup succeeds
 When Phase 2 is active, a bounded lifecycle callback control smoke is also
 required.
 
+Compatibility-preflight terminalization MUST also be tested:
+
+```text
+Phase 2 inactive:
+setup/inspection smoke
+  -> reconcile-unused(preflight requestId)
+  -> reconciled_unused / released / activeLease=false
+
+Phase 2 active:
+lifecycle control smoke
+  -> normal terminal settled state
+  OR recovery reconcile-unused
+  -> terminal canonical state / activeLease=false
+
+all modes:
+compatibility preflight leaves no non-terminal CPU-gate fixture
+Stage 2 measurement cannot begin while preflight operation is non-terminal
+preflight invocations are outside measurement windows and sample counts
+first Stage 2 measurement fixture uses a fresh runner-owned requestId
+```
+
 ### Measurement-correlation tests
 
 Test that platform telemetry alone can classify every required series using:
@@ -2400,6 +2491,9 @@ Test the exact Production canary protocol:
 - cleanup never writes Durable Object storage directly;
 - no new setup operation begins until the previous request ID is authoritative
   not-found or terminal;
+- compatibility-preflight setup/inspection/callback/cleanup operations are excluded from all Stage 2 CPU sample windows;
+- compatibility-preflight fixture is canonical terminal with no active lease before Stage 2 measurement starts;
+- the first Stage 2 measurement setup uses a fresh runner-owned request ID rather than reusing the preflight fixture;
 - every CPU-gate request is accounted by runner-owned request ID plus canonical
   terminal inspection, not by global `requestCount` delta.
 
@@ -2478,6 +2572,10 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - The version override is treated only as stateless incoming Worker identity and never as proof of Durable Object code version.
 - Stage 2 preflight proves candidate Worker -> bridge-compatible QuotaController control RPCs before any CPU measurement window.
 - When Phase 2 is active, Stage 2 preflight also proves candidate Worker -> lifecycle DO -> QuotaController control flow before measurement.
+- The compatibility-preflight CPU-gate operation is terminalized and canonically inspected before any Stage 2 CPU measurement window begins.
+- Phase-2-inactive preflight ends as `reconciled_unused / released / activeLease=false`.
+- Phase-2-active preflight ends either as normal `settled / settled / actualTokens=0 / activeLease=false` or, when recovery is required, `reconciled_unused / released / activeLease=false`.
+- No compatibility-preflight invocation is counted as Stage 2 CPU evidence, and the first measurement fixture uses a fresh runner-owned request ID.
 - Gradual rollout explicitly permits bridge/candidate Worker and DO version skew while requiring forward/backward-compatible RPC semantics.
 - Stage 2 quota/capacity inspection is defined by exact read-only QuotaController RPCs and protected Worker routes.
 - Stage 2 PASS does not depend on equality of global Production quota counters that normal traffic may legitimately change.
@@ -2491,7 +2589,7 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - CPU-gate control uses the separate OCTG_RELAY_CPU_GATE_AUTH_TOKEN; absent or invalid secret disables all CPU-gate control routes fail-closed.
 - The Production CPU-gate secret remains on the exact CPU-tested candidate through its 100% rollout acceptance, then is removed only to create the separate post-gate hardening version.
 - Stage 2 setup creates grants only through QuotaController.admitRelay.
-- Canary inspection exposes no normal-user request list and requires a verified grant credential.
+- CPU-gate operation inspection exposes no normal-user request details, requires authenticated CPU-gate control access plus the runner-owned pool/requestId recovery identity, and returns fixture details only when canonical QuotaController state proves `cpuGateFixture=true`.
 - reconcile-unused requires canonical cpuGateFixture=true before mutation and then uses only existing reconcileRequest(..., "unused") semantics.
 - No CPU-gate route performs direct Durable Object storage mutation.
 - Setup mutation identity is known to the runner before mutation and uses exactly one runner-generated request ID.
