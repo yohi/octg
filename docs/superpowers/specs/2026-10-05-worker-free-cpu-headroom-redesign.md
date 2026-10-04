@@ -1019,8 +1019,8 @@ export interface RelayCpuGateControllerOperations {
 
 `QuotaController` implements exactly these two additional read-only RPCs.
 
-The existing `getRelayCpuGateGrantState(requestId)` concept is superseded by
-`getRelayCpuGateGrantInspection(requestId)`; implementation does not add both.
+The existing The earlier state-only inspection concept is superseded. The only canary-specific
+read-only RPC is `getRelayCpuGateGrantInspection(requestId)`.
 
 #### Snapshot authority
 
