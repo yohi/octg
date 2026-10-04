@@ -874,10 +874,10 @@ The exact Worker secret is:
 OCTG_RELAY_CPU_GATE_AUTH_TOKEN
 ```
 
-It is a bearer credential with the same 32-256 printable-ASCII shape as the
-relay service bearer, but it is a **different credential and trust class**.
+It has the same 32-256 printable-ASCII shape as the relay service bearer, but
+it is a different credential and trust class.
 
-Ownership is normative:
+Credential ownership is normative:
 
 ```text
 OCTG_RELAY_CONTEXT_HMAC_KEY
@@ -886,33 +886,83 @@ OCTG_RELAY_CONTEXT_HMAC_KEY
   -> never Deno
 
 OCTG_RELAY_SERVICE_AUTH_TOKEN
-  -> existing Deno -> Worker relay callbacks
-  -> not used for CPU-gate control
+  -> Worker
+  -> Deno relay runtime
+  -> protected Stage 2 gate runner
+  -> lifecycle callback Authorization only
 
 OCTG_RELAY_CPU_GATE_AUTH_TOKEN
   -> Worker + protected Stage 2 gate runner only
+  -> CPU-gate measurement control plane only
   -> never Deno
   -> not a signing key
 ```
 
-The protected gate runner receives
-`OCTG_RELAY_CPU_GATE_AUTH_TOKEN` only from the deployment/CI secret store as
-an ephemeral process secret. It is never stored in the repository, report,
-artifact, shell trace, request fixture, or application log.
+The protected Stage 2 runner receives both bearer credentials only from the
+deployment/CI secret store as ephemeral process secrets.
 
-Every `/internal/relay/v1/cpu-gate/*` route requires:
+For the service bearer, Stage 2 use is restricted to the existing exact
+Production callback routes:
 
 ```text
-Authorization: Bearer <OCTG_RELAY_CPU_GATE_AUTH_TOKEN>
+POST /internal/relay/v1/activation
+POST /internal/relay/v1/renewal
+POST /internal/relay/v1/terminal
 ```
 
-using constant-time bearer comparison. Missing, malformed, or mismatched auth
-fails closed with HTTP 401 and no Durable Object call.
+The runner does not use the service bearer on any CPU-gate control route.
+
+For the CPU-gate bearer, use is restricted to:
+
+```text
+/internal/relay/v1/cpu-gate/setup
+/internal/relay/v1/cpu-gate/quota
+/internal/relay/v1/cpu-gate/grant-inspection
+/internal/relay/v1/cpu-gate/reconcile-unused
+```
+
+Neither bearer may be stored in the repository, shell trace, request fixture,
+application log, acceptance report, retained artifact, or long-lived local
+file. The Stage 2 runner discards both when the run ends.
+
+### CPU-gate secret lifecycle
+
+CPU-gate control availability is controlled entirely by
+`OCTG_RELAY_CPU_GATE_AUTH_TOKEN`.
+
+The exact configuration semantics are:
+
+```text
+secret absent
+  -> CPU-gate control surface disabled
+  -> every /internal/relay/v1/cpu-gate/* request returns 404
+  -> no body parsing
+  -> no Durable Object call
+  -> no mutation
+
+secret present but invalid shape
+  -> CPU-gate control surface disabled
+  -> same 404 fail-closed behavior
+
+secret valid
+  -> control surface enabled
+  -> every CPU-gate route requires exact Bearer authentication
+  -> missing/malformed/mismatched Authorization returns 401
+  -> no Durable Object call on authentication failure
+```
+
+Bearer comparison is constant-time.
+
+After Stage 2 acceptance evidence has been collected, the Production
+`OCTG_RELAY_CPU_GATE_AUTH_TOKEN` secret binding is deleted. This disables all
+CPU-gate control routes without changing source revision. Secret removal is an
+environment-specific configuration change and does not invalidate the already
+captured Stage 1/Stage 2 candidate evidence.
 
 The CPU-gate routes are routed before the generic relay callback action parser
-so they cannot be mistaken for normal Deno callback actions.
+so they cannot be mistaken for Deno callback actions.
 
-### Exact read-only QuotaController inspection contract
+### Exact read-only QuotaController inspection contracts
 
 Add the following shared internal types:
 
@@ -940,42 +990,158 @@ export type RelayCpuGateGrantState =
   | "settled"
   | "released"
   | "reconciled_consumed"
-  | "reconciled_unused"
-  | "not_found";
+  | "reconciled_unused";
+
+export type RelayCpuGateGrantInspection =
+  | {
+      readonly kind: "not_found";
+      readonly cpuGateFixture: false;
+    }
+  | {
+      readonly kind: "found";
+      readonly state: RelayCpuGateGrantState;
+      readonly requestState: RequestState | "not_found";
+      readonly reservedTokens: number;
+      readonly upperBoundTokens: number;
+      readonly maxOutputTokens: number;
+      readonly actualTokens: number | null;
+      readonly activeLease: boolean;
+      readonly cpuGateFixture: boolean;
+    };
 
 export interface RelayCpuGateControllerOperations {
   getRelayCpuGateSnapshot(): Promise<RelayCpuGateSnapshot>;
-  getRelayCpuGateGrantState(
+  getRelayCpuGateGrantInspection(
     requestId: string,
-  ): Promise<RelayCpuGateGrantState>;
+  ): Promise<RelayCpuGateGrantInspection>;
 }
 ```
 
 `QuotaController` implements exactly these two additional read-only RPCs.
 
+The existing `getRelayCpuGateGrantState(requestId)` concept is superseded by
+`getRelayCpuGateGrantInspection(requestId)`; implementation does not add both.
+
+#### Snapshot authority
+
 `getRelayCpuGateSnapshot()` derives all fields from the owning
 `quota:<POOL>:<UTC_DAY>` object:
 
-- pool counters and `requestCount` from the canonical pool state;
-- unresolved counts from the canonical unresolved state;
-- `activeLeaseCount` from the canonical in-flight lease state after
-  read-only expiry filtering at `Date.now()`;
+- pool counters and `requestCount` from canonical pool state;
+- unresolved counts from canonical unresolved state;
+- `activeLeaseCount` from canonical in-flight lease state after read-only
+  expiry filtering at `Date.now()`;
 - `maxInFlight` from the same effective `MAX_IN_FLIGHT_REQUESTS`
   resolution used by relay admission;
-- `limit` and `remaining` from the canonical quota state.
+- `limit` and `remaining` from canonical quota state.
 
 The snapshot RPC performs no storage write, including no cleanup write for
 expired leases.
 
-`getRelayCpuGateGrantState(requestId)` reads the canonical relay grant record
-for that request ID and returns only its state or `not_found`. It performs no
-mutation and returns no grant claims, request entry, client ID, model, quota
-metadata, credential, payload, or normal-user request list.
+Snapshot values are **capacity/preflight and diagnostic evidence only**.
+Because normal Production traffic shares the same QuotaController namespace,
+changes in global counters during Stage 2 are not candidate failures.
+
+#### Canary-owned inspection authority
+
+`getRelayCpuGateGrantInspection(requestId)` reads only canonical
+QuotaController storage for that request ID:
+
+- `relay-grant:<requestId>`;
+- `req:<requestId>`;
+- canonical active in-flight leases after read-only expiry filtering.
+
+It returns no payload, prompt, raw credential, key, client ID, model, normal
+request list, or unrelated request state.
+
+The QuotaController environment additionally receives the same four
+non-secret, pool-specific fixture identifiers used by the Worker setup route:
+
+```text
+OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
+OCTG_RELAY_CPU_GATE_STANDARD_MODEL
+OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
+OCTG_RELAY_CPU_GATE_MINI_MODEL
+```
+
+The QuotaController chooses the expected client/model from **its own pool
+identity**. The caller cannot supply or override expected client/model values.
+
+For a found grant, `cpuGateFixture` is true only when all of the following
+canonical facts are true:
+
+```text
+grant.clientId
+  == configured CPU-gate client for this QuotaController pool
+
+grant.model
+  == configured CPU-gate model for this QuotaController pool
+
+grant.pool
+  == this QuotaController pool
+
+grant.admissionUtcDay
+  == this QuotaController utcDay
+
+grant.idempotencyKeyHash
+  == null
+
+grant.admission.reservedTokens
+  == 0
+
+grant.admission.upperBoundTokens
+  == 0
+
+grant.admission.maxOutputTokens
+  == 0
+
+grant.admission.cacheEnabled
+  == false
+
+grant.admission.metadata.estimatedInputTokens
+  == 0
+
+grant.admission.metadata.maxOutputTokens
+  == 0
+
+grant.admission.metadata.inputBytes
+  == 0
+
+grant.admission.metadata.rawBodyBytes
+  == 0
+
+grant.admission.metadata.isToolUse
+  == false
+
+grant.admission.metadata.stream
+  == false
+
+request entry exists
+
+request entry.idempotencyKey
+  == undefined
+
+request entry.tokens
+  == 0
+
+request entry.upperBoundTokens
+  == 0
+
+request entry.reservedTokens
+  == 0
+```
+
+If any condition is false, `cpuGateFixture=false`.
+
+`activeLease` is true only when the canonical active in-flight lease set
+contains this request ID with the grant's exact `leaseGeneration`.
+
+`actualTokens` is the request entry's canonical `actualTokens` when present,
+otherwise `null`.
+
+This inspection performs no mutation.
 
 ### Exact Worker inspection routes
-
-The protected harness reaches the read-only RPCs only through these Worker
-routes.
 
 #### Quota snapshot
 
@@ -983,29 +1149,32 @@ routes.
 GET /internal/relay/v1/cpu-gate/quota
     ?pool=STANDARD|MINI
     &utcDay=YYYY-MM-DD
+Authorization: Bearer <OCTG_RELAY_CPU_GATE_AUTH_TOKEN>
 ```
 
 The Worker:
 
-1. authenticates `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`;
-2. validates `pool` and `utcDay`;
-3. resolves exactly `quota:<POOL>:<UTC_DAY>`;
-4. calls `getRelayCpuGateSnapshot()`;
-5. returns only `RelayCpuGateSnapshot`.
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. validates `pool` and `utcDay`;
+4. resolves exactly `quota:<POOL>:<UTC_DAY>`;
+5. calls `getRelayCpuGateSnapshot()`;
+6. returns only `RelayCpuGateSnapshot`.
 
 No request ID list is exposed.
 
-#### Canary grant state
+#### Canary grant inspection
 
 ```text
-POST /internal/relay/v1/cpu-gate/grant-state
+POST /internal/relay/v1/cpu-gate/grant-inspection
 Content-Type: application/json
+Authorization: Bearer <OCTG_RELAY_CPU_GATE_AUTH_TOKEN>
 ```
 
 Body:
 
 ```ts
-interface RelayCpuGateGrantStateRequestV1 {
+interface RelayCpuGateGrantInspectionRequestV1 {
   readonly version: 1;
   readonly grantToken: string;
 }
@@ -1013,27 +1182,27 @@ interface RelayCpuGateGrantStateRequestV1 {
 
 The Worker:
 
-1. authenticates the CPU-gate bearer;
-2. verifies `grantToken` with the Cloudflare-side
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. verifies `grantToken` with the Cloudflare-side
    `OCTG_RELAY_CONTEXT_HMAC_KEY`;
-3. requires the signed environment to equal the runtime environment;
-4. derives `pool`, `admissionUtcDay`, and `requestId` only from the
-   verified grant claims;
-5. calls that QuotaController's
-   `getRelayCpuGateGrantState(requestId)`;
-6. returns only:
+4. requires the signed environment to equal the runtime environment;
+5. derives `pool`, `admissionUtcDay`, and `requestId` only from verified
+   grant claims;
+6. resolves exactly that QuotaController;
+7. calls `getRelayCpuGateGrantInspection(requestId)`;
+8. returns exactly:
 
 ```ts
-interface RelayCpuGateGrantStateResponseV1 {
+interface RelayCpuGateGrantInspectionResponseV1 {
   readonly version: 1;
-  readonly state: RelayCpuGateGrantState;
+  readonly inspection: RelayCpuGateGrantInspection;
 }
 ```
 
-This prevents the external harness from selecting an arbitrary normal-user
-request ID for inspection. The harness proves ownership of the canary
-inspection target by presenting the valid grant credential returned by the
-CPU-gate setup operation.
+The external harness cannot select an arbitrary request ID. It must present a
+valid signed grant credential, and fixture ownership is decided from canonical
+stored state by QuotaController.
 
 ### Cloudflare-side lifecycle fixture setup
 
@@ -1057,8 +1226,7 @@ interface RelayCpuGateSetupRequestV1 {
 }
 ```
 
-Two non-secret Worker variables identify a dedicated pre-provisioned canary
-identity/model pair for each pool:
+The Worker-owned pool-specific fixture identifiers are:
 
 ```text
 OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
@@ -1067,37 +1235,43 @@ OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
 OCTG_RELAY_CPU_GATE_MINI_MODEL
 ```
 
-Those client IDs must be normal enabled clients and the configured models must
-classify to the requested pool. No policy/model bypass is added to the public
-request path.
+Those client IDs are dedicated enabled CPU-gate clients and the configured
+model for each pair must classify to its requested pool.
 
-For setup, the Worker remains inside the Cloudflare trust boundary and:
+The external request cannot supply a client ID, model, reservation, upper
+bound, cache mode, environment, or signing input.
 
-1. authenticates the CPU-gate bearer;
-2. resolves the requested dedicated canary client/model;
-3. generates a fresh normal relay `requestId`;
-4. builds a valid Production `RelayContextV1` with:
-   - the dedicated canary client ID;
-   - no idempotency key;
-   - runtime environment;
-   - normal context timestamps and nonce;
-5. constructs synthetic metadata with zero estimated input and zero requested
-   output, no tools, no stream, and no request body;
-6. calls the existing authoritative
-   `QuotaController.admitRelay(...)` flow with:
+For setup, the Worker:
+
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. resolves the requested pool's Worker-owned fixture client/model;
+4. verifies that client/model configuration is valid for that pool;
+5. generates a fresh normal relay `requestId`;
+6. builds a valid Production `RelayContextV1` with the dedicated fixture
+   client, no idempotency key, runtime environment, normal timestamps, and a
+   fresh nonce;
+7. constructs synthetic metadata with:
+   - `model` = configured fixture model;
+   - `estimatedInputTokens = 0`;
+   - `maxOutputTokens = 0`;
+   - `inputBytes = 0`;
+   - `rawBodyBytes = 0`;
+   - `isToolUse = false`;
+   - `stream = false`;
+8. calls the existing authoritative `QuotaController.admitRelay(...)`
+   transaction with:
    - `reservedTokens = 0`;
    - `upperBoundTokens = 0`;
    - `maxOutputTokens = 0`;
    - `cacheEnabled = false`;
-7. does **not** write Durable Object storage directly and does not use D1 as a
-   quota authority;
-8. after a successful authoritative admission, builds the normal
-   `RelayGrantCredentialV1` claims from the returned grant and signs the grant
-   credential with `OCTG_RELAY_CONTEXT_HMAC_KEY` inside the Worker;
-9. returns the credential and non-secret routing identity to the protected
-   harness.
-
-The response is exactly:
+   - no raw Idempotency-Key;
+9. performs no direct Durable Object storage mutation and no D1 quota
+   mutation;
+10. after admission, builds normal `RelayGrantCredentialV1` claims from the
+    returned authoritative grant and signs the grant credential with
+    `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
+11. returns:
 
 ```ts
 interface RelayCpuGateSetupResponseV1 {
@@ -1111,94 +1285,113 @@ interface RelayCpuGateSetupResponseV1 {
 }
 ```
 
-This is a measurement-control entry point, but it is **not** a fail-open path:
-the grant is created only by the existing authoritative `admitRelay`
-transaction, which still owns quota/grant/request/in-flight mutation and may
-deny the setup.
+12. the harness immediately calls `grant-inspection` and requires:
 
-The setup route cannot specify arbitrary `clientId`, model, reservation,
-upper bound, cache mode, environment, or signing input. Those values are fixed
-by the design above.
+```text
+kind = found
+cpuGateFixture = true
+state = authorized
+requestState = reserved
+reservedTokens = 0
+upperBoundTokens = 0
+maxOutputTokens = 0
+actualTokens = null
+activeLease = true
+```
 
-The setup invocation occurs outside every CPU acceptance measurement window and
-is never counted toward a required series.
+A setup admission denial is fail-closed and produces no CPU series evidence.
+
+Setup and its inspection occur outside every CPU acceptance measurement window.
 
 ### Why zero reservation is possible here
 
 The ordinary `RelayDecisionController` budget resolver applies a minimum
 safety margin of 256 tokens, or 512 tokens at low remaining ratio. Therefore
-`estimatedInputTokens=0` and `maxOutputTokens=0` do **not** produce a
-zero reservation through the ordinary decision budget path.
+`estimatedInputTokens=0` and `maxOutputTokens=0` do not produce a zero
+reservation through the normal decision budget path.
 
-Stage 2 lifecycle fixture setup does not claim otherwise.
+The CPU-gate setup route deliberately does **not** call that budget resolver.
+It delegates the fixed zero-reservation mutation to the existing authoritative
+`QuotaController.admitRelay` transaction.
 
-Instead it calls the already-authoritative
-`QuotaController.admitRelay` transaction with a fixed zero reservation from
-the protected Cloudflare-side control route. This keeps:
+This does not create a second quota authority:
 
-- quota/grant mutation inside the existing authoritative transaction;
-- Production HMAC signing inside Cloudflare;
-- public/Deno behavior unchanged;
-- normal user quota counters unchanged while the canary grant is live.
+- quota/grant/request/lease writes still occur only inside QuotaController's
+  existing admission transaction;
+- the Worker cannot mutate Durable Object storage directly;
+- D1 remains non-authoritative;
+- Production HMAC signing remains Cloudflare-side;
+- public and Deno relay behavior is unchanged.
 
-No new direct-storage mutation method and no public quota bypass are created.
+### Capacity and shared Production authority
 
-### Capacity guard
-
-The canary may hold **at most one** active canary grant/lease at any time.
-
-Immediately before setup, the harness fetches
-`RelayCpuGateSnapshot` for the target pool/day and requires:
+The CPU-gate runner fetches `RelayCpuGateSnapshot` immediately before setup
+and requires only:
 
 ```text
-activeLeaseCount = 0
 maxInFlight >= 3
 ```
 
-After setup it fetches another snapshot and requires:
+It does **not** require `activeLeaseCount=0` and does not use global counter
+equality as Stage 2 PASS evidence.
 
-```text
-confirmedTokens   unchanged
-reservedTokens    unchanged
-uncertainTokens   unchanged
-activeLeaseCount  = 1
-requestCount      = before + 1
-```
+Normal Production traffic remains active on the bridge/stable version and may
+legitimately change:
 
-If any condition is not proven, Stage 2 stops and the series is
-`BLOCKED / INCOMPLETE`.
+- `confirmedTokens`;
+- `reservedTokens`;
+- `uncertainTokens`;
+- unresolved counts;
+- `activeLeaseCount`;
+- `requestCount`.
 
-Because the setup grant reserves zero tokens, it cannot reduce Production
-remaining-token quota. Because only one canary lease exists and the gate
-requires `maxInFlight >= 3`, at least two configured lease slots remain for
-normal traffic.
+Those changes do not fail the candidate.
+
+The authoritative admission transaction remains responsible for the atomic
+`maxInFlight` check. If normal traffic has consumed capacity before setup,
+`admitRelay` may return `worker_concurrency_exceeded`; the series does not
+start and the attempt is `BLOCKED / INCOMPLETE`, not candidate FAIL.
+
+The CPU-gate control plane creates at most **one** CPU-gate grant at a time.
+Therefore its bounded Production capacity impact is at most one in-flight slot.
+The design does not claim that two normal slots remain continuously during the
+measurement.
 
 ### Lifecycle CPU sampling on the single grant
 
-The same valid grant is used to exercise the three callback classes in order:
+The same valid canary grant is used to exercise the three callback classes in
+order.
+
+The Stage 2 runner calls each existing callback route with:
+
+```text
+Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
+X-OCTG-Relay-Grant: <grantToken>
+Content-Type: application/json
+```
+
+This preserves the exact Production lifecycle callback authentication hot path.
 
 1. **activation series**
    - first valid activation may transition `authorized -> attempted`;
    - repeated valid activation calls may return the existing replay denial;
-   - those responses are expected protocol outcomes and count as successful
-     driver invocations when the exact expected response is observed.
+   - those exact expected responses count as successful driver invocations.
 
 2. **renewal series**
    - grant is already `attempted`;
    - repeated valid renewals operate on the same lease;
-   - concurrency 1/2/3 refers to callback request concurrency, not the number of
-     authoritative grants or leases.
+   - concurrency 1/2/3 is callback request concurrency, not grant count.
 
 3. **terminal series**
    - first terminal report is exactly `settle(totalTokens=0)`;
    - repeated terminal reports use the same terminal fingerprint and exercise
-     the existing idempotent terminal response;
-   - concurrency 1/2/3 again uses the same one grant.
+     existing idempotent terminal handling;
+   - concurrency 1/2/3 again uses the same grant.
 
-The harness holds only the returned grant credential and the CPU-gate bearer.
-It never receives a signing key.
+The runner holds the returned grant credential, CPU-gate bearer, and service
+bearer only for the active measurement run. It never receives a signing key.
 
-For Phase 2-offloaded candidates, the same requests measure the thin stateless
+For Phase 2-offloaded candidates, these requests measure the thin stateless
 Worker path while the lifecycle DO performs trust/semantic work. DO CPU is
 recorded separately and does not substitute for the stateless 5/7/0 gate.
 
@@ -1206,67 +1399,57 @@ recorded separately and does not substitute for the stateless 5/7/0 gate.
 
 The 500-sample Stage 2 CPU matrix sends **no upstream model request**.
 
-Activation in this controlled lifecycle fixture means only that the
-authoritative grant state enters `attempted`; the harness itself performs no
-Gateway B/OpenAI request.
+Activation means only that the authoritative grant reaches `attempted`; the
+gate runner never performs Gateway B/OpenAI traffic.
 
 The terminal outcome is therefore deterministically
-`settle(totalTokens=0)`, not `release`. `release` is never used after
-activation.
+`settle(totalTokens=0)`. `release` is never used after activation.
 
-Any later ordinary end-to-end Production smoke request is a separate rollout
-correctness check, is bounded in count, is accounted as real quota usage, and
-is not part of the 500-sample CPU acceptance evidence.
+Any later ordinary end-to-end Production smoke is a separate rollout
+correctness check, bounded in count and accounted as real quota usage. It is
+not part of the 500-sample CPU acceptance evidence.
 
-### Persistent state impact
+### Canary-owned quota-safety PASS invariant
 
-For every lifecycle measurement group, exactly one zero-reservation canary
-request/grant pair may remain as settled historical state until normal
-day-finalization cleanup.
+Global Production counters are not compared before and after Stage 2.
 
-No Idempotency-Key is used, so no canary idempotency mapping is created.
+For every canary grant, the authoritative
+`getRelayCpuGateGrantInspection(requestId)` result is the quota-safety
+evidence.
 
-The expected authoritative delta for `N` completed lifecycle measurement
-groups is:
+Immediately after setup, PASS requires the setup inspection described above.
 
-```text
-confirmedTokens:        unchanged
-reservedTokens:         unchanged
-uncertainTokens:        unchanged
-unresolved reserved:    unchanged
-unresolved uncertain:   unchanged
-active canary leases:   0 after cleanup
-requestCount:           +N
-settled canary entries: +N
-settled canary grants:  +N
-```
-
-The bounded `requestCount` / settled-record delta is accepted as measurement
-metadata; it does not reduce remaining quota.
-
-### Pre/post state invariant
-
-The protected harness records `RelayCpuGateSnapshot` before setup and after
-every lifecycle group cleanup.
-
-PASS requires:
+After normal terminal completion, the harness calls `grant-inspection` again
+and requires:
 
 ```text
-confirmedTokens_after         == confirmedTokens_before
-reservedTokens_after          == reservedTokens_before
-uncertainTokens_after         == uncertainTokens_before
-unresolvedReserved_after      == unresolvedReserved_before
-unresolvedUncertain_after     == unresolvedUncertain_before
-activeLeaseCount_after        == activeLeaseCount_before
-requestCount_after            == requestCount_before + expectedCanaryGrantCount
+kind = found
+cpuGateFixture = true
+state = settled
+requestState = settled
+reservedTokens = 0
+upperBoundTokens = 0
+maxOutputTokens = 0
+actualTokens = 0
+activeLease = false
 ```
 
-For every canary grant, the harness calls the protected
-`grant-state` route with that grant credential and requires terminal state
-`settled` after the normal `settle(0)` path.
+These canary-owned facts prove that this CPU-gate request:
 
-The harness may keep `requestId` and `grantToken` only in protected
-in-memory/ephemeral-runner state while the group is active. They must not be
+- was admitted with zero reservation;
+- settled with zero actual tokens;
+- released its own lease;
+- did not leave unresolved canary quota state.
+
+Normal Production counter changes caused by unrelated requests do not alter
+this PASS decision.
+
+For every lifecycle measurement group, one zero-reservation canary request and
+grant may remain as terminal historical state until normal day-finalization
+cleanup. No Idempotency-Key mapping is created.
+
+The runner may retain `requestId` and `grantToken` only in protected
+in-memory/ephemeral-runner state while the group is active. They are not
 written to logs or retained artifacts.
 
 ### Exact failure cleanup control
@@ -1290,31 +1473,47 @@ interface RelayCpuGateReconcileUnusedRequestV1 {
 
 The Worker:
 
-1. authenticates the CPU-gate bearer;
-2. verifies the grant credential inside Cloudflare;
-3. derives pool/day/request ID only from verified claims;
-4. reads `getRelayCpuGateGrantState(requestId)`;
-5. accepts this cleanup route only for `attempted` or `uncertain`;
-6. calls the existing authoritative
-   `QuotaController.reconcileRequest(requestId, "unused")`;
-7. re-reads `getRelayCpuGateGrantState(requestId)`;
-8. succeeds only when the canonical relay grant state is
-   `reconciled_unused`.
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. verifies the grant credential with the Cloudflare-side HMAC key;
+4. requires signed environment = runtime environment;
+5. derives pool/day/request ID only from verified claims;
+6. resolves the authoritative QuotaController;
+7. calls `getRelayCpuGateGrantInspection(requestId)`;
+8. requires:
+   - `kind = "found"`;
+   - `cpuGateFixture = true`;
+   - `state = "attempted"` or `state = "uncertain"`;
+9. if any requirement is false, performs **no mutation** and fails closed;
+10. otherwise calls only the existing authoritative
+    `QuotaController.reconcileRequest(requestId, "unused")`;
+11. re-reads `getRelayCpuGateGrantInspection(requestId)`;
+12. succeeds only when:
+    - `cpuGateFixture = true`;
+    - `state = "reconciled_unused"`;
+    - `requestState = "released"`;
+    - `activeLease = false`.
+
+The route cannot reconcile a normal Production grant merely because the caller
+holds a valid grant token. CPU-gate fixture authorization is derived from the
+canonical stored grant/request facts and the QuotaController-owned
+pool-specific canary configuration.
 
 The route never performs direct storage mutation.
 
-Failure handling is therefore exact:
+Failure handling is exact:
 
-- `authorized` -> use the normal terminal callback with `release`;
-- `attempted` or `uncertain` -> use the protected
-  `reconcile-unused` route above, but only because the CPU-gate harness has
-  sent no upstream request;
-- `settled`, `released`, `reconciled_consumed`,
-  `reconciled_unused` -> no cleanup mutation;
-- `not_found` or unverifiable state -> stop and mark
-  `BLOCKED / INCOMPLETE`.
+- `authorized` CPU-gate fixture -> use normal terminal callback `release`
+  with the existing service bearer;
+- `attempted` or `uncertain` CPU-gate fixture -> protected
+  `reconcile-unused`, because this measurement architecture sends no upstream
+  request;
+- terminal CPU-gate fixture -> no cleanup mutation;
+- `cpuGateFixture=false`, `not_found`, invalid token, or unverifiable state
+  -> no mutation and `BLOCKED / INCOMPLETE`.
 
-After cleanup, the full pre/post snapshot invariant must hold before any rerun.
+After failure cleanup, `grant-inspection` must prove the canary-owned terminal
+state before any rerun. Global Production counter equality is not required.
 
 Failure cleanup evidence is not PASS evidence.
 
@@ -1373,8 +1572,10 @@ Requirements:
   identity.
 - An applied migration tag is append-only and must not be deleted or rewritten
   for rollback.
-- Stage 2's protected internal measurement credentials are never exposed to
-  clients or written to logs/artifacts.
+- Stage 2's protected measurement credentials are never exposed to clients or written to logs/artifacts.
+- `OCTG_RELAY_CONTEXT_HMAC_KEY` remains Cloudflare-side only.
+- `OCTG_RELAY_SERVICE_AUTH_TOKEN` may be used by the protected Stage 2 runner only for the existing lifecycle callback routes.
+- `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` enables only the CPU-gate control plane and is removed after Stage 2 acceptance.
 
 ## Rollback compatibility
 
@@ -1502,27 +1703,29 @@ unassignable platform records.
 Test the exact Production canary protocol:
 
 - ingress/decision fixtures stop before `admitRelay`;
-- CPU-gate control uses a dedicated bearer that is not available to Deno;
+- CPU-gate control uses a dedicated bearer that is unavailable to Deno;
+- CPU-gate secret absent or invalid disables every control route with 404 and no DO call;
+- removing the CPU-gate secret after Stage 2 disables the privileged control surface without a source revision change;
 - external harness never receives the Production relay HMAC key;
+- Stage 2 runner receives the existing service bearer only for activation/renewal/terminal callback Authorization;
 - setup grant is created through the existing QuotaController.admitRelay transaction with zero reservation and no idempotency key;
 - setup cannot select arbitrary client/model/reservation/signing claims;
-- at most one canary grant/lease exists at once;
-- read-only snapshot returns canonical token counters, unresolved counts, activeLeaseCount, requestCount, and maxInFlight;
-- grant-state inspection requires a valid grant credential and returns state only;
-- capacity precondition is proven before setup;
+- at most one CPU-gate grant/lease exists at once;
+- snapshot returns canonical aggregate capacity/diagnostic values but global counter equality is not a PASS invariant;
+- maxInFlight >= 3 is checked as preflight evidence;
+- normal Production traffic may change global counters during Stage 2 without failing the candidate;
+- canary inspection derives fixture identity from canonical stored grant/request facts and QuotaController-owned pool configuration;
+- setup inspection requires cpuGateFixture=true, authorized/reserved states, zero admission values, and activeLease=true;
 - concurrency 1/2/3 does not create additional grants;
 - activation then renewal then settle(0) is used;
 - `activate -> release` is never used;
 - repeated terminal report is idempotent;
 - no upstream request is made by the 500-sample CPU matrix;
-- pre/post token and unresolved counters are identical;
-- active lease count returns to baseline;
-- requestCount delta equals the expected number of canary grants;
-- all canary entries/grants finish settled with zero actual tokens;
-- attempted/uncertain cleanup uses the protected reconcile-unused route, which delegates to existing QuotaController.reconcileRequest(requestId, "unused");
+- completion inspection requires cpuGateFixture=true, settled/settled states, actualTokens=0, and activeLease=false;
+- reconcile-unused refuses cpuGateFixture=false and performs no mutation;
+- attempted/uncertain cleanup delegates only to existing QuotaController.reconcileRequest(requestId, "unused");
 - cleanup never writes Durable Object storage directly;
-- failure cleanup stops further measurement and restores the invariant before
-  rerun.
+- failure cleanup stops further measurement until canary-owned terminal state is proven.
 
 ### Runtime CPU gate
 
@@ -1576,13 +1779,20 @@ Issue #121 becomes eligible to close only after all of the following are true:
   version and is targeted by exact version override.
 - Platform metadata proves every Stage 2 sample ran the exact candidate.
 - Stage 2 quota/capacity inspection is defined by exact read-only QuotaController RPCs and protected Worker routes.
-- Stage 2 does not increase Production confirmed/reserved/uncertain token state.
-- Stage 2 has at most one active canary grant/lease and restores active lease
-  state after each group.
+- Stage 2 PASS does not depend on equality of global Production quota counters that normal traffic may legitimately change.
+- Quota safety is proven from canary-owned canonical grant/request/lease inspection.
+- Canary setup inspection proves cpuGateFixture=true, authorized/reserved state, zero reservation/upper-bound/max-output values, and an active matching lease.
+- Canary completion inspection proves cpuGateFixture=true, settled grant/request state, actualTokens=0, and no active matching lease.
+- Stage 2 has at most one CPU-gate canary grant/lease at any time; its capacity impact is bounded to at most one slot.
+- maxInFlight >= 3 remains preflight evidence, but the design makes no continuous free-slot guarantee.
 - Production relay HMAC signing remains Cloudflare-side; neither the external harness nor Deno receives OCTG_RELAY_CONTEXT_HMAC_KEY.
-- Stage 2 setup is authenticated by the separate OCTG_RELAY_CPU_GATE_AUTH_TOKEN and creates grants only through QuotaController.admitRelay.
-- Canary grant-state inspection exposes no normal-user request list and requires a verified grant credential.
-- Attempted/uncertain failure cleanup uses existing reconcileRequest(..., "unused") semantics and no direct storage mutation.
+- The protected Stage 2 runner may use OCTG_RELAY_SERVICE_AUTH_TOKEN only on the existing activation/renewal/terminal callback routes.
+- CPU-gate control uses the separate OCTG_RELAY_CPU_GATE_AUTH_TOKEN; absent or invalid secret disables all CPU-gate control routes fail-closed.
+- The Production CPU-gate secret is removed after Stage 2 acceptance to close the privileged control surface.
+- Stage 2 setup creates grants only through QuotaController.admitRelay.
+- Canary inspection exposes no normal-user request list and requires a verified grant credential.
+- reconcile-unused requires canonical cpuGateFixture=true before mutation and then uses only existing reconcileRequest(..., "unused") semantics.
+- No CPU-gate route performs direct Durable Object storage mutation.
 - Stage 2 sends no upstream model request as part of the 500-sample CPU gate.
 - Any bounded persistent canary records are settled zero-token records and are
   accounted by the expected `requestCount` delta.
