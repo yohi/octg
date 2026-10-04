@@ -515,10 +515,11 @@ git commit -m "feat: add protected relay CPU gate control plane"
   - `WORKLOAD_CLASSES = ["baseline-small","baseline-large","incident-regression-stream","incident-regression-nonstream"]`
   - `CONCURRENCIES = [1,2,3]`
   - `fetchRelayCpuTelemetry(options): Promise<RelayCpuTelemetryExportResult>`
-  - `evaluateCpuSeries(records, expected): RelayCpuSeriesResult`
+  - `evaluateCpuSeries(records, metadata, expected): RelayCpuSeriesResult`
   - executable `npm run gate:relay-cpu -- ...`
   - executable `npm run telemetry:relay-cpu -- ...`
-  - protected normalized platform JSONL consumed by `relay-cpu-evidence.mjs`.
+  - protected normalized platform JSONL consumed by `relay-cpu-evidence.mjs`
+  - protected sidecar telemetry metadata JSON consumed by the reducer.
 
 The only authoritative telemetry producer is the Workers Observability REST API endpoint:
 
@@ -609,7 +610,53 @@ offsetDirection=next
 
 Continue until a subsequent page returns zero new invocation events. A non-empty page without a usable final `$metadata.id`, repeated cursor, or any state where complete retrieval cannot be proven is `BLOCKED`. The producer post-filters timestamps to `windowStartMs <= timestamp < windowEndMs` so adjacent series cannot share one boundary event.
 
-The protected output file is created mode `0600`; raw API responses are not committed.
+The producer also runs exactly one companion **calculations** query using the identical dataset, script, ScriptVersion, executionModel, and half-open timeframe filters as the invocations query:
+
+```text
+view = calculations
+calculationsMode = aggregate
+ignoreSeries = true
+calculation:
+  operator = uniq
+  key = $metadata.requestId
+  keyType = string
+  alias = platform_invocation_count
+```
+
+The calculation response is authoritative for platform-sampling completeness.
+
+PASS-eligible telemetry requires:
+
+```text
+exactly one platform_invocation_count aggregate
+aggregate.sampleInterval == 1
+aggregate.value is a non-negative integer
+platformInvocationCount = aggregate.value
+platformInvocationCount == normalizedInvocationCount
+paginationComplete == true
+truncationObserved == false
+```
+
+A `sampleInterval` greater than 1 means Cloudflare sampling occurred and the population is estimated; it is therefore `BLOCKED / INCOMPLETE` for PASS. Missing/unavailable/non-numeric/unverifiable sampling metadata is also BLOCKED. `head_sampling_rate=1` is necessary configuration but is not sufficient proof of unsampled platform telemetry.
+
+The normalized export sidecar is exact:
+
+```ts
+interface RelayCpuTelemetryExportMeta {
+  readonly version: 1;
+  readonly samplingVerified: boolean;
+  readonly sampleInterval: number | null;
+  readonly platformInvocationCount: number | null;
+  readonly normalizedInvocationCount: number;
+  readonly paginationComplete: boolean;
+  readonly truncationObserved: boolean;
+  readonly queryComplete: boolean;
+}
+```
+
+`samplingVerified=true` is emitted only when all PASS-eligibility conditions above are true.
+
+The protected JSONL and sidecar metadata files are both created mode `0600`; raw API responses are not committed.
 
 - [ ] **Step 3: Write RED evidence-reducer tests**
 
@@ -647,7 +694,12 @@ Assert:
 - wrong ScriptVersion => rejected/not counted and completeness may become BLOCKED;
 - missing/ambiguous route classification => BLOCKED;
 - overlapping required windows => harness rejects the run ledger before evaluation;
-- application `octg.relay_invocation` markers may enrich attribution but are never required for a normalized platform record and never turn incomplete platform telemetry into PASS.
+- application `octg.relay_invocation` markers may enrich attribution but are never required for a normalized platform record and never turn incomplete platform telemetry into PASS;
+- `sampleInterval=1` plus exact platform/normalized invocation count equality is required for ordinary PASS evaluation;
+- `sampleInterval>1`, missing sampling metadata, or unverifiable sampling metadata => BLOCKED unless a directly observed CPU violation already makes the series FAIL;
+- `head_sampling_rate=1` with API `sampleInterval>1` => BLOCKED;
+- `platformInvocationCount != normalizedInvocationCount` when `sampleInterval=1` => BLOCKED;
+- a sampled `exceededCpu` record may still make the series FAIL because a direct gate violation is observed, but sampled/incomplete telemetry can never produce PASS.
 
 - [ ] **Step 4: Write RED runner serialization tests**
 
@@ -706,7 +758,16 @@ and require the observed Worker version to equal the candidate before accepting 
 "telemetry:relay-cpu": "node scripts/relay-cpu-telemetry.mjs"
 ```
 
-The telemetry CLI accepts identifiers/window/output path only; credentials remain environment-only.
+The telemetry CLI accepts identifiers/window/output paths only; credentials remain environment-only.
+
+Exact CLI output arguments:
+
+```text
+--out=<protected-normalized-jsonl>
+--meta-out=<protected-telemetry-meta-json>
+```
+
+Both are required for non-help execution.
 
 - [ ] **Step 9: GREEN**
 
@@ -775,7 +836,8 @@ npm run telemetry:relay-cpu -- \
   --window-start-ms=<closed-window-start> \
   --window-end-ms=<closed-window-end> \
   --execution-model=stateless \
-  --out=<protected-attribution-jsonl>
+  --out=<protected-attribution-jsonl> \
+  --meta-out=<protected-attribution-meta-json>
 ```
 
 If complete retrieval cannot be proven, a required field is absent, or attribution remains ambiguous, record `BLOCKED / INCOMPLETE`; Issue #121 cannot close.
@@ -786,9 +848,9 @@ Remote execution requires explicit authorization.
 
 Run one required workload/concurrency series at a time. For each series the runner records an exact non-overlapping half-open window `[windowStartMs, windowEndMs)`, expected attempt/success counts, candidate ScriptVersion, workload class, invocation class, and concurrency.
 
-- [ ] **Step 4: Acquire authoritative platform telemetry immediately after each closed series**
+- [ ] **Step 4: Acquire authoritative platform telemetry and prove sampling completeness immediately after each closed series**
 
-For every series:
+For every series, the telemetry command performs both the invocation query and the identical-filter companion calculations query before it writes a PASS-eligible export:
 
 ```bash
 npm run telemetry:relay-cpu -- \
@@ -797,10 +859,11 @@ npm run telemetry:relay-cpu -- \
   --window-start-ms=<series-window-start> \
   --window-end-ms=<series-window-end> \
   --execution-model=stateless \
-  --out=<protected-series-jsonl>
+  --out=<protected-series-jsonl> \
+  --meta-out=<protected-series-meta-json>
 ```
 
-No raw telemetry file is added to Git. Query/API failure, incomplete pagination, truncation, missing required platform fields, or missing expected records makes that series `BLOCKED / INCOMPLETE`.
+No raw telemetry file is added to Git. Query/API failure, incomplete pagination, truncation, missing required platform fields, missing expected records, `sampleInterval != 1`, missing/unverifiable sampling metadata, or platform/normalized invocation count mismatch makes that series `BLOCKED / INCOMPLETE` unless a directly observed CPU violation already makes it FAIL.
 
 - [ ] **Step 5: Evaluate each Stage 1 series**
 
@@ -810,6 +873,7 @@ Run:
 node scripts/relay-cpu-evidence.mjs \
   --ledger=<protected-run-ledger> \
   --telemetry=<protected-series-jsonl> \
+  --telemetry-meta=<protected-series-meta-json> \
   --out=<protected-series-summary>
 ```
 
@@ -1095,18 +1159,41 @@ git commit -m "build: add Durable Object compatibility manifest"
 The implementation is fixed to one mechanism:
 
 ```text
-apps/gateway-worker/wrangler.jsonc
-        +
-canonical Production non-secret inputs
-        |
-        +--> temporary bridge Wrangler config
-        |
-        +--> temporary candidate Wrangler config
+generated version config
+=
+complete deep clone of apps/gateway-worker/wrangler.jsonc
++
+complete replacement of vars with canonical Production vars
++
+only explicitly approved Phase-2 routing delta
 ```
 
-`relay-cpu-version-config.mjs` parses the repository base config, copies required invariant bindings/migrations/compatibility settings, and creates **complete** effective Production `vars` maps. It never copies a secret value into either config.
+The generator MUST begin from a complete deep clone of the parsed repository base config. It MUST NOT construct a fresh top-level Wrangler object by copying a hand-maintained allowlist.
 
-Required base-config invariants that must exist and be preserved exactly:
+For every top-level key except `vars`, the generated bridge/candidate configs preserve the base value byte-for-byte after canonical JSON serialization unless this plan explicitly authorizes a change. This automatically preserves current and future base keys, including:
+
+```text
+name
+main
+compatibility_date
+compatibility_flags
+rules
+version_metadata
+observability
+assets
+durable_objects
+migrations
+d1_databases
+triggers
+```
+
+Task 7 may add the approved Phase-2-active lifecycle DO binding/migration to the repository base config before Task 10 runs; Task 10 preserves that resulting base structure.
+
+For `vars`, build one canonical Production map by deep-cloning all existing base `vars`, then replacing every environment-specific key from the canonical Production inputs below and forcing `OCTG_RELAY_ENVIRONMENT=production`. Unknown/future base vars that are not declared version-specific are preserved rather than dropped. The bridge and candidate then receive only the explicitly approved offload delta.
+
+No secret value is ever copied into either generated config.
+
+Required existing base `vars` that must remain present unless explicitly replaced from canonical Production inputs:
 
 ```text
 QUOTA_LIMIT_STANDARD
@@ -1117,12 +1204,9 @@ IN_FLIGHT_LEASE_RENEWAL_MS
 OCTG_UPSTREAM_BASE_URL
 ACCESS_TEAM_DOMAIN
 ACCESS_AUD
-durable_objects bindings
-migrations
-compatibility_date
-compatibility_flags
-observability
 ```
+
+Generic structural preservation is tested separately; this list is not the top-level copy contract.
 
 Required explicit Production inputs, sourced by the Production workflow/operator and rejected when absent/empty:
 
@@ -1180,17 +1264,57 @@ candidate:
 
 No secret value is ever written into generated Wrangler config.
 
-- [ ] **Step 1: Write RED exact-config tests**
+- [ ] **Step 1: Write RED exact-config preservation tests**
+
+Implement the test helper `stripVersionSpecificVars(config)` that removes only the plan-approved version differences:
+
+- `OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD`;
+- no secret values, because secrets never live in Wrangler config.
+
+Build `expectedBaseProductionConfig` as:
+
+1. complete deep clone of the repository base config;
+2. canonical Production `vars` replacement;
+3. no bridge/candidate-specific routing delta.
 
 Prove:
+
+```text
+stripVersionSpecificVars(generatedBridge)
+  deepStrictEqual
+stripVersionSpecificVars(expectedBaseProductionConfig)
+
+stripVersionSpecificVars(generatedCandidate)
+  deepStrictEqual
+stripVersionSpecificVars(expectedBaseProductionConfig)
+```
+
+The tests MUST explicitly include and compare:
+
+```text
+name
+main
+rules
+version_metadata
+observability
+assets
+durable_objects
+migrations
+d1_databases
+triggers
+compatibility_date
+compatibility_flags
+```
+
+and include a synthetic future top-level key in the base-config fixture to prove the generator preserves unknown future keys instead of silently dropping them.
+
+Also prove:
 
 ```text
 bridge OCTG_RELAY_ENVIRONMENT == production
 candidate OCTG_RELAY_ENVIRONMENT == production
 all required Production vars are present
-base quota/max-in-flight/lease/upstream/access settings are preserved
-all DO bindings/migrations/compatibility settings are exact
-no Preview environment/value can survive into a Production version
+no Preview environment/value can survive
 missing required Production input fails before file creation
 
 Phase 2 inactive:
@@ -1199,11 +1323,17 @@ Phase 2 inactive:
 Phase 2 active:
   bridge/candidate normal vars differ only by offload=false/true
 
+observability.enabled == true
+observability.logs.invocation_logs == true
+observability.logs.head_sampling_rate == 1
+
 secret sentinel values never appear in generated config
 secret sentinel values never appear in command arguments
 ```
 
 Also assert generated files are mode `0600`, written only under a protected temporary directory, and removed on every success/failure exit path.
+
+The observability assertions are necessary but do not prove platform sampling absence; Task 5 API `sampleInterval` remains the final sampling authority.
 
 - [ ] **Step 2: Write RED command-construction tests**
 
@@ -1231,16 +1361,56 @@ npx wrangler versions secret delete
   --config <candidate-config>
 ```
 
-The bridge secrets file contains the existing Production Worker secrets and no CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Both are mode `0600`, are never printed, and are deleted on every exit path.
+The bridge secrets file contains the existing Production Worker secrets and omits the CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Because Wrangler secret uploads are additive, **file omission is not proof that the resulting bridge version lacks a pre-existing secret binding**.
+
+Add the exact metadata-only secret presence seam:
+
+```text
+npx wrangler deployments status --json --config <bridge-config>
+  -> determine current 100% Production baseline version ID
+
+npx wrangler versions view <version-id> --json --config <bridge-config>
+  -> extract secret binding names/types only
+  -> never read or print secret values
+```
+
+Before any bridge remote mutation, inspect the current Production baseline version. If `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` is already present, bridge mode is `BLOCKED / INCOMPLETE`; do not continue by merely omitting it from the secrets file.
+
+After bridge deployment, inspect the new bridge version with `versions view --json` and require CPU-gate secret binding **absent**.
+
+After candidate upload, inspect the candidate version and require CPU-gate secret binding **present**.
+
+After versioned hardening deletion, inspect the hardening version and require CPU-gate secret binding **absent**.
+
+Only binding name/type presence is retained in verification output. Secret values are never requested, printed, stored, or compared.
+
+Both protected secrets files are mode `0600`, are never printed, and are deleted on every exit path.
 
 Reject:
 
 - non-versioned `wrangler secret delete`;
 - any `--keep-vars` dependency in Issue #121 bridge/candidate construction;
 - secret values in command arguments/logs;
-- repository base config used directly as a Production bridge/candidate upload config.
+- repository base config used directly as a Production bridge/candidate upload config;
+- treating CPU-gate token omission from a secrets file as proof of secret-binding absence;
+- bridge deployment when the current Production baseline already contains `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`;
+- candidate acceptance when version metadata does not prove the CPU-gate secret binding is present;
+- hardening acceptance when version metadata does not prove the CPU-gate secret binding is absent.
 
-- [ ] **Step 3: Write RED bridge/candidate compatibility tests**
+- [ ] **Step 3: Write RED secret-presence and bridge/candidate compatibility tests**
+
+Using mocked `deployments status --json` / `versions view --json` results, prove:
+
+```text
+bridge construction does not treat omitted secret as proof of absence
+pre-existing CPU-gate secret -> bridge BLOCKED
+verified baseline/bridge absence -> bridge deployment/acceptance allowed
+candidate version metadata -> CPU-gate secret binding present
+hardening version metadata -> CPU-gate secret binding absent
+secret values are never present in normalized verification output
+```
+
+Then prove the existing bridge/candidate compatibility requirements:
 
 Phase 2 inactive:
 
@@ -1304,11 +1474,14 @@ Expected RED: exact Production version generator/rollout contracts do not exist.
 
 Before bridge deployment/candidate upload:
 
-1. generate protected bridge/candidate configs;
-2. validate their effective vars/bindings/migrations;
-3. generate Task 9 manifests using those exact config files;
-4. prove required equivalence/differences;
-5. only then construct remote Wrangler commands.
+1. generate protected bridge/candidate configs from a complete base-config deep clone;
+2. validate their full structural preservation and effective vars/bindings/migrations;
+3. inspect the current Production baseline version and prove CPU-gate secret absence before bridge mutation;
+4. generate Task 9 manifests using those exact config files;
+5. prove required equivalence/differences;
+6. deploy/upload with the exact generated configs;
+7. inspect resulting version metadata and prove bridge absence / candidate presence of the CPU-gate secret binding;
+8. only then permit Stage 2 preflight.
 
 Before Stage 2 preflight, verify active deployment membership is exactly bridge 100% + candidate 0%.
 
@@ -1404,8 +1577,8 @@ HMAC cache
 Document:
 
 - `relay-cpu-version-config.mjs` as the only Issue #121 bridge/candidate Production config constructor;
-- complete Production non-secret var construction and forced `OCTG_RELAY_ENVIRONMENT=production`;
-- Workers Observability REST query endpoint, environment-only API authentication, pagination/completeness rules, normalized platform JSONL, and reducer command order;
+- complete base-Wrangler deep-clone preservation, canonical Production var replacement, forced `OCTG_RELAY_ENVIRONMENT=production`, and metadata-only CPU-gate secret presence/absence verification;
+- Workers Observability REST invocation query plus companion sampling/count calculation, environment-only API authentication, pagination/completeness rules, `sampleInterval == 1` PASS prerequisite, protected normalized platform JSONL + metadata sidecar, and reducer command order;
 - HMAC/service/CPU-gate credential separation;
 - raw platform responses, normalized JSONL, run ledgers, and credentials as protected temporary artifacts that are never committed.
 
@@ -1454,17 +1627,19 @@ Create protected temporary config/secrets/evidence directories with `umask 077`.
 
 - [ ] **Step 2: Generate exact configs and deploy/verify compatibility bridge at 100%**
 
-Regenerate the bridge/candidate configs from canonical current Production inputs immediately before remote use.
+Regenerate the bridge/candidate configs from a complete deep clone of the current repository base config plus canonical current Production inputs immediately before remote use.
+
+Before bridge mutation, run the Task 10 baseline metadata check and require `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` absent from the current Production baseline. If it is present, STOP as `BLOCKED / INCOMPLETE`.
 
 Phase 2 inactive: candidate-compatible QuotaController inspection RPCs, stable normal behavior.
 
 Phase 2 active: same plus append-only v4/full lifecycle DO, offload=false for normal bridge traffic.
 
-Generate/verify the bridge manifest from the exact bridge config, deploy that bridge config, then record bridge ScriptVersion ID and manifest hash.
+Generate/verify the bridge manifest from the exact bridge config, deploy that bridge config, record bridge ScriptVersion ID and manifest hash, then use `versions view --json` to prove the bridge version has no CPU-gate secret binding.
 
 - [ ] **Step 3: Upload the CPU-tested candidate from the exact candidate config and create 100/0 deployment**
 
-Generate/verify the candidate manifest from the exact candidate config and require Task 10 equivalence rules.
+Generate/verify the candidate manifest from the exact candidate config and require Task 10 equivalence rules. After upload, use `versions view --json` to prove the candidate version contains the CPU-gate secret binding before creating the 100/0 deployment.
 
 Then:
 
@@ -1489,10 +1664,12 @@ For every canonical workload/invocation-class/concurrency series:
 
 1. run exactly one measured series;
 2. close and record the exact half-open window `[windowStartMs, windowEndMs)`;
-3. query Workers Observability with `scripts/relay-cpu-telemetry.mjs` for the candidate ScriptVersion and `executionModel=stateless`;
-4. write protected normalized JSONL;
-5. run `relay-cpu-evidence.mjs`;
-6. record PASS / FAIL / BLOCKED before starting the next non-overlapping series.
+3. query Workers Observability invocations for the candidate ScriptVersion and `executionModel=stateless`;
+4. run the identical-filter companion calculations query and require `sampleInterval == 1`;
+5. write protected normalized JSONL plus telemetry metadata sidecar;
+6. require exact `platformInvocationCount == normalizedInvocationCount` for PASS eligibility;
+7. run `relay-cpu-evidence.mjs`;
+8. record PASS / FAIL / BLOCKED before starting the next non-overlapping series.
 
 Executable acquisition/evaluation shape:
 
@@ -1503,17 +1680,19 @@ npm run telemetry:relay-cpu -- \
   --window-start-ms=<series-window-start> \
   --window-end-ms=<series-window-end> \
   --execution-model=stateless \
-  --out=<protected-series-jsonl>
+  --out=<protected-series-jsonl> \
+  --meta-out=<protected-series-meta-json>
 
 node scripts/relay-cpu-evidence.mjs \
   --ledger=<protected-run-ledger> \
   --telemetry=<protected-series-jsonl> \
+  --telemetry-meta=<protected-series-meta-json> \
   --out=<protected-series-summary>
 ```
 
 No upstream model traffic is generated by the 500-sample CPU matrix.
 
-If telemetry pagination/completeness cannot be proven, the series is BLOCKED; do not infer PASS from driver success.
+If pagination/completeness cannot be proven, sampling metadata is missing/unverifiable, `sampleInterval != 1`, or platform/normalized invocation counts differ, the series is BLOCKED; do not infer PASS from driver success. A directly observed 5/7/0 violation may still produce FAIL from incomplete telemetry, but incomplete/sampled evidence never produces PASS.
 
 - [ ] **Step 6: Apply the exact Stage 2 failure transition**
 
@@ -1578,7 +1757,7 @@ Run the Task 10 versioned-secret operation against the exact tested candidate ve
 wrangler versions secret delete OCTG_RELAY_CPU_GATE_AUTH_TOKEN
 ```
 
-Record the new ScriptVersion. Verify:
+Record the new ScriptVersion and inspect it with `versions view --json`; CPU-gate secret binding absence is mandatory. Verify:
 
 ```text
 source revision identical
@@ -1625,10 +1804,10 @@ Issue #121 is close-eligible only when the design's complete completion criteria
 - Exact shared lifecycle/control contracts and shard identity: Task 2.
 - Read-only canonical quota inspection: Task 3.
 - CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, grant-token-independent recovery: Task 4.
-- Canonical workloads, Workers Observability acquisition/normalization, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
+- Canonical workloads, Workers Observability invocation + sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
 - Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
 - Conditional lifecycle DO: Tasks 7-8.
-- Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 exact Production version construction/rollout.
+- Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 complete base-config-preserving Production version construction, secret-presence verification, and rollout.
 - Type-only + runtime DO equivalence: Task 9.
 - Preflight terminalization/fresh measurement operation: Task 10.
 - Operations, exact telemetry/version-config runbook, rollback, and secret teardown: Tasks 11-12.
@@ -1642,5 +1821,5 @@ The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 
 
 ### Proportion / task boundaries
 
-The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements the telemetry producer/reducer seam; Task 10 implements deterministic Production version construction. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
+The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition plus platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
 
