@@ -534,6 +534,22 @@ CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_API_TOKEN
 ```
 
+`CLOUDFLARE_API_TOKEN` MUST be an account-scoped API Token with exactly the Cloudflare permission required by this API path:
+
+```text
+Workers Observability Write
+```
+
+for the target account.
+
+Issue #121 telemetry acquisition uses only:
+
+```http
+Authorization: Bearer <CLOUDFLARE_API_TOKEN>
+```
+
+The implementation MUST NOT generate or accept `X-Auth-Key`, `X-Auth-Email`, Global API Key authentication, or a token CLI argument. A 401/403/API authorization failure is `BLOCKED / INCOMPLETE`; do not switch credential schemes automatically.
+
 The token is never accepted as a CLI argument or written to output.
 
 - [ ] **Step 1: Write RED workload tests**
@@ -582,6 +598,9 @@ plus `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` from the environment.
 
 Tests must pin:
 
+- every telemetry request contains a non-empty top-level `queryId`;
+- the invocation request uses exactly `queryId="octg-relay-cpu-invocations-v1"`;
+- `queryId` is an inline ad-hoc query identifier and is not used to load saved-query parameters;
 - query `view="invocations"`;
 - exact timeframe from `windowStartMs` through `windowEndMs`;
 - dataset `cloudflare-workers`;
@@ -613,10 +632,12 @@ Continue until a subsequent page returns zero new invocation events. A non-empty
 The producer also runs exactly one companion **calculations** query using the identical dataset, script, ScriptVersion, executionModel, and half-open timeframe filters as the invocations query:
 
 ```text
+queryId = octg-relay-cpu-completeness-v1
 view = calculations
-calculationsMode = aggregate
+chartType = aggregate
 ignoreSeries = true
-calculation:
+
+parameters.calculations:
   operator = uniq
   key = $metadata.requestId
   keyType = string
@@ -624,6 +645,22 @@ calculation:
 ```
 
 The calculation response is authoritative for platform-sampling completeness.
+
+The telemetry request mock contract MUST additionally assert:
+
+```text
+invocations queryId == "octg-relay-cpu-invocations-v1"
+calculations queryId == "octg-relay-cpu-completeness-v1"
+calculations chartType == "aggregate"
+calculations calculationsMode is absent
+calculations ignoreSeries == true
+Authorization == "Bearer <env token>"
+X-Auth-Key is absent
+X-Auth-Email is absent
+token CLI argument is absent
+```
+
+Both `queryId` values are deterministic inline ad-hoc identifiers. They do not identify or load saved Cloudflare queries.
 
 PASS-eligible telemetry requires:
 
@@ -808,6 +845,8 @@ git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
 - [ ] **Step 1: Require explicit telemetry authorization and record immutable candidate identity**
 
 Remote Worker execution **and** Workers Observability API queries require explicit authorization for this task.
+
+The telemetry environment MUST provide an account-scoped `CLOUDFLARE_API_TOKEN` with `Workers Observability Write` for the target account. The telemetry producer sends only `Authorization: Bearer <env token>`; Global API Key / `X-Auth-Key` / `X-Auth-Email` authentication is forbidden for Issue #121.
 
 Record source SHA, Worker version/revision, harness fingerprint/version, workload definitions, and CPU threshold `5/7/0`.
 
@@ -1578,7 +1617,7 @@ Document:
 
 - `relay-cpu-version-config.mjs` as the only Issue #121 bridge/candidate Production config constructor;
 - complete base-Wrangler deep-clone preservation, canonical Production var replacement, forced `OCTG_RELAY_ENVIRONMENT=production`, and metadata-only CPU-gate secret presence/absence verification;
-- Workers Observability REST invocation query plus companion sampling/count calculation, environment-only API authentication, pagination/completeness rules, `sampleInterval == 1` PASS prerequisite, protected normalized platform JSONL + metadata sidecar, and reducer command order;
+- Workers Observability REST invocation query plus companion sampling/count calculation, exact ad-hoc query IDs `octg-relay-cpu-invocations-v1` / `octg-relay-cpu-completeness-v1`, `chartType="aggregate"`, environment-only API Token authentication with target-account `Workers Observability Write`, Bearer-only request auth, pagination/completeness rules, `sampleInterval == 1` PASS prerequisite, protected normalized platform JSONL + metadata sidecar, and reducer command order;
 - HMAC/service/CPU-gate credential separation;
 - raw platform responses, normalized JSONL, run ledgers, and credentials as protected temporary artifacts that are never committed.
 
@@ -1622,6 +1661,8 @@ git commit -m "docs: add Worker CPU headroom rollout runbook"
 - [ ] **Step 1: Require explicit Production mutation and telemetry authorization**
 
 Do not execute any remote mutation, measured request, or Workers Observability API query until the user/operator explicitly authorizes it.
+
+Before any telemetry query, require `CLOUDFLARE_API_TOKEN` to be an account-scoped API Token with `Workers Observability Write` for the target account. Use only `Authorization: Bearer <env token>`; do not fall back to Global API Key / email headers on authorization failure.
 
 Create protected temporary config/secrets/evidence directories with `umask 077`.
 
@@ -1804,7 +1845,7 @@ Issue #121 is close-eligible only when the design's complete completion criteria
 - Exact shared lifecycle/control contracts and shard identity: Task 2.
 - Read-only canonical quota inspection: Task 3.
 - CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, grant-token-independent recovery: Task 4.
-- Canonical workloads, Workers Observability invocation + sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
+- Canonical workloads, exact Workers Observability invocation/completeness query IDs, `chartType="aggregate"`, Bearer-only `Workers Observability Write` API Token auth, sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
 - Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
 - Conditional lifecycle DO: Tasks 7-8.
 - Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 complete base-config-preserving Production version construction, secret-presence verification, and rollout.
@@ -1821,5 +1862,5 @@ The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 
 
 ### Proportion / task boundaries
 
-The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition plus platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
+The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition with exact queryId/chartType/auth contracts plus platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order before Task 12 restarts.
 
