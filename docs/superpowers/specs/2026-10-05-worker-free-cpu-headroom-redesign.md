@@ -79,45 +79,56 @@ Phase 1
 Relay HMAC CryptoKey reuse
         |
         v
-CPU measurement
-        |
-        v
-CPU headroom gate
-        |
-        +-- PASS --> Stage 1 Preview gate
-        |               |
-        |               v
-        |            Stage 2 Production-like gate
-        |               |
-        |               v
-        |            rollout
+Stage 1 Preview CPU gate
         |
         +-- lifecycle FAIL
+        |       |
+        |       v
+        |    Phase 2
+        |    RelayGrantLifecycleController
+        |       |
+        |       v
+        |    Stage 1 evidence reset and full re-run
+        |       |
+        +-------+
                 |
                 v
-Phase 2
-RelayGrantLifecycleController
-                |
-                v
-Stage 1 evidence reset and full re-run
-                |
-                v
-Production migration bridge
-                |
-                v
-Final candidate at 0% + version override
-                |
-                v
-Stage 2
-                |
-                v
-rollout
+Stage 1 PASS
+        |
+        v
+Stage 2 Durable Object compatibility bridge
+        |  always required
+        |  Phase 2 inactive: QuotaController CPU-gate RPC compatibility
+        |  Phase 2 active: above + v4 + candidate-compatible lifecycle DO
+        v
+bridge 100% / CPU-tested candidate 0%
+        |
+        v
+Stage 2 compatibility preflight
+        |
+        v
+Stage 2 Production-like CPU gate
+        |
+        v
+roll out exact CPU-tested candidate
+        |
+        v
+post-gate hardening
 ```
 
-Phase 2 is conditional. The system does not add a new Durable Object simply
-because Issue #121 exists. The new lifecycle boundary is introduced only when
-activation, renewal, or terminal fails the approved Worker CPU gate in Stage 1
-or Stage 2.
+Phase 2 remains conditional. The system does not add
+`RelayGrantLifecycleController` simply because Issue #121 exists. The new
+lifecycle boundary is introduced only when activation, renewal, or terminal
+fails the approved Worker CPU gate.
+
+The **Stage 2 Durable Object compatibility bridge is not conditional**. Every
+Stage 2 run uses it because the candidate Worker can call Durable Objects whose
+code version is independently assigned by Cloudflare during a gradual
+deployment.
+
+Throughout this document, **CPU-tested candidate** is the single identity for
+the Worker version whose stateless CPU evidence is collected in Stage 2.
+Earlier wording such as "CPU-tested candidate" is superseded by this term.
 
 ## CPU gate
 
@@ -690,12 +701,93 @@ Duplicate activation/renewal/terminal, stale lease generation, conflicting
 terminal results, and grant expiry after authoritative lookup continue to use
 the existing QuotaController result semantics.
 
-## Phase 2 Durable Object migration bridge
+## Stage 2 Durable Object compatibility bridge
 
-Phase 2 introduces a new Durable Object class lifecycle change. That lifecycle
-change is **not** applied by `wrangler versions upload`.
+Cloudflare gradual deployments can run a Worker request on one version while a
+Durable Object instance is assigned to another version from the same
+deployment. A version override targets the incoming Worker invocation; it does
+not pin the code version of a Durable Object instance reached through an RPC.
 
-### Migration baseline
+Therefore Stage 2 MUST NOT begin directly from the pre-Issue-#121 Production
+stable version.
+
+After Stage 1 PASS and before uploading/targeting the CPU-tested candidate,
+Production is first moved to a **Stage 2 Durable Object compatibility bridge**
+at 100%.
+
+The bridge provisioning deployment is not CPU acceptance evidence.
+
+### Compatibility invariant
+
+The bridge exists to make every Durable Object RPC surface that the CPU-tested
+candidate may call forward/backward compatible before candidate traffic exists.
+
+For the entire gradual rollout, the design permits all physically possible
+Worker/DO version combinations:
+
+```text
+bridge Worker    -> bridge-version QuotaController
+bridge Worker    -> candidate-version QuotaController
+candidate Worker -> bridge-version QuotaController
+candidate Worker -> candidate-version QuotaController
+```
+
+When Phase 2 is active, the candidate Worker may additionally call either a
+bridge-version or candidate-version `RelayGrantLifecycleController`.
+
+Existing QuotaController RPCs MUST NOT be removed, renamed, or given
+behavior-incompatible semantics in either version.
+
+### Bridge Worker behavior
+
+The bridge Worker preserves normal Production request behavior from the
+pre-bridge stable version:
+
+- public Responses ingress behavior is unchanged;
+- normal decision routing is unchanged;
+- normal activation/renewal/terminal callbacks remain on the existing
+  Worker-side lifecycle path;
+- Chat Completions is unchanged;
+- no normal request uses CPU-gate control routes;
+- `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` may be absent, leaving all CPU-gate
+  control routes disabled with 404.
+
+The bridge may add Durable Object exports/RPC implementations required for
+compatibility, but it MUST NOT enable candidate-only normal traffic routing.
+
+### Phase 2 inactive bridge
+
+When HMAC CryptoKey reuse alone passes the lifecycle CPU gate, no lifecycle DO
+migration is required.
+
+The compatibility bridge still MUST contain a QuotaController implementation
+with:
+
+```text
+all existing QuotaController RPCs
+getRelayCpuGateSnapshot()
+getRelayCpuGateGrantInspection(requestId)
+```
+
+The two CPU-gate inspection RPCs have the exact same shared contract and
+canonical semantics as the CPU-tested candidate.
+
+The four non-secret fixture identifiers are available to bridge-version
+QuotaController instances:
+
+```text
+OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
+OCTG_RELAY_CPU_GATE_STANDARD_MODEL
+OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
+OCTG_RELAY_CPU_GATE_MINI_MODEL
+```
+
+No Durable Object lifecycle migration is added in this branch.
+
+### Phase 2 active bridge
+
+If lifecycle offload is required, the compatibility bridge also performs the
+Durable Object class lifecycle migration.
 
 The current legacy migration history is:
 
@@ -705,7 +797,7 @@ v2 TokenizerController
 v3 RelayDecisionController
 ```
 
-If Phase 2 is required, the next migration is exactly:
+The next migration is exactly:
 
 ```text
 tag: v4
@@ -713,90 +805,207 @@ new_sqlite_classes:
   - RelayGrantLifecycleController
 ```
 
-The repository remains on the legacy `migrations` flow for this issue; this
-design does not migrate Wrangler configuration to declarative `exports`.
+The repository remains on the legacy `migrations` flow for this issue.
 
-### Production migration bridge
-
-Before the final CPU candidate can participate in a Production gradual
-deployment, deploy a **post-migration stable-compatible bridge version** with
-ordinary `wrangler deploy`.
-
-The bridge version:
-
-- exports `RelayGrantLifecycleController`;
-- contains binding `RELAY_GRANT_LIFECYCLE_CONTROLLER`;
-- applies migration `v4`;
-- retains all existing Production bindings/secrets;
-- keeps normal activation/renewal/terminal traffic on the existing
-  Worker-side implementation;
-- does not enable lifecycle offload for normal traffic.
-
-The bridge provisioning deployment is not CPU acceptance evidence.
-
-After this deployment, the bridge version is the Production stable version and
-the **only pre-candidate rollback baseline** for Phase 2.
-
-A version earlier than the applied `v4` lifecycle migration is not a valid
-Phase 2 rollback target.
-
-### Final candidate upload
-
-After the bridge is confirmed healthy:
-
-1. Build the final CPU candidate from the exact immutable source revision that
-   passed the current Stage 1.
-2. Keep the already-applied `v4` migration unchanged.
-3. Upload the final candidate with `wrangler versions upload`; this upload must
-   not contain a new Durable Object lifecycle change.
-4. Create a deployment containing exactly:
+Because a Durable Object lifecycle change cannot be introduced by
+`wrangler versions upload`, the Phase-2-active compatibility bridge is
+deployed with ordinary:
 
 ```text
-post-migration bridge stable: 100%
-final CPU candidate:            0%
+wrangler deploy
 ```
 
-5. Verify both version IDs are members of the current deployment before
-   Stage 2 begins.
+The bridge:
 
-The migration bridge revision and the final CPU candidate revision are
-intentionally distinct concepts. The bridge does not need to equal the Stage 1
-candidate. The final CPU candidate does.
+- applies append-only migration `v4`;
+- exports `RelayGrantLifecycleController`;
+- contains binding `RELAY_GRANT_LIFECYCLE_CONTROLLER`;
+- contains the candidate-compatible QuotaController CPU-gate RPCs;
+- retains existing Production bindings/secrets;
+- keeps normal activation/renewal/terminal traffic on the existing Worker-side
+  path;
+- does not route normal bridge traffic through
+  `RelayGrantLifecycleController`.
 
-### Candidate targeting
+After `v4`, no version earlier than the compatibility bridge is a valid
+rollback target for Phase 2.
 
-Every Stage 2 candidate request uses the Cloudflare version override header:
+### Lifecycle DO implementation is not a migration placeholder
+
+When Phase 2 is active, the bridge
+`RelayGrantLifecycleController` MUST be a full candidate-compatible
+implementation, not a placeholder used only to apply migration `v4`.
+
+Its following behavior is identical to the CPU-tested candidate:
+
+```text
+dispatch() signature/result union
+grant HMAC verification semantics
+canonical grant verification
+environment / expiry validation
+verified requestId shard recheck
+callback JSON parsing
+action-specific semantic validation
+grantId / leaseGeneration binding
+QuotaController dispatch
+internal error mapping
+```
+
+Normal bridge traffic does not use this class, but candidate Worker traffic may
+reach a bridge-assigned lifecycle DO during gradual deployment.
+
+### Mechanical DO implementation equivalence
+
+The compatibility bridge and CPU-tested candidate may have different Worker
+source revisions because their normal Worker routing behavior differs.
+
+However, their **DO compatibility artifact** MUST be mechanically identical.
+
+The build/release process produces a deterministic
+`do-compatibility-manifest` for both bridge and candidate. The manifest
+contains SHA-256 digests over the compiled module closure that affects:
+
+```text
+QuotaController
+QuotaController CPU-gate inspection RPCs
+canonical cpuGateFixture predicate
+shared CPU-gate RPC result/input types
+existing QuotaController lifecycle/grant semantics
+shared quota storage/state transition helpers
+
+and, when Phase 2 is active:
+
+RelayGrantLifecycleController
+lifecycle dispatch RPC types
+lifecycle shard algorithm
+grant verification/parsing helpers used by lifecycle DO
+lifecycle -> QuotaController dispatch/error mapping
+```
+
+Bridge and candidate manifests MUST match exactly for every applicable root.
+
+This manifest compares behavior-affecting transitive dependencies, not merely
+top-level source filenames.
+
+A manifest mismatch blocks candidate upload/Stage 2.
+
+### Bridge configuration equivalence
+
+The compatibility bridge and CPU-tested candidate use the same Production:
+
+- QuotaController namespace/binding;
+- relay secrets other than the CPU-gate-only control secret;
+- quota limits;
+- max-in-flight configuration;
+- relay environment;
+- fixture client/model variables;
+- lifecycle DO namespace/binding when Phase 2 is active.
+
+The bridge does not require `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. The
+CPU-tested candidate does require it for Stage 2 control routes.
+
+### CPU-tested candidate upload
+
+Only after the bridge is at 100% and its compatibility verification passes may
+the CPU-tested candidate be uploaded.
+
+The CPU-tested candidate is built from the exact immutable source revision that
+passed Stage 1.
+
+If Phase 2 is active, migration `v4` is already applied by the bridge and the
+candidate upload contains no new Durable Object lifecycle change.
+
+Create a deployment containing exactly:
+
+```text
+Stage 2 compatibility bridge: 100%
+CPU-tested candidate:            0%
+```
+
+Both version IDs MUST be members of the current deployment before Stage 2
+preflight begins.
+
+### Version override responsibility
+
+Every Stage 2 candidate request uses:
 
 ```text
 Cloudflare-Workers-Version-Overrides:
-  <production-worker-name>="<exact-final-candidate-version-id>"
+  <production-worker-name>="<exact-cpu-tested-candidate-version-id>"
 ```
 
-A Stage 2 invocation is accepted as evidence only when platform
-`ScriptVersion` / Worker version metadata proves that the exact final candidate
-ran.
+The override pins only the **incoming Worker invocation** to the
+CPU-tested candidate in the current deployment.
 
-If:
+It does **not** pin:
 
-- the candidate is not in the current deployment;
-- the override header is rejected or ignored;
-- the invocation resolves to the bridge version; or
-- the invoked ScriptVersion cannot be proven,
+```text
+QuotaController instance code version
+RelayGrantLifecycleController instance code version
+```
 
-the invocation is excluded from PASS evidence and the series becomes
-`BLOCKED / INCOMPLETE` if the required count cannot still be established.
+A stateless Worker CPU sample is accepted only when platform
+`ScriptVersion` metadata proves that the incoming invocation ran the exact
+CPU-tested candidate.
 
-### Phase 2 rollback
+Durable Object correctness is guaranteed separately by the bridge/candidate
+compatibility invariant and the exact DO compatibility manifest.
 
-If Stage 2 or post-Stage-2 rollout fails:
+If DO CPU evidence is recorded separately, record the observable DO code
+version when available, but do not mix DO CPU evidence into the stateless
+Worker 5/7/0 gate.
 
-- restore the post-migration bridge version to 100%;
-- remove the final candidate from active traffic as appropriate;
-- retain migration `v4`;
-- retain the lifecycle class and binding;
-- retain relay secrets and QuotaController compatibility;
-- never attempt to roll back to a pre-`v4` Worker solely to remove the new
-  class.
+### Stage 2 Durable Object compatibility preflight
+
+Before any Stage 2 CPU measurement window, verify all of:
+
+```text
+compatibility bridge = 100%
+CPU-tested candidate = 0%
+candidate version override resolves to exact candidate ScriptVersion
+bridge/candidate do-compatibility-manifest = exact match
+bridge QuotaController exposes candidate-compatible CPU-gate RPCs
+```
+
+Then, outside all CPU measurement windows, run a bounded control smoke through
+the exact candidate version override:
+
+```text
+candidate Worker
+  -> bridge-compatible QuotaController
+  -> CPU-gate snapshot / setup / operation inspection
+```
+
+The smoke MUST succeed before Stage 2 begins.
+
+When Phase 2 is active, additionally prove:
+
+```text
+bridge exports candidate-compatible RelayGrantLifecycleController.dispatch
+
+candidate Worker
+  -> lifecycle DO
+  -> QuotaController
+```
+
+with a bounded CPU-gate fixture/control smoke outside the measurement windows.
+
+Failure is `BLOCKED / INCOMPLETE`; it is not repaired by weakening the CPU
+gate or bypassing the Durable Object path.
+
+### Bridge rollback baseline
+
+Once the compatibility bridge verification passes, it is the Stage 2
+stable/rollback baseline.
+
+If Stage 2 or candidate rollout fails:
+
+- restore the compatibility bridge to 100%;
+- remove the CPU-tested candidate from active traffic as appropriate;
+- retain bridge-compatible QuotaController RPCs;
+- if Phase 2 is active, retain migration `v4`, lifecycle class/binding, and
+  candidate-compatible lifecycle DO implementation;
+- never roll back to a pre-`v4` version after `v4` is applied.
 
 ## Stage 1: isolated Preview / temporary-resource gate
 
@@ -809,7 +1018,7 @@ semantics against Preview resources.
 
 Every required Worker series must:
 
-- use the final candidate source revision;
+- use the CPU-tested candidate source revision;
 - use the approved measurement harness;
 - use the approved workload definitions;
 - reach at least 500 successful invocations;
@@ -825,10 +1034,14 @@ the repository's existing Preview migration design.
 
 ### Traffic isolation
 
-Normal Production traffic remains on the post-migration bridge/stable version.
+Normal Production traffic remains on the Stage 2 compatibility bridge at
+100%.
 
-Only the protected canary driver targets the final candidate at 0% by version
-override.
+Only the protected canary driver targets the CPU-tested candidate at 0% by
+version override.
+
+Stage 2 cannot start until the Durable Object compatibility preflight defined
+above has passed.
 
 The 500-sample CPU acceptance matrix is **not** a Production load test and does
 not intentionally send upstream model traffic.
@@ -1772,14 +1985,21 @@ No direct storage mutation is permitted.
 
 ## Evidence continuity
 
-The migration bridge, CPU-tested candidate, and post-gate hardening version are
-three distinct identities.
+The Stage 2 compatibility bridge, CPU-tested candidate, and post-gate
+hardening version are three distinct Worker version identities.
 
 ### Bridge identity
 
-The bridge exists only to provision migration `v4`, binding, and a compatible
-rollback baseline. Its source revision may differ from the CPU-tested
-candidate.
+The compatibility bridge is a stable-compatible Production version deployed
+at 100% before Stage 2.
+
+It is not CPU acceptance evidence and its Worker routing behavior remains
+stable-compatible, but its Durable Object RPC/code surface is mechanically
+candidate-compatible according to the exact
+`do-compatibility-manifest` invariant.
+
+When Phase 2 is active it additionally applies migration `v4` and becomes the
+earliest valid rollback baseline after that migration.
 
 ### CPU-tested candidate identity
 
@@ -1852,6 +2072,10 @@ OCTG_RELAY_CPU_GATE_AUTH_TOKEN
 
 No source rebuild, source edit, configuration cleanup, dependency update, or
 unrelated binding change may be folded into this hardening version.
+
+The hardening version uses the exact same code artifact and therefore the exact
+same Durable Object implementations/RPC contracts as the CPU-tested candidate.
+Its `do-compatibility-manifest` MUST be identical to the candidate manifest.
 
 ### Post-gate hardening deployment and verification
 
@@ -1926,7 +2150,7 @@ While unresolved relay grants exist:
 - retain `QuotaController`;
 - retain migration `v4`.
 
-Phase 2 rollback always means returning to the post-migration bridge-compatible
+Phase 2 rollback always means returning to the Stage 2 compatibility bridge-compatible
 version, not a pre-migration version.
 
 Resolve or reconcile outstanding grants before removing any later lifecycle
@@ -1996,24 +2220,33 @@ Verify:
 
 ### Migration/rollout tests
 
-Verify the normative order:
+Verify the normative order for **both** Phase-2-inactive and Phase-2-active
+flows:
 
 ```text
-Stage 1 final candidate PASS
+Stage 1 CPU-tested candidate source PASS
     ->
-Production wrangler deploy bridge applies v4
+build Stage 2 compatibility bridge
     ->
-bridge becomes 100% stable/rollback baseline
+verify bridge/candidate DO compatibility manifest equality
     ->
-CPU-tested candidate versions upload
+deploy compatibility bridge to 100%
+    ->
+if Phase 2 active: bridge applies append-only v4
+    ->
+bounded bridge normal-traffic verification
+    ->
+upload CPU-tested candidate
     ->
 deployment bridge=100%, CPU-tested candidate=0%
     ->
-version override reaches exact CPU-tested candidate ScriptVersion
+exact candidate Worker version override confirmed
     ->
-Stage 2 PASS
+Durable Object compatibility preflight/control smoke
     ->
-roll out that exact CPU-tested candidate ScriptVersion
+Stage 2
+    ->
+roll out exact CPU-tested candidate
     ->
 CPU-tested candidate reaches 100%
     ->
@@ -2032,18 +2265,67 @@ bounded hardening verification via exact version override
 hardening version reaches 100%
 ```
 
-Tests must reject:
+Tests MUST reject:
 
+- Stage 2 without a 100% compatibility bridge;
+- Phase-2-inactive bridge without both CPU-gate QuotaController RPCs;
+- Phase-2-active bridge that uses a placeholder lifecycle DO;
+- bridge/candidate DO compatibility manifest mismatch;
+- removal/rename/incompatible change of an existing QuotaController RPC;
+- candidate upload before bridge compatibility verification;
 - `versions upload` as the operation that first introduces `v4`;
-- candidate deployment without bridge migration;
+- candidate deployment without bridge migration when Phase 2 is active;
 - pre-`v4` rollback after migration;
 - Stage 2 request whose override did not resolve to the CPU-tested candidate;
+- treating the version override as proof of Durable Object code version;
 - CPU-gate secret deletion before exact-candidate rollout acceptance;
 - use of non-versioned `wrangler secret delete` in this rollout;
 - a hardening version whose diff contains anything except removal of
   `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`;
+- hardening DO compatibility manifest differing from the CPU-tested candidate;
 - hardening promotion without bounded verification;
 - treating hardening and CPU-tested ScriptVersions as identical.
+
+### Durable Object gradual-deployment compatibility tests
+
+The bridge/candidate pair MUST be tested as a forward/backward-compatible
+Worker/DO contract.
+
+Phase 2 inactive:
+
+```text
+bridge QuotaController exposes getRelayCpuGateSnapshot()
+bridge QuotaController exposes getRelayCpuGateGrantInspection(requestId)
+candidate Worker -> bridge-version QuotaController succeeds
+bridge Worker existing behavior -> candidate-version QuotaController remains valid
+all existing QuotaController RPC semantics remain compatible
+cpuGateFixture predicate is identical bridge vs candidate
+```
+
+Phase 2 active adds:
+
+```text
+bridge RelayGrantLifecycleController.dispatch contract == candidate contract
+bridge lifecycle DO implementation manifest == candidate manifest
+candidate Worker -> bridge-version lifecycle DO succeeds
+candidate Worker -> bridge-version QuotaController succeeds
+candidate lifecycle DO -> bridge/candidate QuotaController succeeds
+grant verification / shard recheck / callback parsing / error mapping are identical
+bridge normal Production lifecycle callbacks remain Worker-side
+```
+
+Live Production preflight, outside measurement windows, MUST confirm:
+
+```text
+bridge 100%
+candidate 0%
+exact candidate Worker override
+candidate ScriptVersion observed
+candidate Worker -> bridge-compatible CPU-gate inspection/setup succeeds
+```
+
+When Phase 2 is active, a bounded lifecycle callback control smoke is also
+required.
 
 ### Measurement-correlation tests
 
@@ -2185,12 +2467,18 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - All required stateless Worker series satisfy `p99 <= 5 ms`,
   `max <= 7 ms`, and `exceededCpu = 0`.
 - Stage 1 passes.
-- If Phase 2 is active, migration `v4` is applied by a bridge
-  `wrangler deploy` before final candidate version upload.
-- After `v4`, the bridge is the rollback baseline.
-- Stage 2 final candidate is present at 0% beside the 100% bridge/stable
-  version and is targeted by exact version override.
+- A Stage 2 Durable Object compatibility bridge is deployed to 100% before the CPU-tested candidate is exposed, regardless of whether Phase 2 is active.
+- Phase-2-inactive bridge provides candidate-compatible QuotaController CPU-gate inspection RPCs without changing normal Production request behavior.
+- If Phase 2 is active, the compatibility bridge applies append-only migration `v4` with `wrangler deploy` and includes a full candidate-compatible RelayGrantLifecycleController implementation.
+- After `v4`, the compatibility bridge is the earliest valid rollback baseline.
+- Bridge and candidate DO compatibility manifests match for QuotaController, CPU-gate inspection/predicate/contracts, and all behavior-affecting transitive dependencies.
+- When Phase 2 is active, the lifecycle DO implementation/contract/shard/verification dependencies also match exactly.
+- Stage 2 CPU-tested candidate is present at 0% beside the 100% compatibility bridge and is targeted by exact Worker version override.
 - Platform metadata proves every Stage 2 sample ran the exact candidate.
+- The version override is treated only as stateless incoming Worker identity and never as proof of Durable Object code version.
+- Stage 2 preflight proves candidate Worker -> bridge-compatible QuotaController control RPCs before any CPU measurement window.
+- When Phase 2 is active, Stage 2 preflight also proves candidate Worker -> lifecycle DO -> QuotaController control flow before measurement.
+- Gradual rollout explicitly permits bridge/candidate Worker and DO version skew while requiring forward/backward-compatible RPC semantics.
 - Stage 2 quota/capacity inspection is defined by exact read-only QuotaController RPCs and protected Worker routes.
 - Stage 2 PASS does not depend on equality of global Production quota counters that normal traffic may legitimately change.
 - Quota safety is proven from canary-owned canonical grant/request/lease inspection.
@@ -2215,6 +2503,7 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - The exact CPU-tested candidate ScriptVersion reaches 100% and completes rollout acceptance before CPU-gate secret deletion.
 - Secret deletion uses `wrangler versions secret delete` and creates a distinct post-gate hardening ScriptVersion.
 - The hardening version differs only by absence of `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`, passes bounded post-gate verification, and reaches 100%.
+- The hardening version's Durable Object compatibility manifest is identical to the CPU-tested candidate because the code artifact is unchanged.
 - Stage 2 sends no upstream model request as part of the 500-sample CPU gate.
 - Every CPU-gate request is individually accounted for by its runner-owned request ID and canonical terminal inspection; global `requestCount` delta is not acceptance evidence.
 - The incident-derived synthetic regression workload is retained.
