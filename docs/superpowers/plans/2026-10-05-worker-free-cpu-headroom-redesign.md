@@ -507,7 +507,7 @@ Pin deterministic, synthetic builders:
 - incident-regression-nonstream: same structure, `stream=false`;
 - no production prompt/response text or credential material.
 
-The public ingress/decision fixture uses a runner-provided canary client key and an explicitly configured **gate rejection model** that preflight proves is not enabled in the Production registry; it must receive the normal policy/model rejection before `admitRelay`.
+The public ingress/decision fixture uses a runner-provided canary client key and the exact synthetic model string `octg-cpu-gate-reject-v1`. Before any measured series, one unmeasured preflight request must prove that this model receives the normal `model_requires_paid` rejection and creates no admission/grant. If it is enabled or produces any other outcome, the series is `BLOCKED / INCOMPLETE`; do not select a different model ad hoc.
 
 - [ ] **Step 2: Write RED evidence-reducer tests**
 
@@ -811,31 +811,32 @@ All prior Stage 1 evidence is invalid because implementation changed.
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Worker build artifact and exact DO/shared source roots.
-- Produces deterministic JSON:
+- Consumes: Worker source tree and Wrangler dry-run bundle.
+- Produces deterministic `DoCompatibilityManifest` with `runtimeBundleSha256`, per-root `sourceClosureSha256`, file lists, and `contractSha256`.
 
-```ts
-interface DoCompatibilityManifest {
-  readonly version: 1;
-  readonly runtimeBundleSha256: string;
-  readonly roots: Readonly<Record<string, {
-    readonly sourceClosureSha256: string;
-    readonly files: readonly string[];
-  }>>;
-  readonly contractSha256: string;
-}
+Exact source roots:
+
+```text
+quota-controller:
+  durable-objects/quota-controller/src/quota-controller.ts
+
+quota-cpu-gate:
+  durable-objects/quota-controller/src/relay-cpu-gate.ts
+
+relay-grant-lifecycle:       # Phase 2 active only
+  apps/gateway-worker/src/relay-grant-lifecycle-controller.ts
+```
+
+Exact type/contract roots included even when TypeScript erases them from runtime JavaScript:
+
+```text
+packages/shared/src/relay.ts
+packages/shared/src/relay-routing.ts
 ```
 
 - [ ] **Step 1: Write RED determinism/type-only tests**
 
-Test that:
-
-- file-order differences do not change a digest;
-- changing a behavior-affecting runtime helper changes its root digest;
-- changing only a type-only RPC declaration changes `contractSha256`;
-- changing an unrelated UI/docs file does not change manifest roots;
-- Phase-2-inactive manifest omits lifecycle root but includes QuotaController CPU-gate roots;
-- Phase-2-active manifest includes lifecycle DO/shard/verification roots.
+Test that file-order changes do not change digests; runtime-helper changes affect the owning root; type-only RPC declaration changes affect `contractSha256`; unrelated docs/assets do not affect source-closure digests; inactive mode omits the lifecycle root; active mode includes it.
 
 - [ ] **Step 2: Run RED**
 
@@ -845,33 +846,49 @@ node --test scripts/do-compatibility-manifest.test.mjs
 
 Expected RED: manifest tool missing.
 
-- [ ] **Step 3: Implement exact two-layer comparison mechanism**
+- [ ] **Step 3: Implement the runtime artifact digest**
 
-Runtime layer:
+Create a protected temporary directory and run exactly:
 
-- run Wrangler dry-run bundling into a protected temp directory;
-- SHA-256 the emitted Worker JavaScript artifact bytes as `runtimeBundleSha256`.
+```bash
+npx wrangler deploy --dry-run --outdir "$OUTDIR" --config apps/gateway-worker/wrangler.jsonc
+```
 
-Source/contract layer:
+Digest every regular file emitted under `$OUTDIR`, sorted by relative path, using `relativePath + NUL + fileBytes + NUL`. Delete the temporary directory in `finally`.
 
-- use the already-installed TypeScript Compiler API;
-- recursively walk static imports/re-exports from the declared root files, including `import type`;
-- sort canonical repo-relative paths;
-- SHA-256 `path + NUL + exact source bytes` for each closure;
-- separately digest the exact shared files that declare CPU-gate/lifecycle RPC input/result contracts so type-only declarations cannot disappear from comparison.
+- [ ] **Step 4: Implement source-closure and contract digests**
 
-No new bundler dependency.
+Use the installed TypeScript Compiler API. Starting from each exact root, recursively follow static imports/re-exports including `import type` / `export type ... from`, resolve workspace `@octg/*` modules with TypeScript module resolution, reject unresolved repository imports, sort repo-relative paths, and digest exact source bytes.
 
-- [ ] **Step 4: GREEN**
+Compute `contractSha256` over the union of complete source closures rooted at exactly `packages/shared/src/relay.ts` and `packages/shared/src/relay-routing.ts`. This is the mechanical check for type-only RPC contracts.
+
+- [ ] **Step 5: Add the package command**
+
+```json
+"manifest:do-compat": "node scripts/do-compatibility-manifest.mjs"
+```
+
+Support only:
+
+```text
+--phase2=inactive
+--phase2=active
+--out=<path>
+--help
+```
+
+Invalid mode, missing root, unresolved repository import, or output failure exits non-zero without a partial manifest.
+
+- [ ] **Step 6: GREEN**
 
 ```bash
 node --test scripts/do-compatibility-manifest.test.mjs
 npm run manifest:do-compat -- --help
 ```
 
-Expected GREEN: deterministic manifest and contract-source sensitivity.
+Expected GREEN: deterministic runtime/source digests and type-only contract sensitivity.
 
-- [ ] **Step 5: Commit boundary**
+- [ ] **Step 7: Commit boundary**
 
 ```bash
 git add scripts/do-compatibility-manifest.mjs scripts/do-compatibility-manifest.test.mjs package.json
