@@ -295,8 +295,44 @@ measured as a separate CPU series.
 Because the runner may own at most one non-terminal CPU-gate operation, series
 that require a fresh fixture per sample (`activation_normal` and
 `terminal_normal`) are measured only at `concurrency=1`. Series that exercise
-callbacks against an existing fixture (`activation_replay`, `renewal_normal`, and
-`terminal_replay`) are measured at `concurrency=1,2,3`.
+callbacks against an existing fixture (`decision`, `activation_replay`,
+`renewal_normal`, and `terminal_replay`) and the stateless `ingress` series are
+measured at `concurrency=1,2,3`.
+
+Required series matrix:
+
+```text
+invocationClass      | workloadClass             | concurrency
+---------------------|---------------------------|------------
+ingress              | baseline-small            | 1,2,3
+ingress              | baseline-large            | 1,2,3
+ingress              | incident-regression-stream| 1,2,3
+ingress              | incident-regression-nonstream| 1,2,3
+decision             | baseline-small            | 1,2,3
+decision             | baseline-large            | 1,2,3
+decision             | incident-regression-stream| 1,2,3
+decision             | incident-regression-nonstream| 1,2,3
+activation_normal    | baseline-small            | 1
+activation_normal    | baseline-large            | 1
+activation_normal    | incident-regression-stream| 1
+activation_normal    | incident-regression-nonstream| 1
+activation_replay    | baseline-small            | 1,2,3
+activation_replay    | baseline-large            | 1,2,3
+activation_replay    | incident-regression-stream| 1,2,3
+activation_replay    | incident-regression-nonstream| 1,2,3
+renewal_normal       | baseline-small            | 1,2,3
+renewal_normal       | baseline-large            | 1,2,3
+renewal_normal       | incident-regression-stream| 1,2,3
+renewal_normal       | incident-regression-nonstream| 1,2,3
+terminal_normal      | baseline-small            | 1
+terminal_normal      | baseline-large            | 1
+terminal_normal      | incident-regression-stream| 1
+terminal_normal      | incident-regression-nonstream| 1
+terminal_replay      | baseline-small            | 1,2,3
+terminal_replay      | baseline-large            | 1,2,3
+terminal_replay      | incident-regression-stream| 1,2,3
+terminal_replay      | incident-regression-nonstream| 1,2,3
+```
 
 Example:
 
@@ -482,9 +518,9 @@ The `decision` invocation class is measured by invoking
 `/internal/relay/v1/decision` directly. For each decision sample the runner:
 
 1. generates a fresh runner-owned `req_<ULID>` decision request ID;
-2. calls the CPU-gate `decision-context` route to admit a decision-only fixture
-   and obtain a Cloudflare-signed `contextToken`;
-3. invokes `/internal/relay/v1/decision` with:
+2. calls the CPU-gate `decision-context` route to obtain a Cloudflare-signed
+   `contextToken` without performing admission;
+3. issues `concurrency` simultaneous `/internal/relay/v1/decision` callbacks with:
 
 ```text
 X-OCTG-Relay-Context: <contextToken>
@@ -492,14 +528,13 @@ Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
 ```
 
-4. terminalizes the decision-only fixture via `reconcile-unused` on the same
-   request ID and proves it is terminal before the next sample.
+4. captures any `X-OCTG-Relay-Grant` headers returned by allowed callbacks;
+5. terminalizes the resulting grants via the normal `/internal/relay/v1/terminal`
+   callback and proves the fixture is terminal before starting the next sample.
 
-The request body is a valid Deno tokenizer decision payload containing the
-runner's decision request ID and the stage-appropriate model. This bypasses the
-Deno tokenizer and guarantees the decision callback executes on the exact
-candidate Worker version, because external Deno callbacks would not inherit an
-ingress version override. The runner never constructs or signs a RelayContext.
+Stage 2 uses the reject model, so callbacks return reject before creating a
+grant and no terminal cleanup is required. The runner never constructs or signs
+a RelayContext.
 
 `ingress` uses the same override header on `/v1/responses`. `activation`,
 `renewal`, and `terminal` use the Worker-signed grant credential obtained from
@@ -1868,14 +1903,24 @@ invocations and are excluded from lifecycle series counts and 5/7/0 evaluation.
 
 #### Decision context
 
-Decision measurement uses a dedicated runner-owned request ID that is distinct
-from any lifecycle fixture. The runner:
+Decision callbacks require a Cloudflare-signed `RelayContextV1` in the
+`X-OCTG-Relay-Context` header. The external runner MUST NOT receive
+`OCTG_RELAY_CONTEXT_HMAC_KEY` and MUST NOT construct or sign a RelayContext.
 
-1. generates a fresh `req_<ULID>` decision request ID;
-2. calls `decision-context` for that request ID;
-3. uses the returned `contextToken` for one `/internal/relay/v1/decision` callback;
-4. terminalizes the decision-only fixture via `reconcile-unused` and proves it is
-   terminal before starting the next decision sample.
+For each decision sample the runner:
+
+1. generates a fresh runner-owned `req_<ULID>` decision request ID;
+2. calls the CPU-gate `decision-context` route for that request ID to obtain a
+   Cloudflare-signed `contextToken`;
+3. issues `concurrency` simultaneous `/internal/relay/v1/decision` callbacks
+   using the same `contextToken` and the stage-appropriate model;
+4. captures any `X-OCTG-Relay-Grant` headers returned by allowed callbacks;
+5. terminalizes the resulting grants via the normal `/internal/relay/v1/terminal`
+   callback using those grant credentials, then proves the fixture is terminal
+   before starting the next sample.
+
+Stage 2 uses the reject model, so callbacks return reject before creating a
+grant and no terminal cleanup is required.
 
 The route is:
 
@@ -1902,16 +1947,8 @@ The Worker:
    request ID, the dedicated fixture client, the fixture model, no idempotency
    key, runtime environment, normal context timestamps, and a fresh
    Worker-generated nonce;
-9. constructs synthetic metadata with the same zero-value fields as setup;
-10. calls the existing authoritative `QuotaController.admitRelay(...)`
-    transaction with zero reservation/upper-bound/max-output and no idempotency
-    key;
-11. if admission succeeds, signs the context with
-    `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
-12. if admission is denied or the preflight is not `absent`, returns a definite
-    pre-admission error and does not create a fixture.
-
-The response is:
+9. signs the context with `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
+10. returns:
 
 ```ts
 interface RelayCpuGateDecisionContextV1 {
@@ -1921,10 +1958,12 @@ interface RelayCpuGateDecisionContextV1 {
 }
 ```
 
+If the preflight is not `absent`, the route returns a definite error and does
+not sign a context.
+
 `decision-context` is a `cpu-gate-control` invocation and is excluded from the
-decision measurement window. The decision-only fixture created by this route is
-terminalized by the runner immediately after the decision callback using
-`reconcile-unused` on the same request ID.
+decision measurement window. It performs **no admission**; the decision callback
+itself exercises the normal admission path.
 
 ### Setup signing-failure compensation
 

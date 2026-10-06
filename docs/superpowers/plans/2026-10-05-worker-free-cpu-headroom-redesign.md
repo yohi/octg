@@ -520,7 +520,7 @@ POST /internal/relay/v1/cpu-gate/setup-fence
 POST /internal/relay/v1/cpu-gate/decision-context
 POST /internal/relay/v1/cpu-gate/operation-inspection
 POST /internal/relay/v1/cpu-gate/reconcile-unused
-
+```
 Keep control routes internal and before generic callback action parsing.
 
 Use the existing `QuotaController.admitRelay` transaction for setup. `admitRelay` must check for a CPU-gate fence for the requestId and fail closed if one exists. Never write DO storage directly.
@@ -623,16 +623,42 @@ Pin deterministic, synthetic builders:
 
 The workload driver exercises every required `invocationClass`:
 
-```text
-ingress
-decision
-activation_normal
-activation_replay
-renewal_normal
-terminal_normal
-terminal_replay
 ```
 
+Required series matrix:
+
+```text
+invocationClass      | workloadClass              | concurrency
+---------------------|----------------------------|------------
+ingress              | baseline-small             | 1,2,3
+ingress              | baseline-large             | 1,2,3
+ingress              | incident-regression-stream | 1,2,3
+ingress              | incident-regression-nonstream | 1,2,3
+decision             | baseline-small             | 1,2,3
+decision             | baseline-large             | 1,2,3
+decision             | incident-regression-stream | 1,2,3
+decision             | incident-regression-nonstream | 1,2,3
+activation_normal    | baseline-small             | 1
+activation_normal    | baseline-large             | 1
+activation_normal    | incident-regression-stream | 1
+activation_normal    | incident-regression-nonstream | 1
+activation_replay    | baseline-small             | 1,2,3
+activation_replay    | baseline-large             | 1,2,3
+activation_replay    | incident-regression-stream | 1,2,3
+activation_replay    | incident-regression-nonstream | 1,2,3
+renewal_normal       | baseline-small             | 1,2,3
+renewal_normal       | baseline-large             | 1,2,3
+renewal_normal       | incident-regression-stream | 1,2,3
+renewal_normal       | incident-regression-nonstream | 1,2,3
+terminal_normal      | baseline-small             | 1
+terminal_normal      | baseline-large             | 1
+terminal_normal      | incident-regression-stream | 1
+terminal_normal      | incident-regression-nonstream | 1
+terminal_replay      | baseline-small             | 1,2,3
+terminal_replay      | baseline-large             | 1,2,3
+terminal_replay      | incident-regression-stream | 1,2,3
+terminal_replay      | incident-regression-nonstream | 1,2,3
+```
 For **Stage 1**, the `ingress` and `decision` series use a Preview-enabled
 complimentary model that classifies to the requested pool. The runner must
 verify this model is present in the Preview registry before measurement; these
@@ -650,9 +676,9 @@ do not select a different model ad hoc.
 For each `decision` sample the runner:
 
 1. generates a fresh runner-owned `req_<ULID>` decision request ID;
-2. calls the CPU-gate `decision-context` route to admit a decision-only fixture
-   and obtain a Cloudflare-signed `contextToken`;
-3. invokes `/internal/relay/v1/decision` with:
+2. calls the CPU-gate `decision-context` route to obtain a Cloudflare-signed
+   `contextToken` **without** performing admission;
+3. issues `concurrency` simultaneous `/internal/relay/v1/decision` callbacks with:
 
 ```text
 X-OCTG-Relay-Context: <contextToken>
@@ -660,17 +686,36 @@ Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
 ```
 
-4. terminalizes the decision-only fixture via `reconcile-unused` on the same
-   request ID and proves it is terminal before the next sample.
+4. captures any `X-OCTG-Relay-Grant` headers returned by allowed callbacks;
+5. terminalizes the resulting grants via the normal `/internal/relay/v1/terminal`
+   callback using those grant credentials, then proves the fixture is terminal
+   before starting the next sample.
 
-The request body is a valid Deno tokenizer decision payload containing the
-runner's decision request ID and the stage-appropriate model. The runner never
-constructs or signs a RelayContext; Cloudflare signs it with
-`OCTG_RELAY_CONTEXT_HMAC_KEY`. The `decision-context` call is `cpu-gate-control`
-and is excluded from the decision measurement window.
+Stage 2 uses the reject model, so callbacks return reject before creating a
+grant and no terminal cleanup is required. The request body is a valid Deno
+tokenizer decision payload containing the runner's decision request ID and the
+stage-appropriate model. The runner never constructs or signs a RelayContext;
+Cloudflare signs it with `OCTG_RELAY_CONTEXT_HMAC_KEY`. The `decision-context`
+call is `cpu-gate-control` and is excluded from the decision measurement window.
+
+Tests must pin:
+
+- `decision-context` returns a valid context token for an absent request ID and
+  performs no admission;
+- `decision-context` fails closed when the request ID is already a fixture or
+  non-fixture;
+- a Stage 1 decision callback with the context token performs normal admission
+  and returns an `X-OCTG-Relay-Grant` header on allow;
+- the runner terminalizes the grant and proves the fixture terminal before the
+  next sample;
+- a Stage 2 decision callback with the reject model returns reject and creates
+  no grant;
+- `concurrency=2,3` decision samples issue the expected number of simultaneous
+  callbacks against the same active decision fixture.
 
 `ingress` uses the same override header on `/v1/responses`. `activation`,
 `renewal`, and `terminal` use the Worker-signed grant credential obtained from
+CPU-gate setup and the same override header.
 CPU-gate setup and the same override header.
 
 - [ ] **Step 2: Write RED telemetry-acquisition tests**
@@ -966,13 +1011,15 @@ fixture requestId (for lifecycle operations only)
 ```
 
 The driver must support the five lifecycle series (`activation_normal`,
-`activation_replay`, `renewal_normal`, `terminal_normal`, `terminal_replay`). For
-`activation_normal` and `terminal_normal`, the driver creates a fresh fixture per
-sample and terminalizes it before the next sample, because the runner may own only
-one non-terminal operation at a time. For `activation_replay`, `renewal_normal`,
-and `terminal_replay`, the driver reuses one fixture and issues repeated
-callbacks. The run ledger records the series identity so the reducer evaluates
-each transition class separately.
+`activation_replay`, `renewal_normal`, `terminal_normal`, `terminal_replay`) and
+the `decision` callback series. For `activation_normal` and `terminal_normal`,
+the driver creates a fresh fixture per sample and terminalizes it before the
+next sample, because the runner may own only one non-terminal operation at a
+time; these series run only at `concurrency=1`. For `decision`,
+`activation_replay`, `renewal_normal`, and `terminal_replay`, the driver creates
+or reuses one active fixture and issues `concurrency` simultaneous callbacks
+against it, then terminalizes before the next sample. The run ledger records the
+series identity so the reducer evaluates each transition class separately.
 
 Required driver modes:
 
@@ -1687,9 +1734,6 @@ hardening version metadata -> CPU-gate secret binding absent
 secret values are never present in normalized verification output
 hardening-create rejects when candidate acceptance evidence is missing
 ```
-
-```
-
 Then prove the existing bridge/candidate compatibility requirements:
 
 Phase 2 inactive:
