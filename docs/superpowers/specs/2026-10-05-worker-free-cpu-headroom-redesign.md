@@ -479,9 +479,12 @@ remains a Production-safe canary that cannot consume Production quota.
   outcome makes the Stage 2 series `BLOCKED / INCOMPLETE`.
 
 The `decision` invocation class is measured by invoking
-`/internal/relay/v1/decision` directly. Before each decision sample the runner
-calls the CPU-gate `decision-context` route for the active fixture and uses the
-returned `contextToken` in:
+`/internal/relay/v1/decision` directly. For each decision sample the runner:
+
+1. generates a fresh runner-owned `req_<ULID>` decision request ID;
+2. calls the CPU-gate `decision-context` route to admit a decision-only fixture
+   and obtain a Cloudflare-signed `contextToken`;
+3. invokes `/internal/relay/v1/decision` with:
 
 ```text
 X-OCTG-Relay-Context: <contextToken>
@@ -489,11 +492,14 @@ Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
 ```
 
+4. terminalizes the decision-only fixture via `reconcile-unused` on the same
+   request ID and proves it is terminal before the next sample.
+
 The request body is a valid Deno tokenizer decision payload containing the
-series request ID and the stage-appropriate model. This bypasses the Deno
-tokenizer and guarantees the decision callback executes on the exact candidate
-Worker version, because external Deno callbacks would not inherit an ingress
-version override.
+runner's decision request ID and the stage-appropriate model. This bypasses the
+Deno tokenizer and guarantees the decision callback executes on the exact
+candidate Worker version, because external Deno callbacks would not inherit an
+ingress version override. The runner never constructs or signs a RelayContext.
 
 `ingress` uses the same override header on `/v1/responses`. `activation`,
 `renewal`, and `terminal` use the Worker-signed grant credential obtained from
@@ -1823,7 +1829,9 @@ existing QuotaController transaction and atomically:
 - if a non-fixture grant/request exists, returns `kind="non_fixture"` so the
   runner treats the operation as `BLOCKED / INCOMPLETE`;
 - otherwise records a durable CPU-gate setup fence for the request ID and returns
-  `kind="fenced"`.
+  `kind="fenced"`;
+- if a durable fence already exists for the request ID, returns `kind="fenced"`
+  (idempotent).
 
 Once the fence is durable:
 
@@ -1860,11 +1868,16 @@ invocations and are excluded from lifecycle series counts and 5/7/0 evaluation.
 
 #### Decision context
 
-Decision callbacks require a Cloudflare-signed `RelayContextV1` in the
-`X-OCTG-Relay-Context` header. The external runner MUST NOT receive
-`OCTG_RELAY_CONTEXT_HMAC_KEY` and MUST NOT construct or sign a RelayContext.
+Decision measurement uses a dedicated runner-owned request ID that is distinct
+from any lifecycle fixture. The runner:
 
-The CPU-gate control surface therefore exposes a protected context route:
+1. generates a fresh `req_<ULID>` decision request ID;
+2. calls `decision-context` for that request ID;
+3. uses the returned `contextToken` for one `/internal/relay/v1/decision` callback;
+4. terminalizes the decision-only fixture via `reconcile-unused` and proves it is
+   terminal before starting the next decision sample.
+
+The route is:
 
 ```text
 POST /internal/relay/v1/cpu-gate/decision-context
@@ -1880,18 +1893,25 @@ The Worker:
 1. requires the CPU-gate control surface to be enabled;
 2. authenticates the CPU-gate bearer;
 3. validates `pool` and `requestId`;
-4. derives the operation UTC day from the requestId's ULID timestamp;
-5. resolves the owning QuotaController by that embedded day;
-6. calls `getRelayCpuGateGrantInspection(requestId)` and requires the result to
-   be a canonical fixture with `state` in `authorized|attempted|uncertain`,
-   `cpuGateFixture=true`, and `activeLease=true` for the grant's exact
-   `leaseGeneration`;
-7. builds a valid Production `RelayContextV1` using exactly the runner-owned
+4. requires the request ID's ULID UTC day to equal the current Worker UTC day;
+5. derives the operation UTC day from the requestId's ULID timestamp;
+6. resolves the owning QuotaController by that embedded day;
+7. calls `getRelayCpuGateGrantInspection(requestId)` as collision preflight and
+   requires the result to be `absent`;
+8. builds a valid Production `RelayContextV1` using exactly the runner-owned
    request ID, the dedicated fixture client, the fixture model, no idempotency
    key, runtime environment, normal context timestamps, and a fresh
    Worker-generated nonce;
-8. signs the context with `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
-9. returns:
+9. constructs synthetic metadata with the same zero-value fields as setup;
+10. calls the existing authoritative `QuotaController.admitRelay(...)`
+    transaction with zero reservation/upper-bound/max-output and no idempotency
+    key;
+11. if admission succeeds, signs the context with
+    `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
+12. if admission is denied or the preflight is not `absent`, returns a definite
+    pre-admission error and does not create a fixture.
+
+The response is:
 
 ```ts
 interface RelayCpuGateDecisionContextV1 {
@@ -1901,16 +1921,10 @@ interface RelayCpuGateDecisionContextV1 {
 }
 ```
 
-If the fixture is absent, non-fixture, terminal, or its lease is no longer
-active, the route returns a definite error and the runner must recover or close
-the operation before measuring decision.
-
-The returned `contextToken` is used exactly once per decision measurement call
-in the `X-OCTG-Relay-Context` header. It is not a grant credential, does not
-authorize an upstream model call, and must not be logged or retained after the
-series window closes.
-
-### Setup signing-failure compensation
+`decision-context` is a `cpu-gate-control` invocation and is excluded from the
+decision measurement window. The decision-only fixture created by this route is
+terminalized by the runner immediately after the decision callback using
+`reconcile-unused` on the same request ID.
 
 ### Setup signing-failure compensation
 

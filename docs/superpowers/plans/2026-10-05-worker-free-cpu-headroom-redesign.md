@@ -364,7 +364,9 @@ Using the real in-memory storage backend, prove:
 fence before delayed admitRelay -> admitRelay returns denied with cpu_gate_fenced
 admitRelay before fence -> fence returns fixture and subsequent admitRelay with same ID is rejected by existing state
 fence after reconcile-unused terminal -> fence returns fixture with terminal state; operation A is closed
-fence across two concurrent transactions -> only one succeeds with fenced; the other returns fixture or non_fixture
+fence across two concurrent transactions -> both may return fenced (idempotent);
+  only one durable fence is written; a delayed admitRelay for the same ID is
+  rejected
 admitRelay transaction observes fence written by another concurrent call -> fails closed
 ```
 
@@ -645,26 +647,27 @@ preflight request must prove that this model receives the normal
 or produces any other outcome, the Stage 2 series is `BLOCKED / INCOMPLETE`;
 do not select a different model ad hoc.
 
-The `decision` series is invoked directly by the runner against
-`/internal/relay/v1/decision` with:
+For each `decision` sample the runner:
+
+1. generates a fresh runner-owned `req_<ULID>` decision request ID;
+2. calls the CPU-gate `decision-context` route to admit a decision-only fixture
+   and obtain a Cloudflare-signed `contextToken`;
+3. invokes `/internal/relay/v1/decision` with:
 
 ```text
+X-OCTG-Relay-Context: <contextToken>
 Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
-X-OCTG-Relay-Context: <contextToken>
 ```
 
-The `contextToken` is obtained from the CPU-gate `decision-context` route
-immediately before each decision sample. The runner never constructs or signs a
-RelayContext; Cloudflare signs it with `OCTG_RELAY_CONTEXT_HMAC_KEY`. The
-`decision-context` call is `cpu-gate-control` and is excluded from the decision
-measurement window.
+4. terminalizes the decision-only fixture via `reconcile-unused` on the same
+   request ID and proves it is terminal before the next sample.
 
 The request body is a valid Deno tokenizer decision payload containing the
-series request ID and the stage-appropriate model. This bypasses the Deno
-tokenizer and guarantees the decision callback executes on the exact candidate
-Worker version, because external Deno callbacks would not inherit an ingress
-version override.
+runner's decision request ID and the stage-appropriate model. The runner never
+constructs or signs a RelayContext; Cloudflare signs it with
+`OCTG_RELAY_CONTEXT_HMAC_KEY`. The `decision-context` call is `cpu-gate-control`
+and is excluded from the decision measurement window.
 
 `ingress` uses the same override header on `/v1/responses`. `activation`,
 `renewal`, and `terminal` use the Worker-signed grant credential obtained from
@@ -779,7 +782,15 @@ Tests must pin:
 - an exact duplicate of the same CPU event ID with byte-for-byte-equivalent authoritative fields de-duplicates to one record;
 - two invocation groups containing many raw events produce `normalizedInvocationCount == 2`;
 - `groupRequestId != $metadata.requestId` when metadata request ID is present => `BLOCKED / INCOMPLETE`;
-- `groupRequestId != $workers.requestId` when Worker request ID is present => `BLOCKED / INCOMPLETE`.
+- `groupRequestId != $workers.requestId` when Worker request ID is present => `BLOCKED / INCOMPLETE`;
+- evidence reducer correlates a ledger call to a normalized record when their
+  `scriptVersionId`, `routeDiscriminator`, and timestamps match within tolerance,
+  even if the platform `requestId` differs from the runner-owned `req_<ULID>`;
+- a series with multiple callbacks against the same fixture (replay/renewal)
+  produces the expected call count by matching each callback's timestamp and
+  route discriminator, without requiring distinct platform request IDs;
+- concurrent callbacks against the same fixture are matched by ordinal order
+  within the same route and window.
 
 Pagination is exact:
 
@@ -1134,10 +1145,12 @@ node scripts/relay-cpu-evidence.mjs \
   --out=<protected-stage1-series-summary>
 ```
 
-The reducer matches ledger entries to normalized records by request ID and
-invocation class. It rejects any `cpu-gate-control` record that appears inside a
-lifecycle measurement window and any record whose `scriptVersionId` does not
-match the candidate.
+The reducer correlates ledger calls with normalized platform records by
+`scriptVersionId`, `routeDiscriminator`, series window, and call
+ordinal/timestamp tolerance. It does not require the platform `requestId` to
+equal the runner-owned `req_<ULID>`. It rejects any `cpu-gate-control` record
+that appears inside a lifecycle measurement window and any record whose
+`scriptVersionId` does not match the candidate.
 
 Expected outcomes:
 
