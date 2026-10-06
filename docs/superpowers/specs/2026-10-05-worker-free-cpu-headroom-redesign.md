@@ -287,15 +287,31 @@ concurrency=2
 concurrency=3
 ```
 
-Concurrency is an execution condition, not part of the domain workload name,
-but every concurrency value is measured as a separate CPU series.
+Concurrency is the number of simultaneous callback invocations issued against
+the **same active fixture**, not the number of fixtures. It is an execution
+condition, not part of the domain workload name, but every concurrency value is
+measured as a separate CPU series.
+
+Because the runner may own at most one non-terminal CPU-gate operation, series
+that require a fresh fixture per sample (`activation_normal` and
+`terminal_normal`) are measured only at `concurrency=1`. Series that exercise
+callbacks against an existing fixture (`activation_replay`, `renewal_normal`, and
+`terminal_replay`) are measured at `concurrency=1,2,3`.
 
 Example:
 
 ```text
-activation x incident-regression-stream x concurrency=1
-activation x incident-regression-stream x concurrency=2
-activation x incident-regression-stream x concurrency=3
+activation_replay x incident-regression-stream x concurrency=1
+activation_replay x incident-regression-stream x concurrency=2
+activation_replay x incident-regression-stream x concurrency=3
+renewal_normal x incident-regression-stream x concurrency=1
+renewal_normal x incident-regression-stream x concurrency=2
+renewal_normal x incident-regression-stream x concurrency=3
+terminal_replay x incident-regression-stream x concurrency=1
+terminal_replay x incident-regression-stream x concurrency=2
+terminal_replay x incident-regression-stream x concurrency=3
+activation_normal x incident-regression-stream x concurrency=1
+terminal_normal x incident-regression-stream x concurrency=1
 ```
 
 The series must never be pooled for percentile or sample-count purposes.
@@ -314,27 +330,31 @@ candidate source revision
 invocationClass
 workloadClass
 concurrency
-windowStart
-windowEnd
+list of per-invocation windows [windowStart, windowEnd)
 expected successful invocation count
 ```
 
 Rules:
 
 1. No two required series for one candidate may have overlapping
-   `[windowStart, windowEnd]` intervals.
+   `[windowStart, windowEnd)` intervals.
 2. The next series starts only after all driver invocations in the prior series
    have completed.
-3. Stage 2 normal traffic remains on the stable/bridge version, so filtering by
+3. A series may consist of multiple non-overlapping per-invocation windows when
+   each sample needs auxiliary control calls (setup, fence, terminalization)
+   between measured invocations. Auxiliary control calls are placed outside the
+   series windows and classified as `cpu-gate-control`; they are excluded from
+   lifecycle series counts and 5/7/0 evaluation.
+4. Stage 2 normal traffic remains on the stable/bridge version, so filtering by
    candidate `ScriptVersion` removes unrelated normal Production traffic.
-4. The candidate `ScriptVersion`, route, and exact measurement window must be
+5. The candidate `ScriptVersion`, route, and exact measurement window must be
    sufficient to reconstruct the series from platform telemetry without an
    application marker.
-5. If any platform invocation in the window cannot be uniquely assigned to the
+6. If any platform invocation in the window cannot be uniquely assigned to the
    expected series, the series is `BLOCKED / INCOMPLETE`.
-6. Gate-time Worker invocation telemetry sampling must be 100%. The existing
-   `head_sampling_rate = 1` behavior becomes a normative prerequisite rather
-   than an incidental repository setting.
+7. Gate-time Worker invocation telemetry sampling must be 100%. The existing
+`head_sampling_rate = 1` behavior becomes a normative prerequisite rather
+than an incidental repository setting.
 
 ### Required evidence per series
 
@@ -355,23 +375,11 @@ candidate source revision
 workload class
 concurrency
 measurement stage
-windowStart
-windowEnd
+list of per-invocation windows
 ```
 
-Each required series needs at least **500 successful invocations**.
-
-Five hundred samples cannot be satisfied by combining concurrency conditions.
-
-### PASS / FAIL / BLOCKED
-
-Each series has exactly one state:
-
-```text
-PASS
-FAIL
-BLOCKED / INCOMPLETE
-```
+Each required series needs at least **500 successful invocations**. Five hundred
+samples cannot be satisfied by combining concurrency conditions.
 
 PASS requires all of:
 
@@ -388,7 +396,6 @@ workload classification matches
 execution condition matches
 measurement window is non-overlapping
 ```
-
 FAIL means sufficient evidence exists and the CPU gate itself is violated.
 
 An `exceededCpu` platform invocation is never discarded because an application
@@ -1199,6 +1206,7 @@ For the CPU-gate bearer, use is restricted to:
 
 ```text
 /internal/relay/v1/cpu-gate/setup
+/internal/relay/v1/cpu-gate/setup-fence
 /internal/relay/v1/cpu-gate/quota
 /internal/relay/v1/cpu-gate/operation-inspection
 /internal/relay/v1/cpu-gate/reconcile-unused
@@ -1227,13 +1235,20 @@ secret present but invalid shape
   -> CPU-gate control surface disabled
   -> same 404 fail-closed behavior
 
+```text
 secret valid
   -> control surface enabled
   -> every CPU-gate route requires exact Bearer authentication
   -> missing/malformed/mismatched Authorization returns 401
   -> no Durable Object call on authentication failure
+  -> if OCTG_RELAY_CPU_GATE_AUTH_TOKEN equals OCTG_RELAY_SERVICE_AUTH_TOKEN,
+     the control surface is disabled with the same 404 fail-closed behavior as
+     an absent secret
 ```
 
+Bearer comparison is constant-time. The Worker additionally validates at startup
+that the CPU-gate bearer and the service bearer are distinct non-empty values;
+if they are equal, `resolveRelayCpuGateControl(env)` returns `kind:"disabled"`.
 Bearer comparison is constant-time.
 
 The secret remains present throughout:
@@ -1306,6 +1321,7 @@ export type RelayCpuGateGrantInspection =
   | {
       readonly kind: "absent";
       readonly cpuGateFixture: false;
+      readonly fenced: boolean;
     }
   | {
       readonly kind: "non_fixture";
@@ -1323,15 +1339,39 @@ export type RelayCpuGateGrantInspection =
       readonly cpuGateFixture: true;
     };
 
+export type RelayCpuGateFenceResult =
+  | {
+      readonly kind: "fenced";
+    }
+  | {
+      readonly kind: "fixture";
+      readonly inspection: Extract<
+        RelayCpuGateGrantInspection,
+        { readonly kind: "fixture" }
+      >;
+    }
+  | {
+      readonly kind: "non_fixture";
+      readonly inspection: Extract<
+        RelayCpuGateGrantInspection,
+        { readonly kind: "non_fixture" }
+      >;
+    };
+
 export interface RelayCpuGateControllerOperations {
   getRelayCpuGateSnapshot(): Promise<RelayCpuGateSnapshot>;
   getRelayCpuGateGrantInspection(
     requestId: string,
   ): Promise<RelayCpuGateGrantInspection>;
+  fenceRelayCpuGateSetup(requestId: string): Promise<RelayCpuGateFenceResult>;
 }
 ```
+`QuotaController` implements exactly these additional RPCs.
 
-`QuotaController` implements exactly these two additional read-only RPCs.
+The earlier state-only inspection concept is superseded. The canary-specific
+RPCs are `getRelayCpuGateGrantInspection(requestId)` and
+`fenceRelayCpuGateSetup(requestId)`. `getRelayCpuGateSnapshot()` remains read-only;
+`fenceRelayCpuGateSetup(requestId)` writes a durable setup fence.
 
 The earlier state-only inspection concept is superseded. The only
 canary-specific read-only RPC is
@@ -1357,27 +1397,43 @@ Snapshot values are capacity/preflight and diagnostic evidence only. Because
 normal Production traffic shares the same QuotaController namespace, changes
 in global counters during Stage 2 are not candidate failures.
 
-#### Canary-owned inspection authority
-
 `getRelayCpuGateGrantInspection(requestId)` reads only canonical
 QuotaController storage for that request ID:
 
 - `relay-grant:<requestId>`;
 - `req:<requestId>`;
+- `cpu-gate-fence:<requestId>` if present;
 - canonical active in-flight leases after read-only expiry filtering.
 
 Its internal result distinguishes:
 
-- `absent`: neither a request entry nor relay grant exists for the ID;
+- `absent`: neither a request entry, relay grant, nor durable fence exists for
+  the ID;
+- `fenced absent`: neither a request entry nor relay grant exists, and a durable
+  CPU-gate setup fence is present, so a delayed original setup cannot leave a
+  live fixture;
 - `non_fixture`: canonical state exists but does not satisfy the CPU-gate
   fixture predicate;
 - `fixture`: canonical request/grant facts satisfy the complete fixture
   predicate below.
 
 This distinction is available only inside the trusted Worker/QuotaController
-boundary. External recovery routes collapse `absent` and `non_fixture`
-into the same not-found response so a privileged runner does not learn normal
-request details.
+boundary. External recovery routes expose `fenced absent` and `non_fixture` as
+different HTTP responses so the runner applies distinct recovery rules. Both
+responses must disclose no facts about ordinary Production requests.
+
+Use:
+- `absent` -> HTTP `425 Too Early` with body `{"version":1,"kind":"pending_ambiguous"}`;
+- `fenced absent` -> HTTP `404 Not Found` with body `{"version":1,"kind":"absent"}`;
+  the runner may close operation A and start a new operation B with a fresh
+  request ID;
+- `non_fixture` -> HTTP `409 Conflict` with body `{"version":1,"error":"setup_state_incompatible"}`;
+  the runner must not retry `setup(A)` and must treat the operation as
+  `BLOCKED / INCOMPLETE`.
+
+The response for `non_fixture` must be produced without reading any ordinary
+request metadata beyond the fixture-predicate failure; it must not leak client,
+model, tokens, or state values.
 
 The QuotaController environment receives the same four non-secret,
 pool-specific fixture identifiers used by the Worker setup route:
@@ -1386,6 +1442,8 @@ pool-specific fixture identifiers used by the Worker setup route:
 OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
 OCTG_RELAY_CPU_GATE_STANDARD_MODEL
 OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
+OCTG_RELAY_CPU_GATE_MINI_MODEL
+```
 OCTG_RELAY_CPU_GATE_MINI_MODEL
 ```
 
@@ -1455,13 +1513,19 @@ request entry.reservedTokens
   == 0
 ```
 
-If any condition is false, the internal result is `non_fixture`.
+If any condition is false, the internal result is `non_fixture`. The presence or
+absence of an active in-flight lease does **not** affect `cpuGateFixture`; an
+expired, settled, released, or reconciled CPU-gate fixture remains a fixture as
+long as the canonical facts above still match.
 
-`activeLease` is true only when the canonical active in-flight lease set
-contains this request ID with the grant's exact `leaseGeneration`.
+`activeLease` is reported as a separate field in the `fixture` inspection. It is
+`true` only when the canonical active in-flight lease set contains this request
+ID with the grant's exact `leaseGeneration`. Terminal fixtures report
+`activeLease=false`.
 
 `actualTokens` is the request entry's canonical `actualTokens` when present,
 otherwise `null`.
+`actualTokens` is the request entry's canonical `actualTokens` when present,
 
 This inspection performs no mutation and exposes no payload, prompt, key,
 credential, client/model identity, normal request list, or unrelated request
@@ -1482,65 +1546,38 @@ interface RelayCpuGateSetupRequestV1 {
 }
 ```
 
-The protected Stage 2 runner:
-
 1. generates `requestId` before sending setup;
 2. generates it as `req_<ULID>` satisfying `RELAY_REQUEST_ID_PATTERN`;
-3. stores it only in protected ephemeral runner state;
+3. stores it only in protected ephemeral runner state **and** in a protected
+   operation journal that contains no secrets;
 4. never treats it as client, pool, quota, or authorization data.
 
-The Worker uses exactly that request ID. It never generates a replacement ID
-inside setup.
-
-The UTC day used to locate recovery state is deterministic from the ULID
-timestamp embedded in the runner-generated request ID. Define one shared helper
-contract:
-
-```ts
-relayRequestUtcDayOf(requestId: string): string | undefined
-```
-
-It validates `RELAY_REQUEST_ID_PATTERN`, decodes the ULID timestamp, and
-returns its UTC `YYYY-MM-DD` day.
-
-Before admission, setup requires:
+The operation journal records for every runner-owned operation:
 
 ```text
-relayRequestUtcDayOf(requestId)
-  == current Worker UTC day
+pool
+requestId
+state (pending | active | terminalizing | fenced_absent | terminal | blocked)
+createdAt timestamp
+lastTransitionAt timestamp
 ```
 
-A mismatch is a definite pre-admission rejection with no mutation. This avoids
-an ambiguous cross-midnight mapping while still letting recovery resolve the
-same QuotaController after response loss or grant-token expiry.
+The journal is mode `0600`, lives in a protected temporary directory, and is never
+committed. On driver startup, the runner reads the journal and must recover or
+close every operation that is not already `fenced_absent` or `terminal` before
+creating a new operation. Before deleting `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`, the
+runner must prove the journal is empty or that every recorded operation is in a
+`fenced_absent` or `terminal` state.
 
-The setup body continues to supply `pool`, but pool is only a routing input
-for the protected operation. The canonical stored grant must still satisfy the
-pool-specific fixture predicate.
-
-### Runner serialization contract
-
-The protected runner owns at most one non-terminal CPU-gate setup operation
-across both pools at a time.
-
-If operation A exists, the runner MUST NOT issue a new operation B until
-authoritative recovery inspection proves A is either:
-
-```text
-absent
-or
-terminal CPU-gate fixture
-```
-
-A timeout, lost response, malformed response, connection reset, or other
-ambiguous result does not authorize creation of a fresh request ID.
-
-The runner may retry the same setup request ID only after recovery inspection
-returns the collapsed not-found result.
+The runner MUST NOT wait for `fenced` blindly: the setup-fence response itself
+is authoritative. A `fixture` response from setup-fence is equivalent to a
+delayed successful admission; the runner must recover the existing fixture rather
+than retry setup(A).
 
 This serialization rule, together with the authoritative atomic
-`QuotaController.admitRelay()` max-in-flight check, preserves the design
-invariant that the CPU-gate itself owns at most one live canary grant/lease.
+`QuotaController.admitRelay()` max-in-flight check and the durable setup fence,
+preserves the design invariant that the CPU-gate itself owns at most one live
+canary grant/lease.
 
 ### Exact Worker CPU-gate routes
 
@@ -1561,8 +1598,6 @@ The Worker:
 4. resolves exactly `quota:<POOL>:<UTC_DAY>`;
 5. calls `getRelayCpuGateSnapshot()`;
 6. returns only `RelayCpuGateSnapshot`.
-
-No request ID list is exposed.
 
 #### Operation inspection and recovery
 
@@ -1586,20 +1621,39 @@ The Worker:
 
 1. requires the CPU-gate control surface to be enabled;
 2. authenticates the CPU-gate bearer;
-3. validates `requestId` and derives `utcDay` with
-   `relayRequestUtcDayOf(requestId)`;
-4. resolves exactly `quota:<POOL>:<UTC_DAY>`;
-5. calls `getRelayCpuGateGrantInspection(requestId)`;
-6. maps `absent` and `non_fixture` to the same HTTP 404 body:
+3. validates `pool` and `requestId`;
+4. derives the operation UTC day from the requestId's ULID timestamp;
+5. resolves the owning QuotaController by that embedded day (recovery is valid even
+   after a calendar-day rollover);
+6. calls `getRelayCpuGateGrantInspection(requestId)`;
+7. maps `absent` with `fenced=true` to HTTP `404 Not Found` with body:
 
 ```ts
-interface RelayCpuGateOperationNotFoundV1 {
+interface RelayCpuGateOperationAbsentV1 {
   readonly version: 1;
-  readonly kind: "not_found";
+  readonly kind: "absent";
 }
 ```
 
-7. maps a canonical fixture to HTTP 200:
+8. maps `absent` with `fenced=false` to HTTP `425 Too Early` with body:
+
+```ts
+interface RelayCpuGateOperationPendingV1 {
+  readonly version: 1;
+  readonly kind: "pending_ambiguous";
+}
+```
+
+9. maps `non_fixture` to HTTP `409 Conflict` with body:
+
+```ts
+interface RelayCpuGateOperationIncompatibleV1 {
+  readonly version: 1;
+  readonly error: "setup_state_incompatible";
+}
+```
+
+10. maps a canonical fixture to HTTP 200:
 
 ```ts
 interface RelayCpuGateOperationInspectionV1 {
@@ -1609,12 +1663,6 @@ interface RelayCpuGateOperationInspectionV1 {
     RelayCpuGateGrantInspection,
     { readonly kind: "fixture" }
   >;
-}
-```
-
-No normal Production request details are returned for a collision or guessed
-request ID.
-
 ### Cloudflare-side lifecycle fixture setup
 
 The external runner MUST NOT receive `OCTG_RELAY_CONTEXT_HMAC_KEY` and MUST
@@ -1636,46 +1684,42 @@ OCTG_RELAY_CPU_GATE_STANDARD_MODEL
 OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
 OCTG_RELAY_CPU_GATE_MINI_MODEL
 ```
-
 Those client IDs are dedicated enabled CPU-gate clients and each configured
 model must classify to its requested pool.
-
 The external request cannot supply a client ID, model, reservation, upper
 bound, cache mode, environment, metadata, nonce, or signing input.
-
 For setup, the Worker:
 
 1. requires the CPU-gate control surface to be enabled;
 2. authenticates the CPU-gate bearer;
-3. validates the runner-supplied request ID and its current-day ULID timestamp;
-4. resolves the requested pool's Worker-owned fixture client/model;
-5. derives the operation UTC day from the request ID;
-6. resolves the owning QuotaController;
-7. calls `getRelayCpuGateGrantInspection(requestId)` as collision preflight;
-8. proceeds only when the result is `absent`; `non_fixture` or an existing
+3. validates the runner-supplied request ID and requires its ULID UTC day to
+   equal the current Worker UTC day;
+4. derives the operation UTC day from the request ID;
+5. resolves the owning QuotaController;
+6. calls `getRelayCpuGateGrantInspection(requestId)` as collision preflight;
+7. proceeds only when the result is `absent`; `non_fixture` or an existing
    fixture fails closed with no new mutation;
-9. builds a valid Production `RelayContextV1` using exactly the runner-owned
+8. builds a valid Production `RelayContextV1` using exactly the runner-owned
    request ID, the dedicated fixture client, no idempotency key, runtime
    environment, normal context timestamps, and a fresh Worker-generated nonce;
-10. constructs synthetic metadata with:
-    - `model` = configured fixture model;
-    - `estimatedInputTokens = 0`;
-    - `maxOutputTokens = 0`;
-    - `inputBytes = 0`;
-    - `rawBodyBytes = 0`;
-    - `isToolUse = false`;
-    - `stream = false`;
-11. calls the existing authoritative `QuotaController.admitRelay(...)`
+9. constructs synthetic metadata with:
+   - `model` = configured fixture model;
+   - `estimatedInputTokens = 0`;
+   - `maxOutputTokens = 0`;
+   - `inputBytes = 0`;
+   - `rawBodyBytes = 0`;
+   - `isToolUse = false`;
+   - `stream = false`;
+10. calls the existing authoritative `QuotaController.admitRelay(...)`
     transaction with:
     - `reservedTokens = 0`;
     - `upperBoundTokens = 0`;
     - `maxOutputTokens = 0`;
     - `cacheEnabled = false`;
     - no raw Idempotency-Key;
-12. performs no direct Durable Object storage mutation and no D1 quota
-    mutation;
-13. if admission is denied, returns a definite pre-admission setup rejection;
-14. if admission succeeds, builds normal `RelayGrantCredentialV1` claims from
+11. performs no direct Durable Object storage mutation and no D1 quota mutation;
+12. if admission is denied, returns a definite pre-admission setup rejection;
+13. if admission succeeds, builds normal `RelayGrantCredentialV1` claims from
     the returned authoritative grant and signs them with
     `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare.
 
@@ -1700,8 +1744,73 @@ interface RelayCpuGateSetupResponseV1 {
 
 The returned `requestId` must equal the runner-supplied request ID.
 
-Setup and its recovery checks occur outside every CPU acceptance measurement
-window.
+#### Setup fence
+
+After any ambiguous setup response the runner MUST write a durable fence before
+retrying the same request ID or concluding the operation. The fence is a new
+Worker route:
+
+```text
+POST /internal/relay/v1/cpu-gate/setup-fence
+Content-Type: application/json
+Authorization: Bearer <OCTG_RELAY_CPU_GATE_AUTH_TOKEN>
+```
+
+Body: same `RelayCpuGateOperationRequestV1` shape as operation inspection.
+
+The Worker:
+
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. validates `requestId` and derives the operation UTC day from its ULID timestamp;
+4. resolves the owning QuotaController by that embedded day (recovery is valid even
+   after a calendar-day rollover);
+5. calls `fenceRelayCpuGateSetup(requestId)`;
+6. returns the authoritative result.
+
+The QuotaController RPC `fenceRelayCpuGateSetup(requestId)` runs inside the
+existing QuotaController transaction and atomically:
+
+- checks whether a canonical fixture already exists for the request ID;
+- if a fixture exists, returns `kind="fixture"` with the approved inspection
+  fields so the runner can recover the existing fixture;
+- if a non-fixture grant/request exists, returns `kind="non_fixture"` so the
+  runner treats the operation as `BLOCKED / INCOMPLETE`;
+- otherwise records a durable CPU-gate setup fence for the request ID and returns
+  `kind="fenced"`.
+
+Once the fence is durable:
+
+- the same QuotaController transaction that executes any later `admitRelay(requestId)`
+  MUST fail closed if a fence exists for that request ID, regardless of whether
+  the original setup HTTP request had not yet reached `admitRelay`;
+- `getRelayCpuGateGrantInspection(requestId)` returns `fenced absent` only when
+  the fence is present and no grant/request entry exists;
+- an existing fixture is detected before the fence is written and the runner is
+  directed to the live-fixture recovery path instead of starting a new operation.
+
+No direct Durable Object storage mutation occurs outside the QuotaController
+transaction. The fence record may share the existing `req:<requestId>` key or a
+dedicated `cpu-gate-fence:<requestId>` key, but it must be authoritative and
+must not be writable by the Worker directly.
+
+The response body is exactly:
+
+```ts
+interface RelayCpuGateSetupFenceResponseV1 {
+  readonly version: 1;
+  readonly requestId: string;
+  readonly kind: "fenced" | "fixture" | "non_fixture";
+  readonly inspection?: Extract<
+    RelayCpuGateGrantInspection,
+    { readonly kind: "fixture" | "non_fixture" }
+  >;
+}
+```
+
+Setup, setup-fence, and recovery checks occur outside every CPU acceptance
+measurement window. They are classified as `cpu-gate-control` invocations and are
+excluded from lifecycle series counts and 5/7/0 evaluation.
 
 ### Setup signing-failure compensation
 
@@ -1777,20 +1886,23 @@ A syntactically valid authenticated response that explicitly represents either:
 - `setup_failed_compensated`.
 
 These outcomes prove that setup did not leave a live CPU-gate fixture. The
-runner may close operation A after confirming `operation-inspection(A)`
-returns not-found or a terminal fixture.
+runner MUST call `setup-fence(A)` and accept either:
+
+- `fenced` -> operation A is `fenced absent`; runner may close A and start a new
+  operation B; or
+- `fixture` with `state=reconciled_unused`, `requestState=released`,
+  `activeLease=false` -> the fixture is terminal and operation A is closed;
+  runner may start a new operation B.
+
+In both cases operation A is permanently closed. The runner MUST NOT retry
+`setup(A)`.
 
 #### Ambiguous result
 
-Timeout, connection reset, lost HTTP response, malformed response,
-`setup_state_ambiguous`, or any result for which the runner cannot prove the
-durable outcome.
-
-The runner MUST NOT create request ID B.
-
-It enters recovery for request ID A.
-
-### Setup response ambiguity and recovery algorithm
+It enters recovery for request ID A by first writing a durable setup fence. The
+fence is authoritative: once durable, no later `admitRelay(A)` can leave a live
+fixture for that request ID. Only after the fence is durable may the runner
+inspect A again.
 
 The exact protocol is:
 
@@ -1803,38 +1915,44 @@ POST setup(A)
     |      -> operation-inspect A
     |      -> prove authorized CPU-gate fixture
     |      -> run measurement
+    |      -> terminalize fixture
+    |      -> operation may close; runner may start operation B
     |
     +-- definite no-live-fixture result
-    |      -> operation-inspect A
-    |      -> prove not_found or terminal fixture
-    |      -> operation may close
-    |
+    |      -> POST setup-fence(A)
+    |      -> accept fenced OR terminal fixture from setup-fence
+    |      -> operation may close; runner may start operation B
     +-- ambiguous result
-           -> DO NOT create requestId B
-           -> operation-inspect A
-                |
-                +-- not_found
-                |      -> setup(A) may be retried
-                |
-                +-- cpuGateFixture=true, non-terminal
-                |      -> reconcile-unused(A)
-                |      -> prove terminal
-                |      -> only then may a new operation start
-                |
-                +-- cpuGateFixture=true, terminal
-                |      -> no mutation
-                |      -> operation may close
-                |
-                +-- non-fixture / unverifiable
-                       -> external response is not_found or error
-                       -> BLOCKED / INCOMPLETE
-                       -> no new setup
+    |           -> DO NOT create requestId B
+    |           -> POST setup-fence(A)
+    |           -> inspect setup-fence result
+    |                |
+    |                +-- fenced
+    |                |      -> operation-inspect A returns fenced absent
+    |                |      -> operation may close; runner may start operation B
+    |                |
+    |                +-- fixture
+    |                |      -> original setup already left a live fixture
+    |                |      -> operation-inspect A
+    |                |      -> if terminal: operation may close; runner may start operation B
+    |                |      -> if non-terminal: reconcile-unused(A), prove terminal,
+    |                |           then runner may start operation B
+    |                |
+    |                +-- non_fixture
+    |                       -> BLOCKED / INCOMPLETE
+    |                       -> no new setup
+    |                       -> runner must not start operation B
+    |
+    +-- non-fixture / unverifiable result
+           -> external response is non_fixture or error
+           -> BLOCKED / INCOMPLETE
+           -> no new setup
+           -> runner must not start operation B
 ```
 
-The runner never retries ambiguous setup with a fresh request ID.
-
-### Why zero reservation is possible here
-
+The runner never retries `setup(A)`. The fence is a tombstone: once `fenced` is
+durable for requestId A, operation A is permanently closed and the runner may
+only start a new operation with a fresh request ID.
 The ordinary `RelayDecisionController` budget resolver applies a minimum
 safety margin of 256 tokens, or 512 tokens at low remaining ratio. Therefore
 `estimatedInputTokens=0` and `maxOutputTokens=0` do not produce a zero
@@ -1887,12 +2005,15 @@ Therefore its bounded Production capacity impact is at most one in-flight slot.
 The design does not claim that two normal slots remain continuously during
 measurement.
 
-### Lifecycle CPU sampling on the single grant
+### Lifecycle CPU sampling design
 
-The same valid canary grant is used to exercise the three callback classes in
-order.
+The CPU-gate runner owns at most one non-terminal CPU-gate operation at a time.
+Therefore the bounded Production capacity impact is at most one in-flight slot.
+This constraint also shapes how the runner collects enough samples for each
+lifecycle transition class.
 
-The Stage 2 runner calls each existing callback route with:
+For every lifecycle series the Stage 2 runner calls the existing callback routes
+with:
 
 ```text
 Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
@@ -1902,21 +2023,49 @@ Content-Type: application/json
 
 This preserves the exact Production lifecycle callback authentication hot path.
 
-1. **activation series**
-   - first valid activation may transition `authorized -> attempted`;
-   - repeated valid activation calls may return the existing replay denial;
-   - those exact expected responses count as successful driver invocations.
+The runner performs separate, non-overlapping series:
 
-2. **renewal series**
-   - grant is already `attempted`;
-   - repeated valid renewals operate on the same lease;
-   - concurrency 1/2/3 is callback request concurrency, not grant count.
+1. **activation_normal**
+   - Each sample creates a fresh CPU-gate fixture through `setup`, then calls
+     activation exactly once.
+   - The fixture is terminalized before the next sample begins, so every
+     activation is a real `authorized -> attempted` transition.
+   - Because only one non-terminal operation may exist at a time, samples run
+     serially within the series and the series is measured only at
+     `concurrency=1`.
+   - Setup, terminalization, and any recovery calls are `cpu-gate-control`
+     invocations placed outside the series windows; the measured window for each
+     sample contains exactly one activation callback.
+   - Requires at least 500 successful first-time activations.
+2. **activation_replay**
+   - One fixture is created and activated once.
+   - Subsequent activation calls exercise the existing replay-denial path.
+   - Measures replay cost separately from normal transition cost.
+   - Requires at least 500 successful invocations.
 
-3. **terminal series**
-   - first terminal report is exactly `settle(totalTokens=0)`;
-   - repeated terminal reports use the same terminal fingerprint and exercise
-     existing idempotent terminal handling;
-   - concurrency 1/2/3 again uses the same grant.
+3. **renewal_normal**
+   - One fixture is created, activated, and then renewed repeatedly while the lease
+     remains active.
+   - Every renewal is a normal attempted-state transition.
+   - Concurrency is the number of simultaneous renewal callbacks against the same
+     fixture; measured at `concurrency=1,2,3`.
+   4. **terminal_normal**
+   - Each sample creates a fresh CPU-gate fixture, activates it in a
+     `cpu-gate-control` window, and calls terminal exactly once in the measured
+     window.
+   - The first terminal report is the real `settle(totalTokens=0)` transition.
+   - Samples run serially because the fixture must be closed before the next one.
+   - The series is measured only at `concurrency=1`.
+   - Requires at least 500 successful first-time terminals.
+
+5. **terminal_replay**
+   - One fixture is created, activated, and terminalized once.
+   - Subsequent terminal calls exercise existing idempotent terminal handling.
+   - Measures replay cost separately from normal transition cost.
+   - Concurrency is the number of simultaneous terminal callbacks against the same
+     fixture; measured at `concurrency=1,2,3`.
+   - Requires at least 500 successful invocations.
+   - Requires at least 500 successful invocations.
 
 The runner holds the returned grant credential, CPU-gate bearer, and service
 bearer only for the active measurement run. It never receives a signing key.
@@ -1926,9 +2075,6 @@ Worker path while the lifecycle DO performs trust/semantic work. DO CPU is
 recorded separately and does not substitute for the stateless 5/7/0 gate.
 
 ### Upstream behavior
-
-The 500-sample Stage 2 CPU matrix sends **no upstream model request**.
-
 Activation means only that the authoritative grant reaches `attempted`; the
 gate runner never performs Gateway B/OpenAI traffic.
 
@@ -1947,7 +2093,6 @@ Global Production counters are not compared before and after Stage 2.
 For every canary operation, the authoritative
 `getRelayCpuGateGrantInspection(requestId)` result is the quota-safety
 evidence.
-
 Immediately after setup, the setup inspection above must prove the exact
 authorized zero-reservation fixture.
 
@@ -2089,20 +2234,28 @@ The following remain identical across accepted Stage 1 and Stage 2 evidence:
 - measurement harness version/fingerprint;
 - workload definitions.
 
-Environment-specific values may differ where Preview/Production isolation
-requires them, including secret values, endpoints, namespace IDs, and
+If source, lifecycle implementation, RPC contract, CPU gate logic, workload
+series definitions, or gate tooling change after a candidate is CPU-tested, the
+candidate is invalidated and Stage 2 must restart from Task 6 using the new
+locked source revision.
 environment label.
 
 Stage 2 records the exact Production ScriptVersion of this CPU-tested
-candidate.
+candidate and the source-revision lock so that the promotion/hardening boundary
+can prove identity.
 
-If source, lifecycle implementation, RPC contract, CPU gate logic, workload
-definition, or harness semantics change before Stage 2 PASS, Stage 1 evidence
-is invalid and must be rerun.
+### Post-gate hardening criteria
 
-After Stage 2 PASS, rollout promotion uses this **same exact ScriptVersion**.
-The tested candidate remains the rollout subject until it reaches 100% and
-Production rollout acceptance is complete.
+Hardening is allowed only when:
+
+1. the exact CPU-tested candidate has reached 100%;
+2. rollout acceptance for that exact candidate is complete;
+3. every runner-owned CPU-gate operation is proven `fenced absent` or terminal.
+
+**Rollout acceptance** means ordinary Production traffic served by the candidate ScriptVersion at non-zero traffic percentage passes an end-to-end Responses smoke for a bounded observation window. The acceptance window must be at least one complete minute and must include at least ten successful `/v1/responses` requests with normal tokenization, admission, and upstream settlement. Acceptance fails if error rate exceeds baseline, any 5/7/0 CPU violation is observed, or the candidate ScriptVersion is not the observed Worker version. Acceptance evidence is required before hardening creation; `hardening-create` must reject if it is missing.
+
+
+**Rollout acceptance** means ordinary Production traffic served by the candidate ScriptVersion at non-zero traffic percentage passes an end-to-end Responses smoke for a bounded observation window. The acceptance window must be at least one complete minute and must include at least ten successful `/v1/responses` requests with normal tokenization, admission, and upstream settlement. Acceptance fails if error rate exceeds baseline, any 5/7/0 CPU violation is observed, or the candidate ScriptVersion is not the observed Worker version. Acceptance evidence is required before hardening creation; `hardening-create` must reject if it is missing.
 
 ### Post-gate hardening version identity
 
@@ -2393,9 +2546,42 @@ exact candidate Worker override
 candidate ScriptVersion observed
 candidate Worker -> bridge-compatible CPU-gate inspection/setup succeeds
 ```
+### Stage 2 quota-safety tests
 
-When Phase 2 is active, a bounded lifecycle callback control smoke is also
-required.
+Test the exact Production canary protocol:
+
+- ingress/decision fixtures stop before `admitRelay`;
+- CPU-gate control uses a dedicated bearer unavailable to Deno;
+- CPU-gate secret absent, invalid shape, or equal to the service bearer disables
+  every control route with 404 and no DO call;
+- external runner never receives the Production relay HMAC key;
+- Stage 2 runner receives the existing service bearer only for
+  activation/renewal/terminal callback Authorization;
+- runner generates the setup request ID before the mutation;
+- setup uses exactly the runner-supplied request ID;
+- setup rejects a request ID whose ULID UTC day is not the current Worker day;
+- setup collision with normal Production state fails closed and mutates
+  nothing;
+- setup grant is created through existing `QuotaController.admitRelay` with
+  zero reservation and no idempotency key;
+- setup cannot select arbitrary client/model/reservation/signing claims;
+- signing failure after successful admission performs
+  `reconcileRequest(requestId, "unused")` and proves no live fixture remains;
+- ambiguous signing-failure compensation blocks creation of a new operation;
+- HTTP response loss after successful admission is recovered by the pre-known
+  request ID;
+- an ambiguous setup result never causes a fresh request ID to be issued;
+- the runner never retries `setup(A)`; `fenced absent` means operation A is
+  permanently closed and the runner may start a new operation B;
+- operation inspection maps `fenced absent` to HTTP 404 (operation A closed) and
+  `non_fixture` to HTTP 409 (operation A blocked); both responses disclose no
+  normal Production request details;
+- a durable setup fence prevents a delayed `admitRelay` for the same request ID
+  from leaving a live fixture;
+- setup-fence resolves the owning QuotaController from the requestId's ULID day and
+  works across a calendar-day rollover.
+- setup-fence resolves the owning QuotaController from the requestId's ULID day and
+  works across a calendar-day rollover.
 
 Compatibility-preflight terminalization MUST also be tested:
 
@@ -2416,11 +2602,6 @@ compatibility preflight leaves no non-terminal CPU-gate fixture
 Stage 2 measurement cannot begin while preflight operation is non-terminal
 preflight invocations are outside measurement windows and sample counts
 first Stage 2 measurement fixture uses a fresh runner-owned requestId
-```
-
-### Measurement-correlation tests
-
-Test that platform telemetry alone can classify every required series using:
 
 ```text
 candidate ScriptVersion
@@ -2458,16 +2639,14 @@ Test the exact Production canary protocol:
 - HTTP response loss after successful admission is recovered by the pre-known
   request ID;
 - an ambiguous setup result never causes a fresh request ID to be issued;
-- setup retry reuses the same request ID only after authoritative not-found;
-- at most one non-terminal CPU-gate operation exists at once;
-- snapshot returns aggregate capacity/diagnostic values but global counter
-  equality is not a PASS invariant;
-- `maxInFlight >= 3` is preflight evidence only;
-- normal Production traffic may change global counters without failing the
-  candidate;
-- operation inspection collapses absent and non-fixture state to the same
-  external not-found result;
-- canary inspection derives fixture identity from canonical stored grant/request
+  permanently closed and the runner may start a new operation B;
+- operation inspection maps `fenced absent` to HTTP 404 (operation A closed) and
+  `non_fixture` to HTTP 409 (operation A blocked); both responses disclose no
+  normal Production request details;
+- a durable setup fence prevents a delayed `admitRelay` for the same request ID
+  from leaving a live fixture;
+- setup-fence resolves the owning QuotaController from the requestId's ULID day and
+  works across a calendar-day rollover.
   facts and QuotaController-owned pool configuration;
 - setup inspection requires `cpuGateFixture=true`, authorized/reserved states,
   zero admission values, and `activeLease=true`;
@@ -2490,7 +2669,8 @@ Test the exact Production canary protocol:
   `QuotaController.reconcileRequest(requestId, "unused")`;
 - cleanup never writes Durable Object storage directly;
 - no new setup operation begins until the previous request ID is authoritative
-  not-found or terminal;
+  `fenced absent` or terminal; a durable setup fence makes absent authoritative
+  and permanently closes the operation;
 - compatibility-preflight setup/inspection/callback/cleanup operations are excluded from all Stage 2 CPU sample windows;
 - compatibility-preflight fixture is canonical terminal with no active lease before Stage 2 measurement starts;
 - the first Stage 2 measurement setup uses a fresh runner-owned request ID rather than reusing the preflight fixture;
@@ -2588,15 +2768,19 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - The protected Stage 2 runner may use OCTG_RELAY_SERVICE_AUTH_TOKEN only on the existing activation/renewal/terminal callback routes.
 - CPU-gate control uses the separate OCTG_RELAY_CPU_GATE_AUTH_TOKEN; absent or invalid secret disables all CPU-gate control routes fail-closed.
 - The Production CPU-gate secret remains on the exact CPU-tested candidate through its 100% rollout acceptance, then is removed only to create the separate post-gate hardening version.
-- Stage 2 setup creates grants only through QuotaController.admitRelay.
-- CPU-gate operation inspection exposes no normal-user request details, requires authenticated CPU-gate control access plus the runner-owned pool/requestId recovery identity, and returns fixture details only when canonical QuotaController state proves `cpuGateFixture=true`.
+- Recovery inspection distinguishes `absent` (HTTP 404, retry allowed) from
+  `non_fixture` (HTTP 409, retry forbidden) and exposes no normal Production
+  request details.
 - reconcile-unused requires canonical cpuGateFixture=true before mutation and then uses only existing reconcileRequest(..., "unused") semantics.
 - No CPU-gate route performs direct Durable Object storage mutation.
 - Setup mutation identity is known to the runner before mutation and uses exactly one runner-generated request ID.
-- Ambiguous setup acknowledgement never causes a second operation to be created before the first is authoritative not-found or terminal.
-- Signing failure after admission is compensated through existing authoritative reconciliation and leaves no live CPU-gate fixture.
+- Ambiguous setup acknowledgement never causes a second operation to be created
+  before the first is authoritative `fenced absent` or terminal; a durable
+  setup fence makes absent authoritative and permanently closes the operation;
 - Lost/expired grant credentials do not prevent recovery because operation inspection and cleanup can target the runner-owned request ID.
-- Recovery inspection collapses absent and non-fixture targets and exposes no normal Production request details.
+- Recovery inspection distinguishes `fenced absent` (HTTP 404, operation closed)
+  from `non_fixture` (HTTP 409, operation blocked) and exposes no normal
+  Production request details.
 - Recovery cleanup mutates only canonical `cpuGateFixture=true` targets.
 - The exact CPU-tested candidate ScriptVersion reaches 100% and completes rollout acceptance before CPU-gate secret deletion.
 - Secret deletion uses `wrangler versions secret delete` and creates a distinct post-gate hardening ScriptVersion.
