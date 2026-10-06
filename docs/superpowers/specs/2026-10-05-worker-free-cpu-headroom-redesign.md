@@ -478,12 +478,13 @@ remains a Production-safe canary that cannot consume Production quota.
   this model receives `model_requires_paid` with no admission/grant; any other
   outcome makes the Stage 2 series `BLOCKED / INCOMPLETE`.
 
-### Decision callback invocation
-
 The `decision` invocation class is measured by invoking
-`/internal/relay/v1/decision` directly. The runner supplies:
+`/internal/relay/v1/decision` directly. Before each decision sample the runner
+calls the CPU-gate `decision-context` route for the active fixture and uses the
+returned `contextToken` in:
 
 ```text
+X-OCTG-Relay-Context: <contextToken>
 Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
 ```
@@ -1230,6 +1231,7 @@ For the service bearer, Stage 2 use is restricted to the existing exact
 Production callback routes:
 
 ```text
+POST /internal/relay/v1/decision
 POST /internal/relay/v1/activation
 POST /internal/relay/v1/renewal
 POST /internal/relay/v1/terminal
@@ -1240,9 +1242,10 @@ The runner does not use the service bearer on any CPU-gate control route.
 For the CPU-gate bearer, use is restricted to:
 
 ```text
+/internal/relay/v1/cpu-gate/quota
 /internal/relay/v1/cpu-gate/setup
 /internal/relay/v1/cpu-gate/setup-fence
-/internal/relay/v1/cpu-gate/quota
+/internal/relay/v1/cpu-gate/decision-context
 /internal/relay/v1/cpu-gate/operation-inspection
 /internal/relay/v1/cpu-gate/reconcile-unused
 ```
@@ -1611,7 +1614,16 @@ This serialization rule, together with the authoritative atomic
 preserves the design invariant that the CPU-gate itself owns at most one live
 canary grant/lease.
 
-### Exact Worker CPU-gate routes
+The exact control routes are:
+
+```text
+GET  /internal/relay/v1/cpu-gate/quota
+POST /internal/relay/v1/cpu-gate/setup
+POST /internal/relay/v1/cpu-gate/setup-fence
+POST /internal/relay/v1/cpu-gate/decision-context
+POST /internal/relay/v1/cpu-gate/operation-inspection
+POST /internal/relay/v1/cpu-gate/reconcile-unused
+```
 
 #### Quota snapshot
 
@@ -1842,9 +1854,63 @@ interface RelayCpuGateSetupFenceResponseV1 {
 }
 ```
 
-Setup, setup-fence, and recovery checks occur outside every CPU acceptance
-measurement window. They are classified as `cpu-gate-control` invocations and are
-excluded from lifecycle series counts and 5/7/0 evaluation.
+Setup, setup-fence, decision-context, and recovery checks occur outside every
+CPU acceptance measurement window. They are classified as `cpu-gate-control`
+invocations and are excluded from lifecycle series counts and 5/7/0 evaluation.
+
+#### Decision context
+
+Decision callbacks require a Cloudflare-signed `RelayContextV1` in the
+`X-OCTG-Relay-Context` header. The external runner MUST NOT receive
+`OCTG_RELAY_CONTEXT_HMAC_KEY` and MUST NOT construct or sign a RelayContext.
+
+The CPU-gate control surface therefore exposes a protected context route:
+
+```text
+POST /internal/relay/v1/cpu-gate/decision-context
+Content-Type: application/json
+Authorization: Bearer <OCTG_RELAY_CPU_GATE_AUTH_TOKEN>
+```
+
+Body: same `RelayCpuGateOperationRequestV1` shape as operation inspection
+(`pool` + `requestId`).
+
+The Worker:
+
+1. requires the CPU-gate control surface to be enabled;
+2. authenticates the CPU-gate bearer;
+3. validates `pool` and `requestId`;
+4. derives the operation UTC day from the requestId's ULID timestamp;
+5. resolves the owning QuotaController by that embedded day;
+6. calls `getRelayCpuGateGrantInspection(requestId)` and requires the result to
+   be a canonical fixture with `state` in `authorized|attempted|uncertain`,
+   `cpuGateFixture=true`, and `activeLease=true` for the grant's exact
+   `leaseGeneration`;
+7. builds a valid Production `RelayContextV1` using exactly the runner-owned
+   request ID, the dedicated fixture client, the fixture model, no idempotency
+   key, runtime environment, normal context timestamps, and a fresh
+   Worker-generated nonce;
+8. signs the context with `OCTG_RELAY_CONTEXT_HMAC_KEY` inside Cloudflare;
+9. returns:
+
+```ts
+interface RelayCpuGateDecisionContextV1 {
+  readonly version: 1;
+  readonly requestId: string;
+  readonly contextToken: string;
+}
+```
+
+If the fixture is absent, non-fixture, terminal, or its lease is no longer
+active, the route returns a definite error and the runner must recover or close
+the operation before measuring decision.
+
+The returned `contextToken` is used exactly once per decision measurement call
+in the `X-OCTG-Relay-Context` header. It is not a grant credential, does not
+authorize an upstream model call, and must not be logged or retained after the
+series window closes.
+
+### Setup signing-failure compensation
 
 ### Setup signing-failure compensation
 
@@ -2393,7 +2459,7 @@ Requirements:
   for rollback.
 - Stage 2's protected measurement credentials are never exposed to clients or written to logs/artifacts.
 - `OCTG_RELAY_CONTEXT_HMAC_KEY` remains Cloudflare-side only.
-- `OCTG_RELAY_SERVICE_AUTH_TOKEN` may be used by the protected Stage 2 runner only for the existing lifecycle callback routes.
+- `OCTG_RELAY_SERVICE_AUTH_TOKEN` may be used by the protected Stage 2 runner only for the existing lifecycle callback routes (decision, activation, renewal, terminal).
 - `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` enables only the CPU-gate control plane on the CPU-tested candidate and remains present through exact-candidate rollout acceptance; it is removed only in the separately verified post-gate hardening version.
 
 ## Rollback compatibility
@@ -2590,7 +2656,7 @@ Test the exact Production canary protocol:
   every control route with 404 and no DO call;
 - external runner never receives the Production relay HMAC key;
 - Stage 2 runner receives the existing service bearer only for
-  activation/renewal/terminal callback Authorization;
+  decision/activation/renewal/terminal callback Authorization;
 - runner generates the setup request ID before the mutation;
 - setup uses exactly the runner-supplied request ID;
 - setup rejects a request ID whose ULID UTC day is not the current Worker day;
@@ -2798,7 +2864,7 @@ Issue #121 becomes eligible to close only after all of the following are true:
 - Stage 2 has at most one CPU-gate canary grant/lease at any time; its capacity impact is bounded to at most one slot.
 - maxInFlight >= 3 remains preflight evidence, but the design makes no continuous free-slot guarantee.
 - Production relay HMAC signing remains Cloudflare-side; neither the external harness nor Deno receives OCTG_RELAY_CONTEXT_HMAC_KEY.
-- The protected Stage 2 runner may use OCTG_RELAY_SERVICE_AUTH_TOKEN only on the existing activation/renewal/terminal callback routes.
+- The protected Stage 2 runner may use OCTG_RELAY_SERVICE_AUTH_TOKEN only on the existing decision/activation/renewal/terminal callback routes.
 - CPU-gate control uses the separate OCTG_RELAY_CPU_GATE_AUTH_TOKEN; absent or invalid secret disables all CPU-gate control routes fail-closed.
 - The Production CPU-gate secret remains on the exact CPU-tested candidate through its 100% rollout acceptance, then is removed only to create the separate post-gate hardening version.
 - Recovery inspection distinguishes `absent` (HTTP 404, retry allowed) from

@@ -515,9 +515,9 @@ Exact route set:
 GET  /internal/relay/v1/cpu-gate/quota
 POST /internal/relay/v1/cpu-gate/setup
 POST /internal/relay/v1/cpu-gate/setup-fence
+POST /internal/relay/v1/cpu-gate/decision-context
 POST /internal/relay/v1/cpu-gate/operation-inspection
 POST /internal/relay/v1/cpu-gate/reconcile-unused
-```
 
 Keep control routes internal and before generic callback action parsing.
 
@@ -651,14 +651,24 @@ The `decision` series is invoked directly by the runner against
 ```text
 Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
 Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
+X-OCTG-Relay-Context: <contextToken>
 ```
 
-This bypasses Deno and guarantees the decision callback executes on the exact
-candidate Worker version. The request body is a valid Deno tokenizer decision
-payload containing the series request ID and the stage-appropriate model. The
-`ingress` series uses the same version override header on `/v1/responses`.
-`activation`, `renewal`, and `terminal` use the Worker-signed grant credential
-from CPU-gate setup and the same version override header.
+The `contextToken` is obtained from the CPU-gate `decision-context` route
+immediately before each decision sample. The runner never constructs or signs a
+RelayContext; Cloudflare signs it with `OCTG_RELAY_CONTEXT_HMAC_KEY`. The
+`decision-context` call is `cpu-gate-control` and is excluded from the decision
+measurement window.
+
+The request body is a valid Deno tokenizer decision payload containing the
+series request ID and the stage-appropriate model. This bypasses the Deno
+tokenizer and guarantees the decision callback executes on the exact candidate
+Worker version, because external Deno callbacks would not inherit an ingress
+version override.
+
+`ingress` uses the same override header on `/v1/responses`. `activation`,
+`renewal`, and `terminal` use the Worker-signed grant credential obtained from
+CPU-gate setup and the same override header.
 
 - [ ] **Step 2: Write RED telemetry-acquisition tests**
 
@@ -704,55 +714,39 @@ one group
   -> exactly one RelayCpuPlatformRecord
 ```
 
-The map key `groupRequestId` is the canonical platform invocation identity and becomes `RelayCpuPlatformRecord.requestId`.
+The map key `groupRequestId` becomes `RelayCpuPlatformRecord.requestId`. The
+runner does **not** rely on this platform request ID to correlate telemetry with
+the run ledger, because replay/renewal callbacks may share the same domain
+request ID and because Cloudflare's group ID may differ from the runner-owned
+`req_<ULID>`.
 
-An event is an authoritative Worker CPU event for that group only when it contains all of:
-
-```text
-$workers.cpuTimeMs
-$workers.outcome
-$workers.scriptName
-$workers.scriptVersion.id
-$workers.executionModel
-$workers.eventType
-platform event timestamp
-```
-
-and the event matches the expected:
+Instead, the evidence reducer correlates each ledger call with a normalized
+platform record by:
 
 ```text
-scriptName
-ScriptVersion
-executionModel=stateless
-windowStartMs <= platform timestamp < windowEndMs
+scriptVersionId  == candidate version
+routeDiscriminator in the series invocation class
+windowStartMs <= eventTimestampMs < windowEndMs
+call timestamp matches event timestamp within a bounded tolerance
 ```
 
-Application `octg.relay_invocation` start/finish markers are supplementary only. A marker without the authoritative Worker CPU fields is never eligible to become a `RelayCpuPlatformRecord`.
-
-Per-group cardinality is exact:
+For a deterministic series the calls are issued sequentially, so ordering plus
+timestamp tolerance is sufficient. For concurrent series the reducer uses the
+recorded call ordinal and route discriminator. The run ledger records per call:
 
 ```text
-0 authoritative CPU events
-  -> BLOCKED / INCOMPLETE
-
-exactly 1 authoritative CPU event
-  -> exactly 1 RelayCpuPlatformRecord
-
->1 authoritative CPU events
-  -> exact duplicates with the same eventId and byte-for-byte-equivalent normalized authoritative fields may collapse to one
-  -> any other multiplicity/conflict is BLOCKED / INCOMPLETE
+series identity (invocationClass, workloadClass, concurrency)
+call ordinal
+call timestamp (runner clock, ms)
+route discriminator
+observed response status / outcome hint
+fixture requestId (for lifecycle operations only)
 ```
 
-The implementation MUST NOT select an arbitrary first/last CPU-bearing event.
-
-Request identity consistency is exact. When present on any event in the invocation group:
-
-```text
-$metadata.requestId == groupRequestId
-$workers.requestId == groupRequestId
-```
-
-Any contradiction is `BLOCKED / INCOMPLETE`, including contradictions on supplementary marker events.
+If request identity fields (`$metadata.requestId`, `$workers.requestId`) are
+present on any event, they must be consistent with each other and with the
+groupRequestId; contradictions are `BLOCKED / INCOMPLETE`. They are not required
+for correlation.
 
 `normalizedInvocationCount` means the number of invocation groups that successfully normalize to exactly one `RelayCpuPlatformRecord`. It is never raw event count.
 
@@ -914,9 +908,9 @@ Assert:
 - zero CPU-bearing events or conflicting multiple CPU-bearing events in any in-scope group => BLOCKED;
 - canonical group/request identity contradiction => BLOCKED;
 - a sampled `exceededCpu` record may still make the series FAIL because a direct gate violation is observed, but sampled/incomplete telemetry can never produce PASS;
-- `cpu-gate-control` invocations (setup, setup-fence, operation-inspection,
-  reconcile-unused) must not appear inside any lifecycle series window and must
-  not be counted toward lifecycle series invocation totals.
+- `cpu-gate-control` invocations (setup, setup-fence, decision-context,
+  operation-inspection, reconcile-unused) must not appear inside any lifecycle
+  series window and must not be counted toward lifecycle series invocation totals.
 
 Pin:
 
@@ -939,21 +933,37 @@ Pin:
 - lost/expired grant token does not prevent requestId-based recovery;
 - compatibility-preflight operations are never counted as measurement samples.
 
-- [ ] **Step 5: Run RED**
-
-```bash
-node --test \
-  scripts/relay-cpu-workloads.test.mjs \
-  scripts/relay-cpu-telemetry.test.mjs \
-  scripts/relay-cpu-evidence.test.mjs \
-  scripts/run-relay-cpu-gate.test.mjs
-```
-
-Expected RED: files/exports do not exist.
-
 - [ ] **Step 3: Implement workload, telemetry, and evidence modules**
 
-Required modes:
+The driver writes only a protected run ledger containing safe
+identifiers/timestamps/counts. It never writes request bodies, grant tokens,
+client keys, API tokens, or bearer values. It also maintains a protected
+operation journal that records every runner-owned CPU-gate operation (pool,
+requestId, state, timestamps) without secrets. The journal is used for recovery
+across driver process restarts and is required to be empty or fully
+terminal/fenced absent before CPU-gate secret deletion.
+
+The run ledger records per call:
+
+```text
+series identity (invocationClass, workloadClass, concurrency)
+call ordinal
+call timestamp (runner clock, ms)
+route discriminator
+observed response status / outcome hint
+fixture requestId (for lifecycle operations only)
+```
+
+The driver must support the five lifecycle series (`activation_normal`,
+`activation_replay`, `renewal_normal`, `terminal_normal`, `terminal_replay`). For
+`activation_normal` and `terminal_normal`, the driver creates a fresh fixture per
+sample and terminalizes it before the next sample, because the runner may own only
+one non-terminal operation at a time. For `activation_replay`, `renewal_normal`,
+and `terminal_replay`, the driver reuses one fixture and issues repeated
+callbacks. The run ledger records the series identity so the reducer evaluates
+each transition class separately.
+
+Required driver modes:
 
 ```text
 stage1
@@ -961,7 +971,17 @@ stage2-preflight
 stage2-series
 recover-operation
 ```
-- [ ] **Step 5: Add executable package commands**
+
+Stage 2 requests use the exact header:
+
+```text
+Cloudflare-Workers-Version-Overrides:
+  <worker-name>="<candidate-version-id>"
+```
+
+and require the observed Worker version to equal the candidate before accepting a sample.
+
+- [ ] **Step 4: Add executable package commands**
 
 ```json
 "gate:relay-cpu": "node scripts/run-relay-cpu-gate.mjs",
@@ -986,6 +1006,20 @@ array of half-open `[windowStartMs, windowEndMs)` intervals for the series.
 For a single continuous window the array has exactly one element.
 
 Both `--out` and `--meta-out` are required for non-help execution.
+
+- [ ] **Step 5: Run RED**
+
+```bash
+node --test \
+  scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.test.mjs
+```
+
+Expected RED: files/exports do not exist.
+
+- [ ] **Step 6: GREEN**
 
 ```bash
 node --test \
@@ -1022,6 +1056,8 @@ git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
 
 - Consumes: Tasks 1-5, exact candidate source revision, protected Preview environment, Workers Observability REST API.
 - Produces: Production recurrence attribution plus Stage 1 PASS/FAIL/BLOCKED matrix that selects the Phase 2 branch. **Stage 1 evidence produced before all implementation/config changes is not a binding source-revision anchor; it must be rerun if source changes occur after it is collected.**
+
+- [ ] **Step 1: Require explicit telemetry authorization and record immutable candidate identity**
 
 Remote Worker execution **and** Workers Observability API queries require explicit authorization for this task.
 
@@ -1307,8 +1343,6 @@ Expected RED: manifest tool missing.
 
 - [ ] **Step 3: Implement the runtime artifact digest**
 
-- [ ] **Step 3: Implement the runtime artifact digest**
-
 Create a protected temporary directory under the repository root and place the generated config inside it with `main` and `assets` rebased to repository-relative paths. Then run exactly:
 
 ```bash
@@ -1322,7 +1356,7 @@ Use the installed TypeScript Compiler API. Starting from each exact root, recurs
 
 Compute `contractSha256` over the union of complete source closures rooted at exactly `packages/shared/src/relay.ts` and `packages/shared/src/relay-routing.ts`. This is the mechanical check for type-only RPC contracts.
 
-- [ ] **Step 5: Add the package command**
+- [ ] **Step 4: Add the package command**
 
 ```json
 "manifest:do-compat": "node scripts/do-compatibility-manifest.mjs"
@@ -1342,7 +1376,7 @@ Support only:
 
 Invalid mode, missing root, unresolved repository import, or output failure exits non-zero without a partial manifest.
 
-- [ ] **Step 6: GREEN**
+- [ ] **Step 5: GREEN**
 
 ```bash
 node --test scripts/do-compatibility-manifest.test.mjs
@@ -1351,7 +1385,7 @@ npm run manifest:do-compat -- --help
 
 Expected GREEN: deterministic runtime/source digests and type-only contract sensitivity.
 
-- [ ] **Step 7: Commit boundary**
+- [ ] **Step 6: Commit boundary**
 
 ```bash
 git add scripts/do-compatibility-manifest.mjs scripts/do-compatibility-manifest.test.mjs package.json
@@ -2062,6 +2096,7 @@ only OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent
 hardening-create rejects missing candidate rollout acceptance evidence
 ```
 
+- [ ] **Step 10: Create the hardening deployment and run bounded verification**
 
 Create a deployment containing:
 
