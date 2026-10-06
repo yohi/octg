@@ -463,6 +463,41 @@ data must never become fixtures.
 These incident-derived workloads remain after Issue #121 closes and become
 part of the future CPU regression gate.
 
+### Stage-specific ingress/decision model
+
+`ingress` and `decision` are measured against a stage-appropriate model so that
+Stage 1 exercises the normal admission and grant-signing path while Stage 2
+remains a Production-safe canary that cannot consume Production quota.
+
+- **Stage 1** uses a Preview-enabled complimentary model that classifies to the
+  requested pool. The runner verifies the model is present in the Preview
+  registry before measurement. These series exercise normal admission,
+  Cloudflare-side grant signing, and callback dispatch.
+- **Stage 2** uses a runner-provided canary client key and the synthetic model
+  `octg-cpu-gate-reject-v1`. One unmeasured preflight request must prove that
+  this model receives `model_requires_paid` with no admission/grant; any other
+  outcome makes the Stage 2 series `BLOCKED / INCOMPLETE`.
+
+### Decision callback invocation
+
+The `decision` invocation class is measured by invoking
+`/internal/relay/v1/decision` directly. The runner supplies:
+
+```text
+Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
+Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
+```
+
+The request body is a valid Deno tokenizer decision payload containing the
+series request ID and the stage-appropriate model. This bypasses the Deno
+tokenizer and guarantees the decision callback executes on the exact candidate
+Worker version, because external Deno callbacks would not inherit an ingress
+version override.
+
+`ingress` uses the same override header on `/v1/responses`. `activation`,
+`renewal`, and `terminal` use the Worker-signed grant credential obtained from
+CPU-gate setup and the same override header.
+
 ## Conditional Phase 2: RelayGrantLifecycleController
 
 ### Activation condition
@@ -1235,7 +1270,6 @@ secret present but invalid shape
   -> CPU-gate control surface disabled
   -> same 404 fail-closed behavior
 
-```text
 secret valid
   -> control surface enabled
   -> every CPU-gate route requires exact Bearer authentication
@@ -1249,7 +1283,6 @@ secret valid
 Bearer comparison is constant-time. The Worker additionally validates at startup
 that the CPU-gate bearer and the service bearer are distinct non-empty values;
 if they are equal, `resolveRelayCpuGateControl(env)` returns `kind:"disabled"`.
-Bearer comparison is constant-time.
 
 The secret remains present throughout:
 
@@ -1444,8 +1477,6 @@ OCTG_RELAY_CPU_GATE_STANDARD_MODEL
 OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
 OCTG_RELAY_CPU_GATE_MINI_MODEL
 ```
-OCTG_RELAY_CPU_GATE_MINI_MODEL
-```
 
 The QuotaController chooses the expected client/model from its own pool
 identity. The caller cannot supply or override expected client/model values.
@@ -1453,6 +1484,7 @@ identity. The caller cannot supply or override expected client/model values.
 For a found grant, `cpuGateFixture=true` only when all canonical facts are:
 
 ```text
+grant.clientId
 grant.clientId
   == configured CPU-gate client for this QuotaController pool
 
@@ -1663,6 +1695,8 @@ interface RelayCpuGateOperationInspectionV1 {
     RelayCpuGateGrantInspection,
     { readonly kind: "fixture" }
   >;
+}
+```
 ### Cloudflare-side lifecycle fixture setup
 
 The external runner MUST NOT receive `OCTG_RELAY_CONTEXT_HMAC_KEY` and MUST
@@ -2581,7 +2615,6 @@ Test the exact Production canary protocol:
 - setup-fence resolves the owning QuotaController from the requestId's ULID day and
   works across a calendar-day rollover.
 - setup-fence resolves the owning QuotaController from the requestId's ULID day and
-  works across a calendar-day rollover.
 
 Compatibility-preflight terminalization MUST also be tested:
 
@@ -2600,10 +2633,10 @@ lifecycle control smoke
 all modes:
 compatibility preflight leaves no non-terminal CPU-gate fixture
 Stage 2 measurement cannot begin while preflight operation is non-terminal
-preflight invocations are outside measurement windows and sample counts
-first Stage 2 measurement fixture uses a fresh runner-owned requestId
+```
 
 ```text
+candidate ScriptVersion
 candidate ScriptVersion
 route / invocation class
 non-overlapping windowStart/windowEnd

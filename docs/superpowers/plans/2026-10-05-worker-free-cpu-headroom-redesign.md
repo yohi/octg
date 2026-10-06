@@ -619,7 +619,46 @@ Pin deterministic, synthetic builders:
 - incident-regression-nonstream: same structure, `stream=false`;
 - no production prompt/response text or credential material.
 
-The public ingress/decision fixture uses a runner-provided canary client key and the exact synthetic model string `octg-cpu-gate-reject-v1`. Before any measured series, one unmeasured preflight request must prove that this model receives the normal `model_requires_paid` rejection and creates no admission/grant. If it is enabled or produces any other outcome, the series is `BLOCKED / INCOMPLETE`; do not select a different model ad hoc.
+The workload driver exercises every required `invocationClass`:
+
+```text
+ingress
+decision
+activation_normal
+activation_replay
+renewal_normal
+terminal_normal
+terminal_replay
+```
+
+For **Stage 1**, the `ingress` and `decision` series use a Preview-enabled
+complimentary model that classifies to the requested pool. The runner must
+verify this model is present in the Preview registry before measurement; these
+series exercise normal admission, Cloudflare-side grant signing, and (for
+decision) callback dispatch on the candidate ScriptVersion.
+
+For **Stage 2**, the `ingress` and `decision` series use a runner-provided
+canary client key and the exact synthetic model string
+`octg-cpu-gate-reject-v1`. Before any measured Stage 2 series, one unmeasured
+preflight request must prove that this model receives the normal
+`model_requires_paid` rejection and creates no admission/grant. If it is enabled
+or produces any other outcome, the Stage 2 series is `BLOCKED / INCOMPLETE`;
+do not select a different model ad hoc.
+
+The `decision` series is invoked directly by the runner against
+`/internal/relay/v1/decision` with:
+
+```text
+Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
+Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
+```
+
+This bypasses Deno and guarantees the decision callback executes on the exact
+candidate Worker version. The request body is a valid Deno tokenizer decision
+payload containing the series request ID and the stage-appropriate model. The
+`ingress` series uses the same version override header on `/v1/responses`.
+`activation`, `renewal`, and `terminal` use the Worker-signed grant credential
+from CPU-gate setup and the same version override header.
 
 - [ ] **Step 2: Write RED telemetry-acquisition tests**
 
@@ -645,10 +684,10 @@ The producer accepts exactly:
 ```text
 scriptName
 expectedScriptVersionId
-windowStartMs
-windowEndMs
 expectedExecutionModel=stateless
+windowsJsonPath
 outputPath
+metaOutputPath
 ```
 
 plus `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` from the environment.
@@ -1012,9 +1051,8 @@ export CLOUDFLARE_API_TOKEN=...
 npm run telemetry:relay-cpu -- \
   --script-name=<production-worker-name> \
   --script-version=<known-production-version-id> \
-  --window-start-ms=<closed-window-start> \
-  --window-end-ms=<closed-window-end> \
   --execution-model=stateless \
+  --windows-json=<protected-attribution-windows-json> \
   --out=<protected-attribution-jsonl> \
   --meta-out=<protected-attribution-meta-json>
 ```
@@ -1049,23 +1087,21 @@ No raw telemetry file is added to Git. Query/API failure, incomplete pagination,
 
 - [ ] **Step 5: Evaluate each Stage 1 series**
 
-Run:
+Run the evidence reducer once per required Stage 1 series, using the series
+ledger, the normalized JSONL produced in Step 4, and its sidecar metadata:
 
 ```bash
-node scripts/relay-cpu-telemetry.mjs \
-  --script-name=<production-worker-name> \
-  --script-version=<known-production-version-id> \
-  --execution-model=stateless \
-  --windows-json=<protected-attribution-windows-json> \
-  --out=<protected-attribution-jsonl> \
-  --meta-out=<protected-attribution-meta-json>
-
 node scripts/relay-cpu-evidence.mjs \
   --ledger=<protected-run-ledger> \
-  --telemetry=<protected-attribution-jsonl> \
-  --telemetry-meta=<protected-attribution-meta-json> \
-  --out=<protected-attribution-summary>
+  --telemetry=<protected-stage1-series-jsonl> \
+  --telemetry-meta=<protected-stage1-series-meta-json> \
+  --out=<protected-stage1-series-summary>
 ```
+
+The reducer matches ledger entries to normalized records by request ID and
+invocation class. It rejects any `cpu-gate-control` record that appears inside a
+lifecycle measurement window and any record whose `scriptVersionId` does not
+match the candidate.
 
 Expected outcomes:
 
@@ -1363,6 +1399,7 @@ The generator MUST begin from a complete deep clone of the parsed repository bas
 
 For every top-level key except `vars`, the generated bridge/candidate configs preserve the base value byte-for-byte after canonical JSON serialization unless this plan explicitly authorizes a change. This automatically preserves current and future base keys, including:
 
+```text
 name
 main
 compatibility_date
