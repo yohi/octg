@@ -3,7 +3,9 @@ import { signRelayContext, signRelayGrantCredential } from "@octg/shared";
 import type { RelayContextV1, RelayGrantCredentialV1 } from "@octg/shared";
 import {
   parseRelayBearerAuthorization,
+  resolveRelayCpuGateControl,
   resolveRelayConfig,
+  verifyRelayCpuGateAuth,
   verifyRelayContextHeader,
   verifyRelayGrantHeader,
   verifyRelayServiceAuth,
@@ -205,6 +207,34 @@ describe("resolveRelayConfig", () => {
     expect(resolveRelayConfig({ ...VALID_ENV, OCTG_RELAY_CONTEXT_HMAC_KEY: key })).toEqual({
       kind: "invalid",
     });
+  });
+});
+
+describe("resolveRelayCpuGateControl", () => {
+  it("disables an absent, malformed, or service-equal CPU-gate secret", () => {
+    // Given: CPU-gate credentials are absent, invalid, or share the service credential.
+    // When: the dedicated control configuration is resolved.
+    // Then: none of those configurations enables the protected control plane.
+    expect(resolveRelayCpuGateControl({})).toEqual({ kind: "disabled" });
+    expect(resolveRelayCpuGateControl({ OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "short" })).toEqual({ kind: "disabled" });
+    expect(resolveRelayCpuGateControl({
+      OCTG_RELAY_CPU_GATE_AUTH_TOKEN: VALID_ENV.OCTG_RELAY_SERVICE_AUTH_TOKEN,
+      OCTG_RELAY_SERVICE_AUTH_TOKEN: VALID_ENV.OCTG_RELAY_SERVICE_AUTH_TOKEN,
+    })).toEqual({ kind: "disabled" });
+  });
+
+  it("accepts only the distinct configured CPU-gate bearer", () => {
+    // Given: a valid CPU-gate secret distinct from the lifecycle service secret.
+    const config = resolveRelayCpuGateControl({
+      OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "c".repeat(43),
+      OCTG_RELAY_SERVICE_AUTH_TOKEN: VALID_ENV.OCTG_RELAY_SERVICE_AUTH_TOKEN,
+    });
+    // When: each trust class presents a bearer.
+    // Then: only the CPU-gate bearer authenticates.
+    expect(config.kind).toBe("enabled");
+    if (config.kind !== "enabled") throw new Error("valid CPU-gate configuration must be enabled");
+    expect(verifyRelayCpuGateAuth(`Bearer ${"c".repeat(43)}`, config.token)).toBe(true);
+    expect(verifyRelayCpuGateAuth(`Bearer ${VALID_ENV.OCTG_RELAY_SERVICE_AUTH_TOKEN}`, config.token)).toBe(false);
   });
 });
 

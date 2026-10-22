@@ -22,6 +22,7 @@ import type {
 } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
 import type { FinishRelayInput, RelayGrant } from "../../../durable-objects/quota-controller/src/relay-grant";
+import { relayGrantClaimsOf } from "../src/relay-grant-claims";
 import { invalidateConfigCaches } from "../src/policy";
 import { relayDecisionShardName } from "../src/relay-decision-controller";
 import type { RelayDecisionController } from "../src/relay-decision-controller";
@@ -128,23 +129,7 @@ async function storedGrant(pool: "STANDARD" | "MINI", requestId: string): Promis
 }
 
 function claimsOfGrant(grant: RelayGrant): RelayGrantCredentialV1 {
-  return {
-    version: 1,
-    audience: "octg-worker-relay",
-    environment: grant.environment,
-    route: "responses",
-    requestId: grant.requestId,
-    grantId: grant.grantId,
-    nonce: grant.nonce,
-    clientId: grant.clientId,
-    idempotencyKeyHash: grant.idempotencyKeyHash,
-    model: grant.model,
-    pool: grant.pool,
-    admissionUtcDay: grant.admissionUtcDay,
-    leaseGeneration: grant.leaseGeneration,
-    issuedAtMs: grant.issuedAtMs,
-    expiresAtMs: grant.credentialExpiresAtMs,
-  };
+  return relayGrantClaimsOf(grant);
 }
 
 function expectAllow(result: RelayDecisionDispatchResult): Extract<RelayDecisionDispatchResult, { kind: "allow" }> {

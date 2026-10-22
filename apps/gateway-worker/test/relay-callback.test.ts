@@ -1,5 +1,5 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { isRecord, quotaIdOf, signRelayContext, signRelayGrantCredential, utcDayOf, verifyRelayGrantCredential } from "@octg/shared";
 import type { RelayContextV1, RelayRequestMetaV1 } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
@@ -151,6 +151,26 @@ beforeAll(() => {
 });
 
 describe("relay callback transport", () => {
+  it("emits only safe class-boundary markers for callback transport", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const response = await SELF.fetch(callbackRequest("decision", { body: "{}" }));
+    expect(response.status).toBe(400);
+    expect(info).toHaveBeenCalledTimes(2);
+    expect(info.mock.calls[0]?.[0]).toMatchObject({
+      event: "octg.relay_invocation",
+      invocationClass: "decision",
+      phase: "start",
+    });
+    expect(info.mock.calls[1]?.[0]).toMatchObject({
+      event: "octg.relay_invocation",
+      invocationClass: "decision",
+      phase: "finish",
+      outcome: "error",
+    });
+    expect(JSON.stringify(info.mock.calls)).not.toContain(env.OCTG_RELAY_SERVICE_AUTH_TOKEN);
+    info.mockRestore();
+  });
+
   it.each(["GET", "PUT"])("rejects %s with 405 and Allow: POST", async (method) => {
     // Given: a relay callback route.
     // When: a non-POST method is used.

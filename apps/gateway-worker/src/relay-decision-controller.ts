@@ -17,7 +17,6 @@ import {
   parseRelayDecisionRequest,
   parseRelayJsonBody,
   quotaIdOf,
-  RELAY_GRANT_AUDIENCE,
   RELAY_MAX_CALLBACK_BODY_BYTES,
   relayErrorCodeStatus,
   relayShardIndex,
@@ -34,16 +33,15 @@ import type {
   RelayDecisionV1,
   RelayErrorCode,
   RelayEnvironment,
-  RelayGrantCredentialV1,
   RelayTerminalV1,
 } from "@octg/shared";
 import { RelayProtocolError } from "@octg/shared";
-import type { RelayGrant } from "../../../durable-objects/quota-controller/src/relay-grant";
 import type { Env } from "./index";
 import { assertNever } from "./exhaustiveness";
 import { loadPolicy, loadRegistry } from "./policy";
 import { resolveRelayConfig } from "./relay-auth";
 import { resolveTokenBudget } from "./token-budget";
+import { relayGrantClaimsOf } from "./relay-grant-claims";
 
 export { relayDecisionShardName };
 
@@ -100,26 +98,6 @@ function rejectDecision(code: RelayErrorCode): Extract<RelayDecisionDispatchResu
     status: relayErrorCodeStatus(code),
   };
   return { kind: "reject", decision };
-}
-
-function grantClaimsOf(grant: RelayGrant): RelayGrantCredentialV1 {
-  return {
-    version: 1,
-    audience: RELAY_GRANT_AUDIENCE,
-    environment: grant.environment,
-    route: "responses",
-    requestId: grant.requestId,
-    grantId: grant.grantId,
-    nonce: grant.nonce,
-    clientId: grant.clientId,
-    idempotencyKeyHash: grant.idempotencyKeyHash,
-    model: grant.model,
-    pool: grant.pool,
-    admissionUtcDay: grant.admissionUtcDay,
-    leaseGeneration: grant.leaseGeneration,
-    issuedAtMs: grant.issuedAtMs,
-    expiresAtMs: grant.credentialExpiresAtMs,
-  };
 }
 
 export class RelayDecisionController extends DurableObject<Env> {
@@ -214,7 +192,7 @@ export class RelayDecisionController extends DurableObject<Env> {
     });
     if (admission.kind === "denied") return rejectDecision(admission.code);
 
-    const claims = grantClaimsOf(admission.grant);
+    const claims = relayGrantClaimsOf(admission.grant);
     let grantCredential: string;
     try {
       grantCredential = await signRelayGrantCredential(claims, config.contextHmacKey);
