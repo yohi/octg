@@ -1,5 +1,5 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { isRecord, quotaIdOf, signRelayContext, signRelayGrantCredential, utcDayOf, verifyRelayGrantCredential } from "@octg/shared";
 import type { RelayContextV1, RelayRequestMetaV1 } from "@octg/shared";
 import type { QuotaController } from "@octg/quota-controller";
@@ -23,6 +23,8 @@ const HMAC_KEY = Uint8Array.from({ length: 32 }, (_, index) => index);
 const HMAC_KEY_ENCODED = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 const WRONG_KEY = Uint8Array.from({ length: 32 }, (_, index) => 31 - index);
 const CLIENT_ID = "client-relay";
+
+afterEach(() => vi.restoreAllMocks());
 
 const BASE = "https://worker.example/internal/relay/v1";
 
@@ -168,7 +170,6 @@ describe("relay callback transport", () => {
       outcome: "error",
     });
     expect(JSON.stringify(info.mock.calls)).not.toContain(env.OCTG_RELAY_SERVICE_AUTH_TOKEN);
-    info.mockRestore();
   });
 
   it.each(["GET", "PUT"])("rejects %s with 405 and Allow: POST", async (method) => {

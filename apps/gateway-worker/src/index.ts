@@ -76,7 +76,7 @@ export default {
       if (request.method === "POST" && url.pathname === "/v1/responses") {
         requestId = `req_${ulid()}`;
         const revisionId = env.CF_VERSION_METADATA?.id ?? "local";
-        const start = { event: "octg.relay_invocation", invocationClass: "ingress", revisionId, requestId, phase: "start" } as const;
+        const start = { invocationClass: "ingress", revisionId, requestId, phase: "start" } as const;
         emitRelayInvocation(start);
         try {
           const response = await handleProxy(request, env, ctx, "responses", requestId);

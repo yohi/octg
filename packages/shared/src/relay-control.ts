@@ -4,6 +4,7 @@ import type {
   RelayTerminalResponseV1,
 } from "./relay.ts";
 import type { PoolName, RequestState } from "./types.ts";
+import type { RelayErrorCode } from "./relay-errors.ts";
 
 export type RelayGrantLifecycleAction = "activation" | "renewal" | "terminal";
 
@@ -38,6 +39,21 @@ export interface RelayCpuGateSetupResponseV1 {
   readonly leaseGeneration: string;
   readonly pool: PoolName;
   readonly admissionUtcDay: string;
+}
+
+export interface RelayCpuGateSetupCompensatedV1 {
+  readonly version: 1;
+  readonly kind: "setup_failed_compensated";
+}
+
+export interface RelayCpuGateSetupRejectionV1 {
+  readonly version: 1;
+  readonly error: RelayErrorCode;
+}
+
+export interface RelayCpuGateReconcileUnusedResponseV1 {
+  readonly version: 1;
+  readonly kind: "reconciled_unused";
 }
 
 export interface RelayCpuGateDecisionContextV1 {
