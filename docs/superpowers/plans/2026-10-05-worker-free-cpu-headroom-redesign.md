@@ -1,0 +1,2457 @@
+<!-- markdownlint-disable MD013 MD032 -->
+
+# Worker Free CPU Headroom Redesign Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Implement Issue #121's Worker-Free CPU headroom redesign so every required stateless relay invocation class is measured against `p99 <= 5 ms`, `max <= 7 ms`, `exceededCpu = 0`, with conditional lifecycle Durable Object offload, candidate-compatible Durable Object bridging, and a Production-safe Stage 2 canary/control plane.
+
+**Architecture:** First remove repeated relay HMAC `CryptoKey` imports and add the measurement/control-plane primitives required by the approved design. Run the complete Stage 1 Preview gate; add `RelayGrantLifecycleController` only if activation/renewal/terminal fails. Before Stage 2, deploy a 100% Durable Object compatibility bridge, upload the exact CPU-tested candidate at 0%, prove Worker/DO compatibility, run the Production-like gate, promote the exact tested candidate, then create and verify the separate CPU-gate-secret-less hardening version.
+
+**Tech Stack:** TypeScript 5.6, Cloudflare Workers + SQLite-backed Durable Objects, Wrangler 4.x, Vitest / `@cloudflare/vitest-pool-workers`, Node.js 22 scripts/tests, Deno relay runtime, GitHub Actions.
+
+**Spec:** `docs/superpowers/specs/2026-10-05-worker-free-cpu-headroom-redesign.md`
+
+## Global Constraints
+
+- Cloudflare Workers Paid is not an escape hatch; the Worker Free HTTP CPU ceiling remains 10 ms.
+- Every required stateless Worker CPU series must satisfy `p99 <= 5 ms`, `max <= 7 ms`, and `exceededCpu = 0`; `max >= 8 ms` cannot pass.
+- Each required `invocationClass x workloadClass x concurrency` series needs at least 500 successful invocations and complete platform telemetry. `invocationClass` includes `ingress`, `decision`, `activation_normal`, `activation_replay`, `renewal_normal`, `terminal_normal`, `terminal_replay`. Normal series use fresh fixtures per sample so every sample exercises a real state transition; replay series exercise idempotent/replay-denial paths on one fixture.
+- `QuotaController` remains the sole quota authority; D1 remains non-authoritative for admission/settlement decisions.
+- Never log or retain prompts, request/response bodies, client keys, service bearers, CPU-gate bearers, relay HMAC keys, grant credentials, or upstream credentials.
+- `OCTG_RELAY_CONTEXT_HMAC_KEY` remains Cloudflare-side only and is never provided to Deno or an external gate runner.
+- `OCTG_RELAY_SERVICE_AUTH_TOKEN` is used by Deno and the protected same-environment runner only for existing decision/lifecycle callback Authorization (Preview for Stage 1, Production for Stage 2).
+- `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` is a distinct control-plane bearer; absent/invalid means every CPU-gate control route is disabled with 404.
+- Stage 1 uses a Preview-operator-owned per-run CPU-gate bearer independent of Production. Task 5 produces provisioning/preflight/teardown tooling; Task 6 executes it only with authorization, before collecting any series.
+- The global Stage 2 one-fixture bound is enforced by the durable singleton `cpu-gate-slot:v1:production` in the existing `QUOTA_CONTROLLER` namespace, across runners/pools/days/versions. It never expires automatically. Local journals are not locks; target terminal proof plus authoritative slot closure are required before another setup or hardening.
+- Public Responses semantics remain unchanged; Chat Completions remains unchanged; `invalid_json` remediation remains out of scope.
+- Preview and Production resources remain isolated.
+- If activation/renewal/terminal fails Stage 1 or Stage 2, lifecycle offload is activated and **all Stage 1 evidence is rerun**. Ingress/decision failure does not activate lifecycle offload.
+- The Stage 2 Durable Object compatibility bridge is required whether Phase 2 is active or inactive.
+- A version override identifies only the incoming stateless Worker invocation; it never proves the code version executed by a Durable Object.
+- Bridge/candidate Durable Object contracts and behavior-affecting module closures must be mechanically equivalent before Stage 2.
+- Production remote mutation, deployment, telemetry collection, or canary execution requires explicit operator/user authorization at execution time; local implementation tasks do not authorize remote changes.
+- Every implementation task ends at a reviewable commit boundary. Do not push or deploy merely because a task reaches GREEN.
+
+## Review Focus
+
+1. **HMAC key rotation/rejection race:** equal-byte keys must share one import, a rotated key must replace it, and rejection of an old import must never clear a newer cache entry. Task 1 owns the regression tests.
+2. **CPU-gate ambiguous setup acknowledgement:** a lost setup response must be recoverable by the runner-owned request ID without creating a second live fixture. Task 4 owns route/recovery semantics; Task 5 owns runner retry/serialization tests; Task 6 executes the remote Stage 1 gate.
+3. **Worker/DO gradual-deployment skew:** candidate Worker -> bridge-version QuotaController/lifecycle DO and bridge Worker -> candidate-version QuotaController must remain contract-compatible. Task 9 owns the compatibility manifest; Task 10 owns exact bridge/candidate version construction and rollout verification.
+4. **Missing application marker on CPU kill:** `exceededCpu` platform records must still fail the series even when no application finish marker exists. Task 5 owns telemetry normalization/evidence-reducer tests; Task 6 executes the evidence gate.
+5. **Post-gate secret teardown:** deleting only `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` creates a distinct hardening ScriptVersion; all other code/config/DO contracts must remain equivalent. Task 9 owns manifest equivalence, Task 10 owns version/hardening tooling, and Task 12 performs the authorized remote teardown and verification.
+---
+
+## File and interface map
+
+| File | Responsibility |
+| --- | --- |
+| `packages/shared/src/relay-credential.ts` | Isolate-local single-entry `Promise<CryptoKey>` cache for relay HMAC import. |
+| `packages/shared/src/relay-routing.ts` | Shared 64-way FNV shard helper, decision/lifecycle shard names, and `relayRequestUtcDayOf(requestId)`. |
+| `packages/shared/src/relay.ts` | Existing relay wire contract plus lifecycle-DO and CPU-gate internal control/RPC types. |
+| `packages/shared/src/index.ts` | Export the new shared contracts/helpers. |
+| `durable-objects/quota-controller/src/relay-cpu-gate.ts` | Read-only CPU-gate snapshot/fixture inspection and canonical `cpuGateFixture` predicate. |
+| `durable-objects/quota-controller/src/relay-config.ts` | Shared QuotaController-side max-in-flight and CPU-gate fixture configuration parsing. |
+| `durable-objects/quota-controller/src/quota-controller.ts` | Expose snapshot/inspection/fence and singleton slot RPCs; distinguish control-only identity; preserve normal quota/lifecycle RPC contracts. |
+| `durable-objects/quota-controller/src/relay-cpu-gate-slot.ts` | Durable global claim/close state; target fencing and canonical closure proof before compare-and-clear. |
+| `apps/gateway-worker/src/relay-cpu-gate.ts` | Protected `/internal/relay/v1/cpu-gate/*` routes: snapshot, setup, operation inspection, reconcile-unused. |
+| `apps/gateway-worker/src/relay-grant-claims.ts` | One canonical `RelayGrant -> RelayGrantCredentialV1` mapping shared by Decision DO and CPU-gate setup. |
+| `apps/gateway-worker/src/relay-observation.ts` | Sanitized `octg.relay_invocation` supplementary markers. |
+| `apps/gateway-worker/src/relay-grant-lifecycle-controller.ts` | Conditional stateless-processing DO for activation/renewal/terminal trust + semantic work. |
+| `apps/gateway-worker/src/relay-callback.ts` | Existing callback transport; optional lifecycle-DO dispatch only when the exact offload toggle is enabled. |
+| `apps/gateway-worker/src/relay-decision-controller.ts` | Consume shared shard helper and shared grant-claims mapping; admission semantics unchanged. |
+| `apps/gateway-worker/src/index.ts` | Export/bind new DO, CPU-gate route precedence, exact env contract. |
+| `apps/gateway-worker/wrangler.jsonc` | Phase-2-active binding/migration `v4`; 100% telemetry sampling remains required. |
+| `scripts/relay-cpu-workloads.mjs` | Canonical workload builders and execution-condition definitions. |
+| `scripts/relay-cpu-evidence.mjs` | Pure normalized platform-telemetry series classifier and PASS/FAIL/BLOCKED reducer. |
+| `scripts/relay-cpu-telemetry.mjs` | Workers Observability REST API producer: exact-window invocation query, pagination/completeness checks, protected normalized JSONL. |
+| `scripts/run-relay-cpu-gate.mjs` | Protected driver, Preview credential lifecycle, singleton-aware restart recovery/closure, runner-owned IDs and candidate override. |
+| `scripts/do-compatibility-manifest.mjs` | Runtime bundle digest + type/source contract closure digest for bridge/candidate DO compatibility. |
+| `scripts/relay-cpu-version-config.mjs` | Deterministically generate complete temporary Production bridge/candidate Wrangler configs from canonical non-secret inputs; never contains secret values. |
+| `scripts/relay-cpu-rollout.mjs` | Validated bridge/candidate/hardening Wrangler command orchestration using generated exact version configs; no implicit production execution. |
+| `scripts/preview-worker-config.mjs` | Preview DO/config isolation including optional lifecycle DO and CPU-gate fixture variables. |
+| `.github/workflows/deploy-production.yml` | Prevent direct unsafe 100% candidate deploy; call validated Issue #121 staging path after source merge. |
+| `docs/operations.md` | Operator sequence, evidence fields, rollback, Stage 1/bridge/Stage 2/hardening runbook. |
+
+## Task dependency graph
+
+Task 1  HMAC cache
+   |
+Task 2  shared routing + CPU-gate/lifecycle contracts
+   |
+Task 3  QuotaController read-only inspection
+   |
+Task 4  Worker CPU-gate control plane + safe marker
+   |
+Task 5  CPU workload / telemetry / evidence tooling
+   |
+Task 6  Production recurrence attribution + Stage 1 execution gate
+   |
+   +-- PASS for activation/renewal/terminal ----------------------+
+   |                                                              |
+   +-- lifecycle FAIL -> Task 7 -> Task 8 -> rerun Task 6 -------+
+          lifecycle contract/DO     Worker offload + Preview v4
+                                                                  |
+Task 9  DO compatibility manifest --------------------------------+
+   |
+Task 10 exact Production version configs + bridge/candidate/hardening rollout
+   |
+Task 11 local full verification + operations documentation + source-revision lock
+   |
+Task 6  rerun Stage 1 from locked SHA
+   |
+Task 9  regenerate DO compatibility manifest from locked SHA
+   |
+Task 12 authorized remote Stage 2 / acceptance / promotion / hardening evidence
+
+
+Task 9 consumes Task 3 slot implementation and Task 2 shared contracts. Task 10
+consumes Tasks 3-5 plus Task 9, including singleton-aware route/runner behavior.
+The initial Task 6 runs Phase 2 inactive without Tasks 7-8. Once lifecycle
+offload is selected, Task 8 (including migration-capable Preview v4 deployment)
+must finish before every full Task 6 rerun; each rerun uses fresh Preview
+credentials and replaces all earlier Stage 1 evidence.
+
+If Task 6 reports ingress or decision FAIL, STOP. Do not run Tasks 7-12 until a separately reviewed remediation changes that invocation class.
+
+```text
+Task 12 lifecycle FAIL
+  -> stop candidate rollout
+  -> restore current compatibility bridge to 100%
+  -> invalidate old Phase-2-inactive candidate/version/evidence/manifest/preflight artifacts
+  -> Task 7
+  -> Task 8
+  -> rerun Task 11 lock (new final SHA)
+  -> rerun Task 6 completely from the new locked SHA
+  -> rerun Task 9 with --phase2=active from the new locked SHA
+  -> rerun Task 10 Phase-2-active config/rollout verification
+  -> restart Task 12 from compatibility-bridge creation
+```
+
+---
+
+### Task 1: Cache the relay HMAC CryptoKey import
+
+**Files:**
+- Modify: `packages/shared/src/relay-credential.ts`
+- Modify: `packages/shared/test/relay-credential.test.ts`
+
+**Interfaces:**
+- Consumes: existing `computeRelayMac(key, purposeBytes, payloadBytes)`.
+- Produces: private `relayMacKey(key: Uint8Array): Promise<CryptoKey>`; public sign/verify signatures remain unchanged.
+
+- [ ] **Step 1: Write RED tests for cache identity, concurrency, rotation, and rejection**
+
+Add tests named:
+
+```text
+reuses one imported CryptoKey for equal key bytes
+collapses concurrent first use onto one import Promise
+imports a new CryptoKey after key rotation
+retries import after the current import rejects
+an older rejected import cannot clear a newer rotated-key cache entry
+preserves existing context/grant token bytes after caching
+```
+
+Spy/mock `crypto.subtle.importKey` only; never inspect/log raw key material.
+
+- [ ] **Step 2: Run the focused RED test**
+
+Run:
+
+```bash
+npm test -w packages/shared -- relay-credential.test.ts
+```
+
+Expected RED: the new import-count/race assertions fail because every MAC currently imports a fresh key.
+
+- [ ] **Step 3: Implement the minimal single-entry Promise cache**
+
+In `relay-credential.ts` add one module-scope entry with exact semantics:
+
+```ts
+type RelayMacKeyCacheEntry = {
+  readonly rawKeySnapshot: Uint8Array;
+  readonly promise: Promise<CryptoKey>;
+};
+```
+
+`relayMacKey(key)` must:
+
+- compare raw key bytes by content;
+- reuse the current promise for equal bytes even when the caller passes another `Uint8Array` object;
+- copy the raw bytes into `rawKeySnapshot`;
+- install the new import promise **before awaiting it**;
+- on rejection, clear the cache only if the rejected promise is still the current entry;
+- never cache MAC output;
+- keep `crypto.subtle.sign()` per MAC.
+
+- [ ] **Step 4: Run GREEN tests**
+
+Run:
+
+```bash
+npm test -w packages/shared -- relay-credential.test.ts
+npm run typecheck -w packages/shared
+```
+
+Expected GREEN: all relay credential tests and shared typecheck pass.
+
+- [ ] **Step 5: Refactor only if duplication remains**
+
+Do not export cache/reset hooks solely for tests. If tests need isolation, use module reset or a fresh distinct key rather than production cache-control API.
+
+- [ ] **Step 6: Commit boundary**
+
+```bash
+git add packages/shared/src/relay-credential.ts packages/shared/test/relay-credential.test.ts
+git commit -m "perf: reuse relay HMAC CryptoKey imports"
+```
+
+---
+
+### Task 2: Define shared routing, lifecycle RPC, and CPU-gate control contracts
+
+**Files:**
+- Create: `packages/shared/src/relay-routing.ts`
+- Create: `packages/shared/test/relay-routing.test.ts`
+- Modify: `packages/shared/src/relay.ts`
+- Modify: `packages/shared/src/index.ts`
+- Modify: `packages/shared/test/relay.test.ts`
+- Modify: `apps/gateway-worker/src/relay-decision-controller.ts`
+- Modify: `apps/gateway-worker/test/relay-decision-controller.test.ts`
+
+**Interfaces:**
+- Consumes: existing `RelayEnvironment`, `RelayGrantState`, `RequestState`, `RELAY_REQUEST_ID_PATTERN`.
+- Preserves: `RelayAdmissionResult` denied branch uses only existing `RelayErrorCode`.
+  Fence denial is exactly `{kind:"denied",code:"invalid_context"}`; no
+  `cpu_gate_fenced` union member or new public/Deno error mapping is added.
+- Produces:
+  - `relayShardIndex(requestId: string): string`
+  - `relayDecisionShardName(environment, requestId): string`
+  - `relayGrantLifecycleShardName(environment, requestId): string`
+  - `relayRequestUtcDayOf(requestId: string): string | undefined`
+  - `RelayGrantLifecycleAction`
+  - `RelayGrantLifecycleDispatchInput`
+  - `RelayGrantLifecycleDispatchResult`
+  - `RelayGrantLifecycleControllerOperations`
+  - `RelayCpuGateSetupRequestV1`
+  - `RelayCpuGateSetupResponseV1`
+  - `RelayCpuGateDecisionContextV1`
+  - `RelayCpuGateSetupFenceRequestV1`
+  - `RelayCpuGateSetupFenceResponseV1`
+  - `RelayCpuGateOperationRequestV1`
+  - `RelayCpuGateOperationInspectionV1`
+  - `RelayCpuGateOperationAbsentV1`
+  - `RelayCpuGateOperationPendingV1`
+  - `RelayCpuGateOperationIncompatibleV1`
+  - `RelayCpuGateFenceResult`
+  - `RelayCpuGateControllerOperations`
+  - `RelayCpuGateSlotOwner`, `RelayCpuGateSlotState`, `RelayCpuGateSlotClaimResult`,
+    `RelayCpuGateSlotCloseResult`, `RelayCpuGateSlotOperations` exactly as defined
+    in the spec's Global Production CPU-gate slot section.
+
+The existing `RelayContextV1` exact ten-key shape remains unchanged and excludes
+`model`. Task 4 produces this Context; Task 5 selects the model in
+`RelayDecisionRequestV1.metadata.model`, never in Context. Keep the existing
+decision denied-to-reject mapping, including `invalid_context -> status:500`.
+- [ ] **Step 1: Write RED routing tests**
+
+Pin:
+
+- FNV-1a 32-bit constants `2166136261`, `16777619`, mask `63`;
+- two-digit shard output `00..63`;
+- exact names:
+  - `relay-decision:v1:<environment>:<shard>`
+  - `relay-grant-lifecycle:v1:<environment>:<shard>`;
+- known request IDs map identically for both prefixes;
+- invalid request IDs return no UTC day;
+- `relayRequestUtcDayOf` decodes the first 10 Crockford-Base32 ULID characters after `req_` and returns exact UTC `YYYY-MM-DD`.
+
+- [ ] **Step 2: Write RED type/contract tests**
+
+Extend `relay.test.ts` with compile/runtime shape assertions for control/slot result discriminants and exact lifecycle result kinds. Assert `invalid_context` satisfies existing `RelayErrorCode`; `isRelayErrorCode("cpu_gate_fenced")` remains false. Task 3 tests assign the exact denial to `RelayAdmissionResult`, without adding a shared-package dependency on the quota-controller implementation. Pin Context's ten keys from the spec and unchanged `RelayDecisionRequestV1.metadata.model`; Task 4's signer/verifier tests round-trip both setup/decision contexts and reject an extra signed `model` claim.
+
+- [ ] **Step 3: Run RED**
+
+```bash
+npm test -w packages/shared -- relay-routing.test.ts relay.test.ts
+npm test -w apps/gateway-worker -- relay-decision-controller.test.ts
+```
+
+Expected RED: missing module/types and the Decision DO still owns its private shard helper.
+
+- [ ] **Step 4: Implement shared helpers/contracts**
+
+Move only the shard algorithm/name generation out of `relay-decision-controller.ts`; keep Decision DO behavior unchanged.
+
+`relayRequestUtcDayOf` must reject non-canonical IDs, overflow/impossible ULID timestamps, and dates outside JavaScript's safe/date range.
+
+- [ ] **Step 5: GREEN**
+
+```bash
+npm test -w packages/shared -- relay-routing.test.ts relay.test.ts
+npm test -w apps/gateway-worker -- relay-decision-controller.test.ts
+npm run typecheck -w packages/shared
+npm run typecheck -w apps/gateway-worker
+```
+
+Expected GREEN: exact old decision shard names are preserved and all new contracts typecheck.
+
+- [ ] **Step 6: Commit boundary**
+
+```bash
+git add packages/shared/src/relay-routing.ts packages/shared/src/relay.ts packages/shared/src/index.ts packages/shared/test/relay-routing.test.ts packages/shared/test/relay.test.ts apps/gateway-worker/src/relay-decision-controller.ts apps/gateway-worker/test/relay-decision-controller.test.ts
+git commit -m "refactor: share relay routing and CPU gate contracts"
+```
+
+---
+
+### Task 3: Add QuotaController CPU-gate inspection, fence, and global slot RPCs
+
+**Files:**
+- Create: `durable-objects/quota-controller/src/relay-config.ts`
+- Create: `durable-objects/quota-controller/src/relay-cpu-gate.ts`
+- Create: `durable-objects/quota-controller/src/relay-cpu-gate-slot.ts`
+- Create: `durable-objects/quota-controller/test/relay-cpu-gate.test.ts`
+- Create: `durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts`
+- Modify: `durable-objects/quota-controller/src/relay-admission.ts`
+- Modify: `durable-objects/quota-controller/src/quota-controller.ts`
+- Modify: `durable-objects/quota-controller/src/store.ts`
+- Modify: `apps/gateway-worker/vitest.config.ts`
+
+**Interfaces:**
+- Consumes: Task 2 inspection/fence/slot contracts, existing admission transactions
+  and target `QUOTA_CONTROLLER` namespace. Add the namespace and runtime relay
+  environment to `QuotaControllerEnv` for slot-to-target RPCs, not raw secrets.
+- Produces:
+  - `resolveMaxInFlightRequests(value?: string): number`
+  - `resolveCpuGateFixtureIdentity(env, pool): {clientId: string; model: string} | undefined`
+  - `getRelayCpuGateSnapshot(storage, env, identity, nowMs): Promise<RelayCpuGateSnapshot>`
+  - `getRelayCpuGateGrantInspection(storage, env, identity, requestId, nowMs): Promise<RelayCpuGateGrantInspection>`
+  - `fenceRelayCpuGateSetup(storage, env, identity, requestId, nowMs): Promise<RelayCpuGateFenceResult>`
+  - public DO RPCs with the same names/signatures.
+  - the three `RelayCpuGateSlotOperations` RPCs on the environment-local
+    control-only singleton, using the exact spec state and close protocol.
+
+`fenceRelayCpuGateSetup` is not read-only: it atomically checks for an existing fixture/non-fixture and writes a durable fence if neither exists. It must run inside the same storage transaction semantics as `admitRelay` so that `admitRelay` can observe the fence in the same transaction.
+- [ ] **Step 1: Write RED tests for snapshot read-only behavior**
+
+Assert exact snapshot fields and prove expired-lease filtering does not write cleanup state. Include configured/default `MAX_IN_FLIGHT_REQUESTS`.
+
+- [ ] **Step 2: Write RED tests for the canonical fixture predicate**
+
+```text
+clientId
+model
+pool/day
+idempotencyKeyHash
+admission reserved/upperBound/maxOutput/cacheEnabled
+metadata estimatedInput/maxOutput/inputBytes/rawBodyBytes/isToolUse/stream
+request entry presence
+request entry idempotencyKey/tokens/upperBound/reserved
+```
+
+One mismatch at a time must yield `kind="non_fixture"`, not fixture details.
+
+Also cover `kind="fixture"` when the grant/request entry exists and all
+predicates match, regardless of whether the fixture is active, settled, released,
+or reconciled. `activeLease` must be reported as a separate field and must not
+affect `cpuGateFixture`.
+
+Also cover `kind="absent"` when neither grant nor request entry exists.
+- [ ] **Step 3: Run RED**
+
+```bash
+npm test -w apps/gateway-worker -- ../../durable-objects/quota-controller/test/relay-cpu-gate.test.ts
+```
+
+Expected RED: inspection module/RPCs do not exist.
+
+- [ ] **Step 4: Implement the minimum inspection helpers and the fence writer**
+
+Extract the max-in-flight resolver from `relay-admission.ts` into `relay-config.ts` so admission and snapshot share one exact resolver.
+
+Add the four non-secret fixture variables to `QuotaControllerEnv`; do not accept expected client/model as RPC input.
+
+Do not call `storage.put`, `saveInFlight`, or reconciliation from the read-only inspection RPCs.
+
+Implement `fenceRelayCpuGateSetup` in `relay-cpu-gate.ts` and expose it as a QuotaController RPC. The implementation must:
+
+- read the canonical grant/request state for the requestId;
+- if a fixture exists, return `kind="fixture"` with approved inspection fields;
+- if a non-fixture grant/request exists, return `kind="non_fixture"`;
+- otherwise atomically write a durable fence record and return `kind="fenced"`;
+- run inside the same storage transaction path as `admitRelay` so that a concurrent or delayed `admitRelay(A)` observes the fence within its transaction and fails closed.
+
+Modify `relay-admission.ts` so that `admitRelay` checks for a CPU-gate fence for the requestId within its transaction and returns exactly `{kind:"denied",code:"invalid_context"}` when a fence exists, regardless of quota state. This check is unconditional for every admission: it does not require caller opt-in. Fence existence remains the internal inspection/fence discriminant, never a new `RelayErrorCode`. Preserve `RelayDecisionController`'s existing `rejectDecision(admission.code)` mapping and public fallback.
+
+- [ ] **Step 5: Write RED fence/admission collision tests**
+
+Using the real in-memory storage backend, prove:
+
+```text
+fence before delayed admitRelay -> exact {kind:"denied",code:"invalid_context"}
+admitRelay before fence -> fence returns fixture; identical authorized retry may
+  return the saved grant, never a second grant/lease; mismatched or terminal
+  retries keep existing rejection semantics
+fence after reconcile-unused terminal -> fence returns fixture with terminal state; operation A is closed
+fence across two concurrent transactions -> both may return fenced (idempotent);
+  only one durable fence is written; a delayed admitRelay for the same ID is
+  rejected
+admitRelay transaction observes fence written by another concurrent call -> fails closed
+fence presence is proven separately with inspection.fenced / fence result, not rejection code
+```
+
+- [ ] **Step 5.5: Implement and test the authoritative singleton slot**
+
+Use `relay-cpu-gate-slot.ts` and the existing class/namespace, not a new DO class
+or migration. Explicitly recognize exactly `cpu-gate-slot:v1:<runtime-environment>`
+without relaxing the existing quota identity parser; guard every existing quota
+RPC (including in-flight-only RPCs) against control-only identities. Slot RPCs
+reject pool/day or wrong-environment identities. Store only owner, safe-integer
+generation and held/closing state; do not use quota counters or day finalization
+for slot storage. Claim and compare-and-clear are local storage transactions;
+target fencing/inspection RPCs run outside them. Implement the spec's no-expiry,
+closing-on-uncertainty and target-proof-before-release rules exactly.
+
+With real shared DO storage/stubs, not independent mock locks, test:
+
+```text
+A/B distinct IDs, same pool, simultaneous claims -> exactly one claimed
+A STANDARD / B MINI -> exactly one claimed across both pools
+A previous UTC day / B current day -> held A blocks B
+DO eviction / runner restart / missing journal -> durable owner is unchanged
+lease/grant expiry or elapsed wall time -> never frees slot
+unavailable claim -> no admission; both runners report BLOCKED
+A paused before admission; close A fences target; B claims; delayed A cannot admit
+close while A live/non_fixture/unverifiable -> closing retained, B busy
+terminal target but lost close acknowledgement -> restart can prove/finish close
+stale close generation cannot clear B; duplicate close on idle is no-op
+paused A resumes with stale close-operation HTTP request after B claims -> B remains held
+bridge/candidate stubs use same singleton and persistent schema
+all normal quota RPCs reject singleton; slot RPCs reject ordinary quota identities
+```
+
+- [ ] **Step 6: GREEN**
+
+```bash
+npm test -w apps/gateway-worker -- ../../durable-objects/quota-controller/test/relay-cpu-gate.test.ts ../../durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts ../../durable-objects/quota-controller/test/relay-admission.test.ts ../../durable-objects/quota-controller/test/index.test.ts
+npm run typecheck -w apps/gateway-worker
+```
+
+Expected GREEN: inspection is read-only, fence/admission collision is authoritative, and existing admission/lifecycle behavior is unchanged.
+
+- [ ] **Step 7: Commit boundary**
+
+```bash
+git add durable-objects/quota-controller/src/relay-config.ts durable-objects/quota-controller/src/relay-cpu-gate.ts durable-objects/quota-controller/src/relay-cpu-gate-slot.ts durable-objects/quota-controller/src/relay-admission.ts durable-objects/quota-controller/src/quota-controller.ts durable-objects/quota-controller/src/store.ts durable-objects/quota-controller/test/relay-cpu-gate.test.ts durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts apps/gateway-worker/vitest.config.ts
+git commit -m "feat: add relay CPU gate quota inspection and setup fence"
+```
+
+---
+
+### Task 4: Implement the protected Worker CPU-gate control plane and safe relay markers
+
+**Files:**
+- Create: `apps/gateway-worker/src/relay-cpu-gate.ts`
+- Create: `apps/gateway-worker/src/relay-grant-claims.ts`
+- Create: `apps/gateway-worker/src/relay-observation.ts`
+- Create: `apps/gateway-worker/test/relay-cpu-gate.test.ts`
+- Create: `apps/gateway-worker/test/relay-observation.test.ts`
+- Modify: `apps/gateway-worker/src/relay-auth.ts`
+- Modify: `apps/gateway-worker/src/relay-decision-controller.ts`
+- Modify: `apps/gateway-worker/src/index.ts`
+- Modify: `apps/gateway-worker/test/relay-auth.test.ts`
+- Modify: `apps/gateway-worker/test/relay-decision-controller.test.ts`
+- Modify: `apps/gateway-worker/test/relay-callback.test.ts`
+
+**Interfaces:**
+- Consumes: Task 2 control/slot/Context contracts; Task 3 inspection/admission/reconcile/global-slot RPCs; existing Cloudflare-side HMAC signer. Preview runtime credentials are provisioned by Task 5 tooling when Task 6 executes it.
+- Produces:
+  - `resolveRelayCpuGateControl(env): {kind:"disabled"} | {kind:"enabled"; token:string}`
+  - `verifyRelayCpuGateAuth(header, token): boolean`
+  - `relayGrantClaimsOf(grant: RelayGrant): RelayGrantCredentialV1`
+  - `handleRelayCpuGate(request: Request, env: Env): Promise<Response>`
+  - `emitRelayInvocation(event: RelayInvocationEvent): void`
+  - `RelayCpuGateSetupFenceResponseV1` route handler
+  - exact `RelayCpuGateDecisionContextV1` response with unchanged Context claims;
+  - authenticated slot GET and close-operation POST routes with the spec's exact
+    owner/generation input, 200/409/503 control envelopes and 404-disable rules.
+
+Pin:
+
+- missing or invalid-shape `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` => control surface 404 before body parsing/DO access;
+- enabled route + missing/wrong bearer => 401 with no DO call;
+- control prefix routes are selected before generic relay callback action parsing;
+- CPU-gate bearer is never accepted as lifecycle service bearer and vice versa;
+- if `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` equals `OCTG_RELAY_SERVICE_AUTH_TOKEN`, the
+  CPU-gate control surface is disabled and every CPU-gate route returns 404 with
+  no DO call, regardless of bearer value.
+
+- [ ] **Step 1: Write RED setup/inspection/recovery tests**
+
+Pin exact setup contract:
+- runner supplies `pool + requestId`;
+- request ID must satisfy pattern and current UTC day via `relayRequestUtcDayOf`;
+- Worker chooses configured fixture client/model, nonce, environment, metadata, zero reservation/upper bound/output, no idempotency;
+- existing state collision is fail-closed without mutation;
+- an existing fixture collision returns `setup_state_ambiguous` and retains
+  the slot for recovery, never a definite no-live-fixture response;
+- successful admission is signed Cloudflare-side and returned as `RelayCpuGateSetupResponseV1`;
+- grant HMAC key is never part of a response/log.
+- Stage 2 setup claims the singleton before any target admission; busy returns
+  `cpu_gate_busy`/409 and unavailable returns `cpu_gate_slot_unavailable`/503,
+  with no admission. Success/denial/signing compensation never silently clears
+  the slot: close-operation must prove target closure. Include A/B different-ID
+  and different-pool route races using Task 3 shared storage.
+
+Pin decision-context for both runtime environments:
+
+- input is exactly `version,pool,requestId`, never a caller-selected model;
+- output signs the existing ten-key `RelayContextV1` from the spec with the
+  configured same-environment client and `idempotencyKeyHash=null`; no model,
+  pool or quota-day claim is added;
+- correct Preview control bearer yields a verifiable Preview context without
+  admission; missing/wrong/service bearer yields 401 without signing or DO call;
+- absent/invalid/equal-to-service secret yields 404 for every control route;
+- a validly signed context containing extra `model` is rejected as
+  `invalid_context` before admission;
+- decision body `metadata.model` supplies the Stage 1 Preview model or Stage 2
+  reject model; `RelayDecisionController` keeps existing denied mapping;
+- fenced admission returns existing `invalid_context`; the decision reject is
+  `{version:1,kind:"reject",code:"invalid_context",status:500}` within the
+  existing HTTP 200 callback, while setup enters definite-no-live recovery.
+
+Pin setup-fence contract:
+
+- runner supplies `pool + requestId`;
+- request ID must satisfy pattern; the operation UTC day is derived from the ULID timestamp, not the current Worker day, so recovery remains valid across a calendar-day rollover;
+- Worker authenticates the CPU-gate bearer, validates the requestId, resolves the owning QuotaController by the embedded ULID day, and calls `fenceRelayCpuGateSetup`;
+- response is `RelayCpuGateSetupFenceResponseV1` with kind `fenced`, `fixture`, or `non_fixture`;
+- `fenced` means operation A is permanently closed; runner may start operation B
+  with a fresh request ID;
+- `fixture` redirects the runner to the live-fixture recovery path instead of
+  retrying setup;
+- `non_fixture` makes the operation `BLOCKED / INCOMPLETE`;
+- no grant HMAC key or secret value appears in the response/log.
+
+- requires CPU-gate bearer, valid pool/requestId; resolves the owning QuotaController from the requestId's ULID day so recovery works across a calendar-day rollover;
+- records durable fence in QuotaController before returning `fenced`;
+- if a canonical fixture already exists, returns the fixture status instead and the runner follows non-absent recovery;
+- if a non-fixture grant/request exists, returns `non_fixture`;
+- once fenced, any delayed `admitRelay(A)` fails closed without leaving a live fixture.
+
+Pin reconcile-unused:
+
+- no grant token;
+- only canonical `cpuGateFixture=true` in `authorized|attempted|uncertain` may call `reconcileRequest(requestId,"unused")`;
+- terminal/non-fixture/absent targets never mutate;
+- success is re-inspected as `reconciled_unused / released / activeLease=false`.
+
+- [ ] **Step 2: Write RED signing-failure compensation tests**
+
+Reuse the existing Decision-DO poisoning technique: return an admitted grant whose claims make signing throw. Assert the CPU-gate setup calls authoritative `reconcileRequest(requestId,"unused")`, re-inspects terminal state, and returns a definite `setup_failed_compensated` result only after proof.
+
+A failed/ambiguous compensation must return `setup_state_ambiguous` and must not claim the operation is safe to replace.
+
+- [ ] **Step 2.5: Write RED setup-fence and delayed-admission tests**
+
+Mock a setup request that times out before `admitRelay` returns. Prove:
+
+```text
+operation-inspection before fence returns HTTP 425 pending_ambiguous
+setup-fence returns fenced when no grant exists
+operation-inspection after fence returns HTTP 404 absent
+a delayed admitRelay for the same requestId fails closed after the fence
+starting a new operation before fence acknowledgement is rejected
+fence returns fixture status if a canonical CPU-gate fixture already exists
+fence returns non_fixture if the requestId collides with an ordinary grant/request
+fence resolves the original QuotaController from the ULID day even after a calendar-day rollover
+operation-inspection and reconcile-unused also resolve by ULID day and succeed across a rollover
+```
+
+Also prove that after `setup_failed_compensated`, `setup-fence` returns
+`fixture` with terminal state, and the runner closes operation A and starts
+operation B without retrying `setup(A)`.
+
+The runner serialization tests must assert that a new operation is never created
+until the previous operation is proven `fenced absent` or terminal, and that a
+`fixture` response from setup-fence with terminal state also closes the
+operation.
+
+- [ ] **Step 3: Write RED safe-marker tests**
+
+```text
+event="octg.relay_invocation"
+invocationClass=ingress|decision|activation|renewal|terminal
+revisionId
+requestId? 
+workloadClass?  # controlled measurement only
+concurrency?    # controlled measurement only
+phase=start|finish
+outcome?        # finish only
+```
+
+```bash
+npm test -w apps/gateway-worker -- relay-cpu-gate.test.ts relay-observation.test.ts relay-auth.test.ts relay-decision-controller.test.ts relay-callback.test.ts
+```
+
+Expected RED: CPU-gate routes/modules are missing and Decision DO still owns the grant-claims mapping.
+
+- [ ] **Step 4: Implement minimum control plane**
+
+Exact route set:
+
+```text
+GET  /internal/relay/v1/cpu-gate/quota
+GET  /internal/relay/v1/cpu-gate/slot
+POST /internal/relay/v1/cpu-gate/setup
+POST /internal/relay/v1/cpu-gate/setup-fence
+POST /internal/relay/v1/cpu-gate/decision-context
+POST /internal/relay/v1/cpu-gate/operation-inspection
+POST /internal/relay/v1/cpu-gate/reconcile-unused
+POST /internal/relay/v1/cpu-gate/close-operation
+```
+Keep control routes internal and before generic callback action parsing.
+
+Use the existing `QuotaController.admitRelay` transaction for setup. `admitRelay` must check for a CPU-gate fence for the requestId and fail closed if one exists. Never write DO storage directly.
+
+For Stage 2, claim the shared slot first and never bypass it on error or
+contention. Slot closure delegates to Task 3's singleton, which fences and
+inspects the target before compare-and-clear. A Worker check alone is not a
+lock. Recovery of a terminal target still requires close-operation and idle
+proof. Keep slot secrets out of responses (owner IDs/generation are non-secret).
+
+The Worker never unconditionally releases a slot in `finally`: after any
+post-claim rejection/exception, the runner retains the owner/generation and
+executes the same fence/target-inspection/close protocol. A lost HTTP response
+or crashed Worker is recovered from the singleton by the next authorized
+runner, even without a journal. If target closure cannot be proven, retain
+held/closing and report BLOCKED, rather than silently leaking or force-clearing
+the operation. All definite-denial and exception route tests pin this behavior.
+
+Move the grant-claims mapping from `RelayDecisionController` into `relay-grant-claims.ts` and consume it from both call sites.
+
+- [ ] **Step 5: Wire markers only at stable class boundaries**
+
+Add supplementary start/finish markers without using them as correctness/CPU acceptance:
+
+- ingress at the Responses relay entry/exit;
+- decision callback transport;
+- activation/renewal/terminal callback transport.
+
+Do not add payload-derived fields.
+
+- [ ] **Step 6: GREEN**
+
+```bash
+npm test -w apps/gateway-worker -- relay-cpu-gate.test.ts relay-observation.test.ts relay-auth.test.ts relay-decision-controller.test.ts relay-callback.test.ts
+npm run typecheck -w apps/gateway-worker
+```
+
+Expected GREEN: all protected route/security/compensation tests pass.
+
+- [ ] **Step 7: Commit boundary**
+
+```bash
+git add apps/gateway-worker/src/relay-cpu-gate.ts apps/gateway-worker/src/relay-grant-claims.ts apps/gateway-worker/src/relay-observation.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/relay-decision-controller.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-cpu-gate.test.ts apps/gateway-worker/test/relay-observation.test.ts apps/gateway-worker/test/relay-auth.test.ts apps/gateway-worker/test/relay-decision-controller.test.ts apps/gateway-worker/test/relay-callback.test.ts
+git commit -m "feat: add protected relay CPU gate control plane"
+```
+
+---
+
+### Task 5: Build canonical CPU workload, telemetry acquisition, and evidence tooling
+
+**Files:**
+- Create: `scripts/relay-cpu-workloads.mjs`
+- Create: `scripts/relay-cpu-workloads.test.mjs`
+- Create: `scripts/relay-cpu-telemetry.mjs`
+- Create: `scripts/relay-cpu-telemetry.test.mjs`
+- Create: `scripts/relay-cpu-evidence.mjs`
+- Create: `scripts/relay-cpu-evidence.test.mjs`
+- Create: `scripts/run-relay-cpu-gate.mjs`
+- Create: `scripts/run-relay-cpu-gate.test.mjs`
+- Modify: `scripts/preview-worker-config.mjs`
+- Modify: `scripts/preview-worker-config.test.mjs`
+- Modify: `package.json`
+
+**Interfaces:**
+- Consumes: Task 4 CPU-gate/slot/decision-context HTTP contract; public `/v1/responses`; existing callback routes; Workers Observability REST API; operator-owned Preview-only relay credentials and isolated non-secret resource inputs.
+- Produces:
+  - `WORKLOAD_CLASSES = ["baseline-small","baseline-large","incident-regression-stream","incident-regression-nonstream"]`
+  - `CONCURRENCIES = [1,2,3]`
+  - `fetchRelayCpuTelemetry(options): Promise<RelayCpuTelemetryExportResult>`
+  - `evaluateCpuSeries(records, metadata, expected): RelayCpuSeriesResult`
+  - executable `npm run gate:relay-cpu -- ...`
+  - executable `npm run telemetry:relay-cpu -- ...`
+  - protected normalized platform JSONL consumed by `relay-cpu-evidence.mjs`
+  - protected sidecar telemetry metadata JSON consumed by the reducer.
+  - Preview-only per-run CPU-gate secret provisioning, auth/context preflight,
+    normal callback cleanup and secret teardown tooling for Task 6, following
+    the spec's Stage 1 Preview credential provisioning contract.
+
+- [ ] **Step 0: Pin and implement Preview credential lifecycle tooling locally**
+
+The authorized Preview operator/job generates a fresh 43-character base64url
+bearer from 32 random bytes for each run. It passes it to Preview candidate
+upload via a `0600` `--secrets-file` under a `0700` temporary directory and to
+the Stage 1 runner only as environment `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. The
+same job supplies the Preview service bearer separately; HMAC keys remain only
+in the Cloudflare-side Preview secret provisioning path. Production
+credentials/store access are not inputs. Use mocked Wrangler/network adapters
+for these local tests; this task executes no deploy.
+
+`preview-worker-config.mjs` produces only non-secret fixture identifiers and
+Preview-local D1/DO/relay settings, rejects secret values in `vars`, and never
+inherits Production fixture IDs or CPU-gate settings. Ordinary Preview builds
+do not enable the CPU gate. Phase-2-specific synchronization remains Task 8;
+this prerequisite is implemented before Task 6, even when Phase 2 is inactive.
+
+Tests prove provisioning precedes measurement; correct Preview bearer obtains
+a usable signed context; missing/wrong/service bearer returns 401; absent,
+invalid-shape or equal-to-service binding returns 404 and causes BLOCKED before
+measurement; Preview decision uses only the Preview service bearer; all normal
+Preview grants are terminalized. Pin the spec's exact Preview upload/deploy
+sequence, and its teardown sequence: versioned CPU-gate secret deletion,
+secret-less Preview version at 100%, metadata-only secret absence and unchanged
+other bindings, exact-version 404 verification. On success/failure/cancellation,
+terminalize known operations, close any held slot, execute that teardown, then
+discard secrets. Phase 2 active requires Task 8 Preview v4 before upload/rerun.
+Failed cleanup/teardown is BLOCKED with safe IDs, not reported success. Tests
+scan mocked stdout/stderr/ledgers/artifacts/config/argv for sentinel secrets and
+Context/grant tokens; temporary secret files are deleted in `finally`.
+
+The only authoritative telemetry producer is the Workers Observability REST API endpoint:
+
+```text
+POST https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/observability/telemetry/query
+```
+
+Authentication comes only from environment variables:
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_API_TOKEN
+```
+
+`CLOUDFLARE_API_TOKEN` MUST be an account-scoped API Token with exactly the Cloudflare permission required by this API path:
+
+```text
+Workers Observability Write
+```
+
+for the target account.
+
+Issue #121 telemetry acquisition uses only:
+
+```http
+Authorization: Bearer <CLOUDFLARE_API_TOKEN>
+```
+
+The implementation MUST NOT generate or accept `X-Auth-Key`, `X-Auth-Email`, Global API Key authentication, or a token CLI argument. A 401/403/API authorization failure is `BLOCKED / INCOMPLETE`; do not switch credential schemes automatically.
+
+The token is never accepted as a CLI argument or written to output.
+
+- [ ] **Step 1: Write RED workload tests**
+
+Pin deterministic, synthetic builders:
+
+- baseline-small: shallow history, no tools;
+- baseline-large: representative 700 KiB-1 MiB request class;
+- incident-regression-stream: only structural incident features, `stream=true`;
+- incident-regression-nonstream: same structure, `stream=false`;
+- no production prompt/response text or credential material.
+
+The workload driver exercises every required `invocationClass`:
+
+```
+
+Required series matrix:
+
+```text
+invocationClass      | workloadClass              | concurrency
+---------------------|----------------------------|------------
+ingress              | baseline-small             | 1,2,3
+ingress              | baseline-large             | 1,2,3
+ingress              | incident-regression-stream | 1,2,3
+ingress              | incident-regression-nonstream | 1,2,3
+decision             | baseline-small             | 1,2,3
+decision             | baseline-large             | 1,2,3
+decision             | incident-regression-stream | 1,2,3
+decision             | incident-regression-nonstream | 1,2,3
+activation_normal    | baseline-small             | 1
+activation_normal    | baseline-large             | 1
+activation_normal    | incident-regression-stream | 1
+activation_normal    | incident-regression-nonstream | 1
+activation_replay    | baseline-small             | 1,2,3
+activation_replay    | baseline-large             | 1,2,3
+activation_replay    | incident-regression-stream | 1,2,3
+activation_replay    | incident-regression-nonstream | 1,2,3
+renewal_normal       | baseline-small             | 1,2,3
+renewal_normal       | baseline-large             | 1,2,3
+renewal_normal       | incident-regression-stream | 1,2,3
+renewal_normal       | incident-regression-nonstream | 1,2,3
+terminal_normal      | baseline-small             | 1
+terminal_normal      | baseline-large             | 1
+terminal_normal      | incident-regression-stream | 1
+terminal_normal      | incident-regression-nonstream | 1
+terminal_replay      | baseline-small             | 1,2,3
+terminal_replay      | baseline-large             | 1,2,3
+terminal_replay      | incident-regression-stream | 1,2,3
+terminal_replay      | incident-regression-nonstream | 1,2,3
+```
+For **Stage 1**, the `ingress` and `decision` series use a Preview-enabled
+complimentary model that classifies to the requested pool. The runner must
+verify this model is present in the Preview registry before measurement; these
+series exercise normal admission, Cloudflare-side grant signing, and (for
+decision) callback dispatch on the candidate ScriptVersion.
+
+For **Stage 2**, the `ingress` and `decision` series use a runner-provided
+canary client key and the exact synthetic model string
+`octg-cpu-gate-reject-v1`. Before any measured Stage 2 series, one unmeasured
+preflight request must prove that this model receives the normal
+`model_requires_paid` rejection and creates no admission/grant. If it is enabled
+or produces any other outcome, the Stage 2 series is `BLOCKED / INCOMPLETE`;
+do not select a different model ad hoc.
+
+For each `decision` sample the runner:
+
+1. generates a fresh runner-owned `req_<ULID>` decision request ID;
+2. calls the CPU-gate `decision-context` route to obtain a Cloudflare-signed
+   `contextToken` **without** performing admission;
+3. issues `concurrency` simultaneous `/internal/relay/v1/decision` callbacks with:
+
+```text
+X-OCTG-Relay-Context: <contextToken>
+Authorization: Bearer <OCTG_RELAY_SERVICE_AUTH_TOKEN>
+Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
+```
+
+4. captures any `X-OCTG-Relay-Grant` headers returned by allowed callbacks;
+5. terminalizes the resulting grants via the normal `/internal/relay/v1/terminal`
+   callback using those grant credentials, then proves the normal grant terminal
+   before starting the next sample.
+
+Stage 2 uses the reject model, so callbacks return reject before creating a
+grant and no terminal cleanup is required. The request body is a valid Deno
+tokenizer decision payload containing the runner's decision request ID and the
+stage-appropriate model. The runner never constructs or signs a RelayContext;
+Cloudflare signs it with `OCTG_RELAY_CONTEXT_HMAC_KEY`. The `decision-context`
+call is `cpu-gate-control` and is excluded from the decision measurement window.
+
+Tests must pin:
+
+- `decision-context` returns a valid context token for an absent request ID and
+  performs no admission;
+- `decision-context` fails closed when the request ID is already a fixture or
+  non-fixture;
+- a Stage 1 decision callback with the context token performs normal admission
+  and returns an `X-OCTG-Relay-Grant` header on allow;
+- the runner terminalizes the grant and proves the normal grant terminal before the
+  next sample;
+- a Stage 2 decision callback with the reject model returns reject and creates
+  no grant;
+- `concurrency=2,3` decision samples issue the expected number of simultaneous
+  callbacks against the same active decision fixture.
+
+Stage 1 decision grants have normal nonzero budget reservations and do not
+satisfy the zero-reservation `cpuGateFixture` predicate. Their closure proof is
+the existing authenticated terminal callback response with `accepted=true` and
+terminal `state`; do not use the CPU-gate operation-inspection/reconcile-unused
+routes on these grants or relax their canonical fixture predicate. Missing or
+ambiguous terminal acknowledgement is BLOCKED and uses existing normal callback
+retry semantics with the same credential, never a fresh decision sample.
+
+`ingress` uses the same override header on `/v1/responses`. `activation`,
+`renewal`, and `terminal` use the Worker-signed grant credential obtained from
+CPU-gate setup and the same override header.
+CPU-gate setup and the same override header.
+
+- [ ] **Step 2: Write RED telemetry-acquisition tests**
+
+Define this exact normalized JSONL record:
+
+```ts
+interface RelayCpuPlatformRecord {
+  readonly eventId: string;
+  readonly requestId: string;
+  readonly eventTimestampMs: number;
+  readonly scriptName: string;
+  readonly scriptVersionId: string;
+  readonly cpuTimeMs: number;
+  readonly outcome: string;
+  readonly eventType: string;
+  readonly routeDiscriminator: string;
+  readonly executionModel: "stateless";
+}
+```
+
+The producer accepts exactly:
+
+```text
+scriptName
+expectedScriptVersionId
+expectedExecutionModel=stateless
+windowsJsonPath
+outputPath
+metaOutputPath
+```
+
+plus `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` from the environment.
+
+The `view="invocations"` response is normalized **per invocation group**, never per raw event:
+
+```text
+response.invocations:
+  <groupRequestId>:
+    [event, event, ...]
+
+one group
+  -> find authoritative Worker CPU event
+  -> exactly one RelayCpuPlatformRecord
+```
+
+The map key `groupRequestId` becomes `RelayCpuPlatformRecord.requestId`. The
+runner does **not** rely on this platform request ID to correlate telemetry with
+the run ledger, because replay/renewal callbacks may share the same domain
+request ID and because Cloudflare's group ID may differ from the runner-owned
+`req_<ULID>`.
+
+Instead, the evidence reducer correlates each ledger call with a normalized
+platform record by:
+
+```text
+scriptVersionId  == candidate version
+routeDiscriminator in the series invocation class
+windowStartMs <= eventTimestampMs < windowEndMs
+call timestamp matches event timestamp within a bounded tolerance
+```
+
+For a deterministic series the calls are issued sequentially, so ordering plus
+timestamp tolerance is sufficient. For concurrent series the reducer uses the
+recorded call ordinal and route discriminator. The run ledger records per call:
+
+```text
+series identity (invocationClass, workloadClass, concurrency)
+call ordinal
+call timestamp (runner clock, ms)
+route discriminator
+observed response status / outcome hint
+fixture requestId (for lifecycle operations only)
+```
+
+If request identity fields (`$metadata.requestId`, `$workers.requestId`) are
+present on any event, they must be consistent with each other and with the
+groupRequestId; contradictions are `BLOCKED / INCOMPLETE`. They are not required
+for correlation.
+
+`normalizedInvocationCount` means the number of invocation groups that successfully normalize to exactly one `RelayCpuPlatformRecord`. It is never raw event count.
+
+Tests must pin:
+
+- every telemetry request contains a non-empty top-level `queryId`;
+- the invocation request uses exactly `queryId="octg-relay-cpu-invocations-v1"`;
+- `queryId` is an inline ad-hoc query identifier and is not used to load saved-query parameters;
+- query `view="invocations"`;
+- exact timeframe from `windowStartMs` through `windowEndMs`;
+- dataset `cloudflare-workers`;
+- server-side filters for the expected script plus, when exposed by the Observability keys API, exact ScriptVersion and `executionModel=stateless`;
+- hard post-normalization requirements that `$workers.scriptName`, `$workers.scriptVersion.id`, and `$workers.executionModel` equal the expected values even if a server-side filter is unavailable;
+- `cpuTimeMs` comes only from `$workers.cpuTimeMs`;
+- `outcome` comes only from `$workers.outcome`;
+- `eventTimestampMs` comes only from the platform event timestamp;
+- `eventType` comes only from `$workers.eventType`;
+- `routeDiscriminator` is the URL pathname from `$metadata.url`, or the path parsed from `$metadata.trigger` only when URL is absent;
+- URL/trigger disagreement or an unassignable route is `BLOCKED`;
+- `executionModel="durableObject"` is never normalized into the stateless gate;
+- `outcome="exceededCpu"` is retained even when no application finish marker exists;
+- missing `cpuTimeMs`, ScriptVersion, outcome, event timestamp, script name, or execution model on an in-scope invocation is `BLOCKED`;
+- any in-scope platform record with `$workers.truncated=true` is `BLOCKED`;
+- exact duplicate `eventId` records are deterministically de-duplicated once; conflicting duplicates are `BLOCKED`;
+- HTTP/API failure, `success=false`, malformed response, or query parse failure is `BLOCKED`.
+- one invocation group containing one CPU event plus start/finish markers normalizes to exactly one CPU record;
+- a marker event without `$workers.cpuTimeMs` never becomes the CPU record;
+- zero authoritative CPU-bearing events in a group => `BLOCKED / INCOMPLETE`;
+- two conflicting CPU-bearing events in one group => `BLOCKED / INCOMPLETE`;
+- an exact duplicate of the same CPU event ID with byte-for-byte-equivalent authoritative fields de-duplicates to one record;
+- two invocation groups containing many raw events produce `normalizedInvocationCount == 2`;
+- `groupRequestId != $metadata.requestId` when metadata request ID is present => `BLOCKED / INCOMPLETE`;
+- `groupRequestId != $workers.requestId` when Worker request ID is present => `BLOCKED / INCOMPLETE`;
+- evidence reducer correlates a ledger call to a normalized record when their
+  `scriptVersionId`, `routeDiscriminator`, and timestamps match within tolerance,
+  even if the platform `requestId` differs from the runner-owned `req_<ULID>`;
+- a series with multiple callbacks against the same fixture (replay/renewal)
+  produces the expected call count by matching each callback's timestamp and
+  route discriminator, without requiring distinct platform request IDs;
+- concurrent callbacks against the same fixture are matched by ordinal order
+  within the same route and window.
+
+Pagination is exact:
+
+```text
+limit=2000
+offset=<last returned $metadata.id>
+offsetDirection=next
+```
+
+Continue until a subsequent page returns zero new invocation events. A non-empty page without a usable final `$metadata.id`, repeated cursor, or any state where complete retrieval cannot be proven is `BLOCKED`. The producer post-filters timestamps to `windowStartMs <= timestamp < windowEndMs` so adjacent series cannot share one boundary event.
+
+The producer also runs exactly one companion **calculations** query using the identical dataset, script, ScriptVersion, executionModel, and half-open timeframe filters as the invocations query:
+
+```text
+queryId = octg-relay-cpu-completeness-v1
+view = calculations
+chartType = aggregate
+ignoreSeries = true
+
+parameters.calculations:
+  operator = uniq
+  key = $metadata.requestId
+  keyType = string
+  alias = platform_invocation_count
+```
+
+The calculation response is authoritative for platform-sampling completeness.
+
+The telemetry request mock contract MUST additionally assert:
+
+```text
+invocations queryId == "octg-relay-cpu-invocations-v1"
+calculations queryId == "octg-relay-cpu-completeness-v1"
+calculations chartType == "aggregate"
+calculations calculationsMode is absent
+calculations ignoreSeries == true
+Authorization == "Bearer <env token>"
+X-Auth-Key is absent
+X-Auth-Email is absent
+token CLI argument is absent
+```
+
+Both `queryId` values are deterministic inline ad-hoc identifiers. They do not identify or load saved Cloudflare queries.
+
+PASS-eligible telemetry requires:
+
+```text
+exactly one platform_invocation_count aggregate
+aggregate.sampleInterval == 1
+aggregate.value is a non-negative integer
+platformInvocationCount = aggregate.value
+platformInvocationCount == normalizedInvocationCount
+  # normalizedInvocationCount = successfully normalized invocation-group count,
+  # not raw event count
+paginationComplete == true
+truncationObserved == false
+```
+
+A `sampleInterval` greater than 1 means Cloudflare sampling occurred and the population is estimated; it is therefore `BLOCKED / INCOMPLETE` for PASS. Missing/unavailable/non-numeric/unverifiable sampling metadata is also BLOCKED. `head_sampling_rate=1` is necessary configuration but is not sufficient proof of unsampled platform telemetry.
+
+The normalized export sidecar is exact:
+
+```ts
+interface RelayCpuTelemetryExportMeta {
+  readonly version: 1;
+  readonly samplingVerified: boolean;
+  readonly normalizedInvocationCount: number;
+  readonly paginationComplete: boolean;
+  readonly truncationObserved: boolean;
+  readonly queryComplete: boolean;
+  readonly windows: ReadonlyArray<{
+    readonly windowStartMs: number;
+    readonly windowEndMs: number;
+    readonly paginationComplete: boolean;
+    readonly truncationObserved: boolean;
+    readonly sampleInterval: number | null;
+    readonly platformInvocationCount: number | null;
+  }>;
+}
+```
+
+`samplingVerified=true` is emitted only when all PASS-eligibility conditions above are true.
+
+The protected JSONL and sidecar metadata files are both created mode `0600`; raw API responses are not committed.
+
+For one exact series identity:
+
+```text
+stage
+candidateScriptVersion
+candidateSourceRevision
+invocationClass
+workloadClass
+concurrency
+windows[]: [windowStartMs, windowEndMs)
+```
+Route mapping is exact:
+```text
+/v1/responses                                  -> ingress
+/internal/relay/v1/decision                    -> decision
+/internal/relay/v1/activation (first only)     -> activation_normal
+/internal/relay/v1/activation (subsequent)     -> activation_replay
+/internal/relay/v1/renewal                     -> renewal_normal
+/internal/relay/v1/terminal (first only)       -> terminal_normal
+/internal/relay/v1/terminal (subsequent)       -> terminal_replay
+```
+
+Assert:
+
+- 499 successes => BLOCKED;
+- p99 5/max 7/exceeded 0 => PASS;
+- p99 >5 => FAIL;
+- max >7 => FAIL;
+- any `exceededCpu` => FAIL even without app marker;
+- telemetry count mismatch => BLOCKED unless an observed CPU violation already makes it FAIL;
+- wrong ScriptVersion => rejected/not counted and completeness may become BLOCKED;
+- missing/ambiguous route classification => BLOCKED;
+- overlapping required windows => harness rejects the run ledger before evaluation;
+- application `octg.relay_invocation` markers may enrich attribution but are never required for a normalized platform record and never turn incomplete platform telemetry into PASS;
+- `sampleInterval=1` plus exact platform/normalized invocation count equality is required for ordinary PASS evaluation;
+- `sampleInterval>1`, missing sampling metadata, or unverifiable sampling metadata => BLOCKED unless a directly observed CPU violation already makes the series FAIL;
+- `head_sampling_rate=1` with API `sampleInterval>1` => BLOCKED;
+- `platformInvocationCount != normalizedInvocationCount` when `sampleInterval=1` => BLOCKED;
+- `platformInvocationCount == normalizedInvocationCount` compares the calculation result against normalized invocation-group count, never against raw event count;
+- one CPU event + start marker + finish marker in one group contributes exactly one normalized record;
+- zero CPU-bearing events or conflicting multiple CPU-bearing events in any in-scope group => BLOCKED;
+- canonical group/request identity contradiction => BLOCKED;
+- a sampled `exceededCpu` record may still make the series FAIL because a direct gate violation is observed, but sampled/incomplete telemetry can never produce PASS;
+- `cpu-gate-control` invocations (setup, setup-fence, decision-context,
+  operation-inspection, reconcile-unused) must not appear inside any lifecycle
+  series window and must not be counted toward lifecycle series invocation totals.
+
+Pin:
+
+- runner generates `req_<ULID>` before setup;
+- the runner never retries `setup(A)`; once `fenced` is durable for A, operation A
+  is permanently closed;
+- two independent Stage 2 runner instances with separate journals and distinct
+  IDs compete on Task 3's real shared singleton: only one may admit across
+  both pools; `maxInFlight >= 3` never substitutes for this exclusion;
+- restart without a journal reads the singleton owner and recovers/closes it
+  before any new setup; busy/unavailable is BLOCKED with no fallback;
+- paused A cannot admit after its target is fenced and slot passed to B;
+- expired lease, day rollover and bridge/candidate skew preserve the lock;
+- every target terminal/fenced-absent branch also calls close-operation and
+  proves singleton idle before a new operation or secret deletion;
+- ambiguous setup response -> call setup-fence for the same request ID and wait for
+  durable `fenced` (or `fixture`/`non_fixture`);
+- `fenced` from setup-fence (followed by operation-inspect returning HTTP 404
+  absent) -> operation A is closed; runner may start operation B with a fresh
+  request ID;
+- `fixture` from setup-fence -> runner recovers the existing live fixture and may
+  start operation B only after it is terminal;
+- `non_fixture` from setup-fence (or HTTP 409 from operation-inspection) ->
+  operation A is `BLOCKED / INCOMPLETE`; runner must not start operation B until
+  the conflict is separately resolved;
+- `absent` without fence (HTTP 425) -> runner must fence and re-inspect;
+- live fixture -> reconcile-unused same ID then prove terminal before a new ID;
+- lost/expired grant token does not prevent requestId-based recovery;
+- compatibility-preflight operations are never counted as measurement samples.
+
+- [ ] **Step 3: Implement workload, telemetry, and evidence modules**
+
+The driver writes only a protected run ledger containing safe
+identifiers/timestamps/counts. It never writes request bodies, grant tokens,
+client keys, API tokens, or bearer values. It also maintains a protected
+operation journal that records every runner-owned CPU-gate operation (pool,
+requestId, state, timestamps) without secrets. The journal is used for recovery
+across driver process restarts and is required to be empty or fully
+terminal/fenced absent before CPU-gate secret deletion.
+
+Before reading the journal on startup, query the shared slot. Recover its owner
+even when the local journal is missing or belongs to a different process. The
+global slot is authoritative; journal closure alone never frees it. Record only
+safe slot owner/generation/state in the journal. Slot/control calls are outside
+all measurement windows and cannot contribute CPU samples.
+
+The run ledger records per call:
+
+```text
+series identity (invocationClass, workloadClass, concurrency)
+call ordinal
+call timestamp (runner clock, ms)
+route discriminator
+observed response status / outcome hint
+fixture requestId (for lifecycle operations only)
+```
+
+The driver must support the five lifecycle series (`activation_normal`,
+`activation_replay`, `renewal_normal`, `terminal_normal`, `terminal_replay`) and
+the `decision` callback series. For `activation_normal` and `terminal_normal`,
+the driver creates a fresh fixture per sample and terminalizes it before the
+next sample, because the runner may own only one non-terminal operation at a
+time; these series run only at `concurrency=1`. For `decision`,
+`activation_replay`, `renewal_normal`, and `terminal_replay`, the driver creates
+or reuses one active fixture and issues `concurrency` simultaneous callbacks
+against it, then terminalizes before the next sample. The run ledger records the
+series identity so the reducer evaluates each transition class separately.
+
+Required driver modes:
+
+```text
+stage1
+stage2-preflight
+stage2-series
+recover-operation
+```
+
+Stage 2 requests use the exact header:
+
+```text
+Cloudflare-Workers-Version-Overrides:
+  <worker-name>="<candidate-version-id>"
+```
+
+and require the observed Worker version to equal the candidate before accepting a sample.
+
+- [ ] **Step 4: Add executable package commands**
+
+```json
+"gate:relay-cpu": "node scripts/run-relay-cpu-gate.mjs",
+"telemetry:relay-cpu": "node scripts/relay-cpu-telemetry.mjs"
+```
+
+The telemetry CLI accepts identifiers/window/output paths only; credentials remain environment-only.
+
+Exact CLI arguments:
+
+```text
+--script-name=<production-worker-name>
+--script-version=<candidate-version-id>
+--execution-model=stateless
+--windows-json=<protected-windows-json>
+--out=<protected-normalized-jsonl>
+--meta-out=<protected-telemetry-meta-json>
+```
+
+`--windows-json` is required for non-help execution. It contains an ordered
+array of half-open `[windowStartMs, windowEndMs)` intervals for the series.
+For a single continuous window the array has exactly one element.
+
+Both `--out` and `--meta-out` are required for non-help execution.
+
+- [ ] **Step 5: Run RED**
+
+```bash
+node --test \
+  scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.test.mjs
+node --test scripts/preview-worker-config.test.mjs
+```
+
+Expected RED: files/exports do not exist.
+
+- [ ] **Step 6: GREEN**
+
+```bash
+node --test \
+  scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.test.mjs
+node --test scripts/preview-worker-config.test.mjs
+npm run test:scripts
+```
+
+Expected GREEN: workload, mocked grouped-invocation normalization/cardinality/identity tests, pagination/sampling tests, multi-window aggregation tests, pure reducer, and runner-control tests pass without live network access.
+
+- [ ] **Step 7: Commit boundary**
+
+```bash
+git add \
+  scripts/relay-cpu-workloads.mjs scripts/relay-cpu-workloads.test.mjs \
+  scripts/relay-cpu-telemetry.mjs scripts/relay-cpu-telemetry.test.mjs \
+  scripts/relay-cpu-evidence.mjs scripts/relay-cpu-evidence.test.mjs \
+  scripts/run-relay-cpu-gate.mjs scripts/run-relay-cpu-gate.test.mjs \
+  scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs \
+  package.json
+git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
+```
+---
+
+### Task 6: Attribute the Production recurrence and execute the Stage 1 gate
+
+**Files:**
+
+- No source changes.
+- Evidence output remains outside the repository except sanitized review/runbook summaries explicitly approved by the user.
+
+**Interfaces:**
+
+- Consumes: Tasks 1-5 including Preview provisioning/preflight/teardown tooling,
+  exact candidate revision, isolated Preview resource inputs and operator-owned
+  Preview-only secrets, Workers Observability REST API.
+- Produces: Production recurrence attribution plus Stage 1 PASS/FAIL/BLOCKED matrix that selects the Phase 2 branch. **Stage 1 evidence produced before all implementation/config changes is not a binding source-revision anchor; it must be rerun if source changes occur after it is collected.**
+
+- [ ] **Step 1: Require explicit telemetry authorization and record immutable candidate identity**
+
+Remote Worker execution **and** Workers Observability API queries require explicit authorization for this task.
+
+The telemetry environment MUST provide an account-scoped `CLOUDFLARE_API_TOKEN` with `Workers Observability Write` for the target account. The telemetry producer sends only `Authorization: Bearer <env token>`; Global API Key / `X-Auth-Key` / `X-Auth-Email` authentication is forbidden for Issue #121.
+
+- [ ] **Step 2: Attribute the historical/current Production CPU recurrence**
+
+If any later implementation or configuration change alters the source tree, Worker/DO bindings, routing contracts, or harness semantics, discard this Stage 1 evidence and rerun Task 6 after the change is committed and locally verified.
+Record source SHA, Worker version/revision, harness fingerprint/version, workload definitions, and CPU threshold `5/7/0`. Use normalized platform invocation records first and safe markers only as supplemental evidence.
+```text
+ingress
+decision
+activation_normal
+activation_replay
+renewal_normal
+terminal_normal
+terminal_replay
+```
+
+The executable acquisition sequence is:
+
+```bash
+umask 077
+export CLOUDFLARE_ACCOUNT_ID=...
+export CLOUDFLARE_API_TOKEN=...
+
+npm run telemetry:relay-cpu -- \
+  --script-name=<production-worker-name> \
+  --script-version=<known-production-version-id> \
+  --execution-model=stateless \
+  --windows-json=<protected-attribution-windows-json> \
+  --out=<protected-attribution-jsonl> \
+  --meta-out=<protected-attribution-meta-json>
+```
+
+If complete retrieval cannot be proven, a required field is absent, or attribution remains ambiguous, record `BLOCKED / INCOMPLETE`; Issue #121 cannot close.
+
+- [ ] **Step 3: Run Stage 1 in isolated Preview/temporary resources**
+
+Remote execution requires explicit authorization.
+
+Execute Task 5's Preview credential lifecycle before collecting any series:
+generate the independent per-run token, upload the Preview candidate with its
+secret binding, inject only Preview bearers into the runner, verify the exact
+candidate/runtime/resource isolation, and run the decision-context auth/context
+preflight. Require 401 for missing/wrong/service bearer and success for correct
+control bearer followed by a valid normal Preview decision. 404, unexpected
+401, invalid context or unfinished cleanup is BLOCKED, not a skipped series.
+Use only Preview registry models in decision `metadata.model`; never extend
+Context claims. Record only credential presence and preflight status, no token.
+After the run (including failure/cancellation), execute Task 5 cleanup and
+verified Preview secret teardown. This does not mutate Production and does not
+replace Task 12's distinct Production hardening sequence.
+
+Run one required workload/concurrency series at a time. For each series the
+runner records an ordered list of exact non-overlapping half-open windows
+`[windowStartMs, windowEndMs)` (usually one continuous window, or one window per
+sample for `activation_normal`/`terminal_normal`), expected attempt/success
+counts, candidate ScriptVersion, workload class, invocation class, and
+concurrency.
+- [ ] **Step 4: Acquire authoritative platform telemetry and prove sampling completeness immediately after each closed series**
+
+For every series, the telemetry command performs both the invocation query and the identical-filter companion calculations query before it writes a PASS-eligible export:
+
+```bash
+npm run telemetry:relay-cpu -- \
+  --script-name=<stage1-worker-name> \
+  --script-version=<candidate-version-id> \
+  --execution-model=stateless \
+  --windows-json=<protected-series-windows-json> \
+  --out=<protected-series-jsonl> \
+  --meta-out=<protected-series-meta-json>
+```
+
+No raw telemetry file is added to Git. Query/API failure, incomplete pagination, truncation, missing required platform fields, missing expected records, `sampleInterval != 1`, missing/unverifiable sampling metadata, or platform/normalized invocation count mismatch makes that series `BLOCKED / INCOMPLETE` unless a directly observed CPU violation already makes it FAIL.
+
+- [ ] **Step 5: Evaluate each Stage 1 series**
+
+Run the evidence reducer once per required Stage 1 series, using the series
+ledger, the normalized JSONL produced in Step 4, and its sidecar metadata:
+
+```bash
+node scripts/relay-cpu-evidence.mjs \
+  --ledger=<protected-run-ledger> \
+  --telemetry=<protected-stage1-series-jsonl> \
+  --telemetry-meta=<protected-stage1-series-meta-json> \
+  --out=<protected-stage1-series-summary>
+```
+
+The reducer correlates ledger calls with normalized platform records by
+`scriptVersionId`, `routeDiscriminator`, series window, and call
+ordinal/timestamp tolerance. It does not require the platform `requestId` to
+equal the runner-owned `req_<ULID>`. It rejects any `cpu-gate-control` record
+that appears inside a lifecycle measurement window and any record whose
+`scriptVersionId` does not match the candidate.
+
+Expected outcomes:
+
+- PASS: all required series satisfy 5/7/0, >=500 successful invocations, and complete authoritative telemetry.
+- lifecycle FAIL: any activation/renewal/terminal required series violates the gate -> proceed to Tasks 7-8, then rerun **all** Task 6 evidence.
+- ingress/decision FAIL: STOP for a separately reviewed remediation; do not enable lifecycle offload.
+- BLOCKED: repair evidence acquisition only; do not weaken the gate.
+
+- [ ] **Step 6: Review boundary**
+
+Preserve only sanitized aggregates, exact ScriptVersion/source SHA, manifest/harness identifiers, and exact windows in the review record. Protected normalized JSONL/raw API material remains temporary and is never committed.
+
+
+### Task 7 (conditional): Implement RelayGrantLifecycleController contract and trust-processing DO
+
+**Condition:** Run only if Task 6 reports activation/renewal/terminal FAIL.
+
+**Files:**
+- Create: `apps/gateway-worker/src/relay-grant-lifecycle-controller.ts`
+- Create: `apps/gateway-worker/test/relay-grant-lifecycle-controller.test.ts`
+- Create: `scripts/relay-do-config.test.mjs`
+- Modify: `apps/gateway-worker/src/index.ts`
+- Modify: `apps/gateway-worker/test/env.d.ts`
+- Modify: `apps/gateway-worker/wrangler.jsonc`
+
+**Interfaces:**
+- Consumes: Task 2 `RelayGrantLifecycleDispatchInput/Result`, `relayGrantLifecycleShardName`; existing grant verification/parsers; QuotaController lifecycle RPCs.
+- Produces: `RelayGrantLifecycleController.dispatch(input): Promise<RelayGrantLifecycleDispatchResult>`.
+
+- [ ] **Step 1: Write RED trust/routing tests**
+
+Cover:
+
+- invalid HMAC -> `protocol_error: invalid_context`;
+- wrong environment/expired credential -> `invalid_context`;
+- tampered unsigned requestId routing hint cannot authorize;
+- own DO name must be exactly `relay-grant-lifecycle:v1:<environment>:<00..63>`;
+- verified requestId shard mismatch -> `invalid_request`;
+- invalid own name -> `internal_error`.
+
+- [ ] **Step 2: Write RED action tests**
+
+For activation/renewal/terminal:
+
+- bounded raw body -> strict JSON parse in DO;
+- action-specific parser and grantId/leaseGeneration binding;
+- correct QuotaController identity from verified pool/day;
+- existing denial/result semantics mapped into the exact dispatch union;
+- QuotaController throw -> `internal_error`;
+- no durable lifecycle state is written by the lifecycle DO itself.
+
+- [ ] **Step 3: Write RED binding/migration test**
+
+Create `scripts/relay-do-config.test.mjs` to parse `apps/gateway-worker/wrangler.jsonc` and require the exact Worker-local binding `RELAY_GRANT_LIFECYCLE_CONTROLLER -> RelayGrantLifecycleController`, no `namespace_id`, and append-only migration `v4` with `new_sqlite_classes: ["RelayGrantLifecycleController"]`. v1-v3 must remain unchanged and ordered before v4.
+
+- [ ] **Step 4: Run RED**
+
+```bash
+npm test -w apps/gateway-worker -- relay-grant-lifecycle-controller.test.ts
+node --test scripts/relay-do-config.test.mjs
+```
+
+Expected RED: class/export/binding/migration are missing.
+
+- [ ] **Step 5: Implement minimum DO plus binding/migration**
+
+The class may call QuotaController; it must not own grant/quota/idempotency/conflict state. Add the exact local binding and append-only v4 migration so the Cloudflare Vitest pool can instantiate the class. This repository change does not deploy the migration.
+
+- [ ] **Step 6: GREEN**
+
+```bash
+npm test -w apps/gateway-worker -- relay-grant-lifecycle-controller.test.ts
+node --test scripts/relay-do-config.test.mjs
+npm run typecheck -w apps/gateway-worker
+```
+
+- [ ] **Step 7: Commit boundary**
+
+```bash
+git add apps/gateway-worker/src/relay-grant-lifecycle-controller.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-grant-lifecycle-controller.test.ts apps/gateway-worker/test/env.d.ts apps/gateway-worker/wrangler.jsonc scripts/relay-do-config.test.mjs
+git commit -m "feat: add relay grant lifecycle controller"
+```
+
+---
+
+### Task 8 (conditional): Move lifecycle callbacks behind the DO and synchronize Preview routing
+
+**Condition:** Run only after Task 7.
+
+**Files:**
+- Modify: `apps/gateway-worker/src/relay-callback.ts`
+- Modify: `apps/gateway-worker/src/relay-auth.ts`
+- Modify: `apps/gateway-worker/src/index.ts`
+- Modify: `apps/gateway-worker/test/relay-callback.test.ts`
+- Modify: `scripts/preview-worker-config.mjs`
+- Modify: `scripts/preview-worker-config.test.mjs`
+- Modify: `scripts/preview-workflow.test.mjs`
+
+**Interfaces:**
+- Consumes: Task 7 lifecycle DO.
+- Produces: exact implementation-detail toggle `OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD`:
+  - absent/`"false"` -> existing Worker-side lifecycle path;
+  - `"true"` -> thin Worker transport + lifecycle DO dispatch;
+  - any other value -> fail closed as invalid relay configuration.
+
+This toggle is the only bridge/candidate normal-routing difference when Phase 2 is active.
+
+- [ ] **Step 1: Write RED callback-boundary tests**
+
+With offload=true prove Worker performs only:
+
+```text
+service bearer
+method/path/content-type
+header/body bound
+unsigned requestId hint
+lifecycle shard dispatch
+HTTP response envelope
+```
+
+and does not call Worker-side grant HMAC verification or lifecycle JSON parsers.
+
+With offload=false prove old callback behavior is byte/status compatible.
+
+- [ ] **Step 2: Write RED Preview/bridge routing config tests**
+
+Task 7 owns the exact Production binding and append-only v4 migration. This task proves Preview config includes the same class as a Preview-local binding with no Production namespace ID, preserves v1-v4 migration order, and enforces the offload toggle: absent/`false` keeps Worker-side lifecycle handling, `true` dispatches to the lifecycle DO, any other value fails closed.
+
+- [ ] **Step 3: Run RED**
+
+```bash
+npm test -w apps/gateway-worker -- relay-callback.test.ts
+node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs
+```
+
+- [ ] **Step 4: Implement minimal offload path/config**
+
+Do not remove the Worker-side path; the compatibility bridge needs it with offload=false.
+
+- [ ] **Step 5: GREEN**
+
+```bash
+npm test -w apps/gateway-worker -- relay-callback.test.ts relay-grant-lifecycle-controller.test.ts
+npm run typecheck -w apps/gateway-worker
+node --test scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs scripts/deploy-production-workflow.test.mjs
+```
+
+- [ ] **Step 6: Commit boundary**
+
+```bash
+git add apps/gateway-worker/src/relay-callback.ts apps/gateway-worker/src/relay-auth.ts apps/gateway-worker/src/index.ts apps/gateway-worker/test/relay-callback.test.ts scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs scripts/preview-workflow.test.mjs
+git commit -m "feat: offload relay lifecycle callbacks conditionally"
+```
+
+- [ ] **Step 7: Rerun Task 6 from the beginning**
+
+All prior Stage 1 evidence is invalid because implementation changed.
+
+---
+
+### Task 9: Generate and verify the Durable Object compatibility manifest
+
+**Files:**
+- Create: `scripts/do-compatibility-manifest.mjs`
+- Create: `scripts/do-compatibility-manifest.test.mjs`
+- Modify: `package.json`
+
+**Interfaces:**
+- Consumes: Worker source tree plus an explicit Wrangler config path representing the exact bridge or candidate effective non-secret configuration.
+- Consumes: Task 3 global-slot implementation, control-only identity guards and
+  durable owner/generation/closing schema. These are required in both Phase 2
+  branches and in bridge/candidate code, even without a bridge CPU-gate secret.
+- Produces deterministic `DoCompatibilityManifest` with `runtimeBundleSha256`, per-root `sourceClosureSha256`, file lists, and `contractSha256`.
+
+Exact source roots:
+
+```text
+quota-controller:
+  durable-objects/quota-controller/src/quota-controller.ts
+
+quota-cpu-gate:
+  durable-objects/quota-controller/src/relay-cpu-gate.ts
+
+quota-cpu-gate-slot:
+  durable-objects/quota-controller/src/relay-cpu-gate-slot.ts
+
+relay-grant-lifecycle:       # Phase 2 active only
+  apps/gateway-worker/src/relay-grant-lifecycle-controller.ts
+```
+
+Exact type/contract roots included even when TypeScript erases them from runtime JavaScript:
+
+```text
+packages/shared/src/relay.ts
+packages/shared/src/relay-routing.ts
+```
+
+- [ ] **Step 1: Write RED determinism/type-only tests**
+
+Test that file-order changes do not change digests; runtime-helper changes affect the owning root; type-only RPC declaration changes affect `contractSha256`; unrelated docs/assets do not affect source-closure digests; inactive mode omits the lifecycle root; active mode includes it.
+
+- [ ] **Step 2: Run RED**
+
+```bash
+node --test scripts/do-compatibility-manifest.test.mjs
+```
+
+Expected RED: manifest tool missing.
+
+- [ ] **Step 3: Implement the runtime artifact digest**
+
+Create a protected temporary directory under the repository root and place the generated config inside it with `main` and `assets` rebased to repository-relative paths. Then run exactly:
+
+```bash
+npx wrangler deploy --dry-run --outdir "$OUTDIR" --config "$WRANGLER_CONFIG"
+```
+
+from the generated config directory. Digest every regular file emitted under `$OUTDIR`, sorted by relative path, using `relativePath + NUL + fileBytes + NUL`. Delete the temporary directory in `finally`.
+
+
+Use the installed TypeScript Compiler API. Starting from each exact root, recursively follow static imports/re-exports including `import type` / `export type ... from`, resolve workspace `@octg/*` modules with TypeScript module resolution, reject unresolved repository imports, sort repo-relative paths, and digest exact source bytes.
+
+Compute `contractSha256` over the union of complete source closures rooted at exactly `packages/shared/src/relay.ts` and `packages/shared/src/relay-routing.ts`. This is the mechanical check for type-only RPC contracts.
+
+- [ ] **Step 4: Add the package command**
+
+```json
+"manifest:do-compat": "node scripts/do-compatibility-manifest.mjs"
+```
+
+Support only:
+
+```text
+--phase2=inactive
+--phase2=active
+--config=<exact-generated-wrangler-config>
+--out=<path>
+--help
+```
+
+`--config` is mandatory except for `--help`; the manifest tool must never silently fall back to `apps/gateway-worker/wrangler.jsonc`.
+
+Invalid mode, missing root, unresolved repository import, or output failure exits non-zero without a partial manifest.
+
+- [ ] **Step 5: GREEN**
+
+```bash
+node --test scripts/do-compatibility-manifest.test.mjs
+npm run manifest:do-compat -- --help
+```
+
+Expected GREEN: deterministic runtime/source digests and type-only contract sensitivity.
+
+- [ ] **Step 6: Commit boundary**
+
+```bash
+git add scripts/do-compatibility-manifest.mjs scripts/do-compatibility-manifest.test.mjs package.json
+git commit -m "build: add Durable Object compatibility manifest"
+```
+
+---
+
+### Task 10: Implement exact Production version configuration and bridge/candidate/hardening rollout tooling
+
+**Files:**
+- Create: `scripts/relay-cpu-version-config.mjs`
+- Create: `scripts/relay-cpu-version-config.test.mjs`
+- Create: `scripts/relay-cpu-rollout.mjs`
+- Create: `scripts/relay-cpu-rollout.test.mjs`
+- Modify: `.github/workflows/deploy-production.yml`
+- Modify: `scripts/deploy-production-workflow.test.mjs`
+- Modify: `scripts/preview-worker-config.mjs`
+- Modify: `scripts/preview-worker-config.test.mjs`
+- Modify: `package.json`
+
+**Interfaces:**
+- Consumes: Tasks 3-5 including global-slot RPCs/route/runner closure protocol and
+  optional Tasks 7-8; Task 9 manifest including slot runtime/type closure;
+  canonical Production non-secret inputs. Stage 1 Preview secret provisioning
+  is already owned by Task 5 and executed by Task 6, not deferred to this task.
+- Produces:
+  - `buildRelayCpuProductionVersionConfigs(baseConfig, productionInputs, phase2)`
+  - protected temporary `bridge-wrangler.json`
+  - protected temporary `candidate-wrangler.json`
+  - validated rollout modes: `bridge`, `candidate-upload`, `candidate-deployment`, `preflight`, `promote`, `hardening-create`, `hardening-verify`, `hardening-promote`, `rollback-bridge`.
+
+### Exact version-configuration construction
+
+The implementation is fixed to one mechanism:
+
+```text
+generated version config
+=
+complete deep clone of apps/gateway-worker/wrangler.jsonc
++
+complete replacement of vars with canonical Production vars
++
+only explicitly approved Phase-2 routing delta
+```
+
+The generator MUST begin from a complete deep clone of the parsed repository base config. It MUST NOT construct a fresh top-level Wrangler object by copying a hand-maintained allowlist.
+
+For every top-level key except `vars`, the generated bridge/candidate configs preserve the base value byte-for-byte after canonical JSON serialization unless this plan explicitly authorizes a change. This automatically preserves current and future base keys, including:
+
+```text
+name
+main
+compatibility_date
+compatibility_flags
+rules
+version_metadata
+observability
+assets
+durable_objects
+migrations
+d1_databases
+triggers
+```
+
+For `main` and `assets`, the generator may additionally rebase repository-relative paths so a generated config placed in a protected temporary directory still resolves the same Worker source and assets as the base config. The generated values must be deterministic given the base config directory and must resolve to byte-identical inputs in `wrangler deploy --dry-run`. Path rebasing must not introduce absolute paths that depend on the invoking user's home directory; use paths relative to the repository root or absolute paths derived from a canonical base directory.
+
+
+Task 7 may add the approved Phase-2-active lifecycle DO binding/migration to the repository base config before Task 10 runs; Task 10 preserves that resulting base structure.
+
+For `vars`, build one canonical Production map by deep-cloning all existing base `vars`, then replacing every environment-specific key from the canonical Production inputs below and forcing `OCTG_RELAY_ENVIRONMENT=production`. Unknown/future base vars that are not declared version-specific are preserved rather than dropped. The bridge and candidate then receive only the explicitly approved offload delta.
+
+No secret value is ever copied into either generated config.
+
+Required existing base `vars` that must remain present unless explicitly replaced from canonical Production inputs:
+
+```text
+QUOTA_LIMIT_STANDARD
+QUOTA_LIMIT_MINI
+MAX_IN_FLIGHT_REQUESTS
+IN_FLIGHT_LEASE_TTL_MS
+IN_FLIGHT_LEASE_RENEWAL_MS
+OCTG_UPSTREAM_BASE_URL
+ACCESS_TEAM_DOMAIN
+ACCESS_AUD
+```
+
+Generic structural preservation is tested separately; this list is not the top-level copy contract.
+
+Required explicit Production inputs, sourced by the Production workflow/operator and rejected when absent/empty:
+
+```text
+OCTG_RELAY_ENABLED
+MAX_INPUT_BYTES
+DENO_TOKENIZER_ENDPOINT
+DENO_TOKENIZER_THRESHOLD_BYTES
+DENO_TOKENIZER_TIMEOUT_MS
+DENO_PREPARE_ENDPOINT
+DENO_PREPARE_THRESHOLD_BYTES
+OCTG_RELAY_INGRESS_ENDPOINT
+OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID
+OCTG_RELAY_CPU_GATE_STANDARD_MODEL
+OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID
+OCTG_RELAY_CPU_GATE_MINI_MODEL
+```
+
+The generator always writes:
+
+```text
+OCTG_RELAY_ENVIRONMENT=production
+```
+
+and never accepts `OCTG_RELAY_ENVIRONMENT` as caller-controlled input.
+
+Phase 2 inactive:
+
+```text
+bridge normal-routing vars == candidate normal-routing vars
+OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD absent in both
+```
+
+Phase 2 active:
+
+```text
+bridge:
+  OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD=false
+
+candidate:
+  OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD=true
+```
+
+That offload variable is the **only normal-routing var difference** between bridge and candidate in Phase 2 active.
+
+The separate trust-class difference remains:
+
+```text
+bridge:
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent from secrets file
+
+candidate:
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN present in secrets file
+```
+
+No secret value is ever written into generated Wrangler config.
+
+- [ ] **Step 1: Write RED exact-config preservation tests**
+
+Implement the test helper `stripVersionSpecificVars(config)` that removes only the plan-approved version differences:
+
+- `OCTG_RELAY_GRANT_LIFECYCLE_OFFLOAD`;
+- no secret values, because secrets never live in Wrangler config.
+
+Build `expectedBaseProductionConfig` as:
+
+1. complete deep clone of the repository base config;
+2. canonical Production `vars` replacement;
+3. no bridge/candidate-specific routing delta.
+
+Prove:
+
+```text
+stripVersionSpecificVars(generatedBridge)
+  deepStrictEqual
+stripVersionSpecificVars(expectedBaseProductionConfig)
+
+stripVersionSpecificVars(generatedCandidate)
+  deepStrictEqual
+stripVersionSpecificVars(expectedBaseProductionConfig)
+```
+
+The tests MUST explicitly include and compare:
+
+```text
+name
+main
+rules
+version_metadata
+observability
+assets
+durable_objects
+migrations
+d1_databases
+triggers
+compatibility_date
+compatibility_flags
+```
+
+and include a synthetic future top-level key in the base-config fixture to prove the generator preserves unknown future keys instead of silently dropping them.
+
+Also prove:
+
+```text
+bridge OCTG_RELAY_ENVIRONMENT == production
+candidate OCTG_RELAY_ENVIRONMENT == production
+all required Production vars are present
+no Preview environment/value can survive
+missing required Production input fails before file creation
+
+Phase 2 inactive:
+  bridge/candidate normal vars are byte-for-byte equal
+
+Phase 2 active:
+  bridge/candidate normal vars differ only by offload=false/true
+
+observability.enabled == true
+observability.logs.invocation_logs == true
+observability.logs.head_sampling_rate == 1
+
+secret sentinel values never appear in generated config
+secret sentinel values never appear in command arguments
+```
+
+Also assert generated files are mode `0600`, written only under a protected temporary directory, and removed on every success/failure exit path.
+
+Add a dry-run equivalence test: run `npx wrangler deploy --dry-run --outdir $A --config <base-config>` from the repository base directory and `npx wrangler deploy --dry-run --outdir $B --config <generated-config>` from the generated config directory. Require that the emitted Worker entry module and asset files used by Wrangler are byte-for-byte identical between `$A` and `$B` after normalizing any deterministic bundle naming. The test must fail if path rebasing causes the generated config to point at a different source tree or assets.
+
+The observability assertions are necessary but do not prove platform sampling absence; Task 5 API `sampleInterval` remains the final sampling authority.
+
+- [ ] **Step 2: Write RED command-construction tests**
+
+Pin these exact config-driven command shapes; **do not use `--keep-vars`**:
+
+```text
+npx wrangler deploy
+  --config <bridge-config>
+  --strict
+  --secrets-file <protected-bridge-secrets-file>
+
+npx wrangler versions upload
+  --config <candidate-config>
+  --strict
+  --secrets-file <protected-candidate-secrets-file>
+
+npx wrangler versions deploy
+  <bridge-id>@100%
+  <candidate-id>@0%
+  --config <candidate-config>
+  --yes
+
+npx wrangler versions secret delete
+  OCTG_RELAY_CPU_GATE_AUTH_TOKEN
+  --config <candidate-config>
+```
+
+The bridge secrets file contains the existing Production Worker secrets and omits the CPU-gate token. The candidate file contains the existing Production Worker secrets plus `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Because Wrangler secret uploads are additive, **file omission is not proof that the resulting bridge version lacks a pre-existing secret binding**.
+
+Add the exact metadata-only secret presence seam:
+
+```text
+npx wrangler deployments status --json --config <bridge-config>
+  -> determine current 100% Production baseline version ID
+
+npx wrangler versions view <version-id> --json --config <bridge-config>
+  -> extract secret binding names/types only
+  -> never read or print secret values
+```
+
+Before any bridge remote mutation, inspect the current Production baseline version. If `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` is already present, bridge mode is `BLOCKED / INCOMPLETE`; do not continue by merely omitting it from the secrets file.
+
+After bridge deployment, inspect the new bridge version with `versions view --json` and require CPU-gate secret binding **absent**.
+
+After candidate upload, inspect the candidate version and require CPU-gate secret binding **present**.
+
+After versioned hardening deletion, inspect the hardening version and require CPU-gate secret binding **absent**.
+
+Only binding name/type presence is retained in verification output. Secret values are never requested, printed, stored, or compared.
+
+Both protected secrets files are mode `0600`, are never printed, and are deleted on every exit path.
+
+Reject:
+
+- non-versioned `wrangler secret delete`;
+- any `--keep-vars` dependency in Issue #121 bridge/candidate construction;
+- secret values in command arguments/logs;
+- repository base config used directly as a Production bridge/candidate upload config;
+- treating CPU-gate token omission from a secrets file as proof of secret-binding absence;
+- bridge deployment when the current Production baseline already contains `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`;
+- candidate acceptance when version metadata does not prove the CPU-gate secret binding is present;
+- hardening acceptance when version metadata does not prove the CPU-gate secret binding is absent.
+
+- [ ] **Step 3: Write RED secret-presence and bridge/candidate compatibility tests**
+
+```text
+bridge construction does not treat omitted secret as proof of absence
+pre-existing CPU-gate secret -> bridge BLOCKED
+verified baseline/bridge absence -> bridge deployment/acceptance allowed
+candidate version metadata -> CPU-gate secret binding present
+hardening version metadata -> CPU-gate secret binding absent
+secret values are never present in normalized verification output
+hardening-create rejects when candidate acceptance evidence is missing
+```
+Then prove the existing bridge/candidate compatibility requirements:
+
+Phase 2 inactive:
+
+- bridge/candidate share QuotaController CPU-gate code/contracts;
+- no v4/lifecycle binding is required;
+- normal non-secret configuration is exact/equal;
+- bridge CPU-gate secret absent, candidate CPU-gate secret present.
+
+For both Phase 2 branches, bridge and candidate must recognize the same
+`cpu-gate-slot:v1:production` identity and share slot RPC/schema/closure behavior.
+Use real shared DO storage/stubs in compatibility tests: A via candidate holds
+STANDARD, B via a bridge-compatible DO cannot claim MINI; eviction or rollback
+preserves A. The bridge Worker still exposes no enabled CPU-gate control route.
+Missing/changed slot root, identity guards, shared contract or storage semantics
+fails the manifest/compatibility gate before candidate upload. No new slot
+binding/class/migration or configuration-derived lock-name override is allowed.
+
+Phase 2 active:
+
+- bridge applies v4 and exports full lifecycle DO;
+- bridge offload=false, candidate offload=true;
+- every other normal-routing var/binding/compatibility setting is exact/equal;
+- candidate upload contains no new migration.
+
+Generate manifests from the **exact generated configs**:
+
+```bash
+npm run manifest:do-compat -- \
+  --phase2=<inactive|active> \
+  --config=<bridge-config> \
+  --out=<bridge-manifest>
+
+npm run manifest:do-compat -- \
+  --phase2=<inactive|active> \
+  --config=<candidate-config> \
+  --out=<candidate-manifest>
+```
+
+Fail before candidate upload on any applicable source-root/`contractSha256` mismatch. Runtime bundle code digest must also match; config-only routing differences do not authorize different Worker code.
+
+- [ ] **Step 4: Write RED workflow-safety tests**
+
+The Production workflow must source every explicit Production input above from its existing GitHub Environment/Variables contract, invoke the version-config generator, and never silently deploy the CPU-tested candidate directly to 100%.
+
+Required sequence:
+
+```text
+generate exact bridge/candidate configs
+-> bridge 100%
+-> candidate upload
+-> bridge 100 / candidate 0
+-> manual/authorized Stage 2
+-> exact candidate promotion
+-> hardening
+```
+
+- [ ] **Step 5: Run RED**
+
+```bash
+node --test \
+  scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.test.mjs \
+  scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.test.mjs
+```
+
+Expected RED: exact Production version generator/rollout contracts do not exist.
+
+- [ ] **Step 6: Implement exact config generation and rollout validation**
+
+Before bridge deployment/candidate upload:
+
+1. generate protected bridge/candidate configs from a complete base-config deep clone;
+2. validate their full structural preservation and effective vars/bindings/migrations;
+3. inspect the current Production baseline version and prove CPU-gate secret absence before bridge mutation;
+4. generate Task 9 manifests using those exact config files;
+5. prove required equivalence/differences;
+6. deploy/upload with the exact generated configs;
+7. inspect resulting version metadata and prove bridge absence / candidate presence of the CPU-gate secret binding;
+8. only then permit Stage 2 preflight.
+
+Before Stage 2 preflight, verify active deployment membership is exactly bridge 100% + candidate 0%.
+
+Version override checks prove only incoming Worker ScriptVersion; do not claim they pin DO code.
+
+- [ ] **Step 7: Implement exact compatibility-preflight closure**
+
+The preflight driver must:
+
+```text
+fresh requestId
+-> setup
+-> operation-inspection fixture proof
+-> required bridge/candidate control smoke
+-> terminalize fixture
+-> operation-inspection terminal proof / activeLease=false
+-> close-operation / authoritative singleton idle proof
+-> only then permit Stage 2 series
+```
+
+Phase 2 inactive uses `reconcile-unused`. Phase 2 active accepts a normal settled lifecycle smoke or recovery `reconcile-unused`.
+
+Both branches must close the shared slot after target closure. Test two runner
+processes with separate journals, different pools and distinct IDs racing for
+preflight: one wins, one reports BLOCKED before admission. A lost claim/close
+acknowledgement, expired lease, rollover or restart must never admit a second
+fixture. Preflight cannot advance with a held/closing/unknown slot. The
+`hardening-create` validator additionally requires authoritative `idle` proof;
+an empty local journal is insufficient. Rollback never deletes or resets slot
+storage and retains compatible slot RPCs for authorized recovery.
+
+Preflight request IDs and invocations are excluded from measurement windows/counts.
+
+The first Stage 2 measurement fixture MUST use a newly generated runner-owned `requestId` distinct from the compatibility-preflight `requestId`; the runner test must assert that the two IDs differ.
+
+- [ ] **Step 8: GREEN**
+
+```bash
+node --test \
+  scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.test.mjs \
+  scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.test.mjs
+npm run test:scripts
+```
+
+- [ ] **Step 9: Commit boundary**
+
+```bash
+git add \
+  scripts/relay-cpu-version-config.mjs scripts/relay-cpu-version-config.test.mjs \
+  scripts/relay-cpu-rollout.mjs scripts/relay-cpu-rollout.test.mjs \
+  .github/workflows/deploy-production.yml scripts/deploy-production-workflow.test.mjs \
+  scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs \
+  package.json
+git commit -m "feat: stage exact relay CPU Production versions"
+```
+
+
+### Task 11: Synchronize operations documentation and run the complete local verification gate
+
+**Files:**
+- Modify: `docs/operations.md`
+- Modify: `docs/deployment.md`
+- Modify: `docs/configuration.md`
+- Modify: `docs/troubleshooting-503-worker-resource-limits.md`
+
+**Interfaces:**
+- Consumes: Tasks 1-10.
+- Produces: executable operator runbook with no new architectural choices.
+
+- [ ] **Step 1: Replace the old Worker CPU acceptance gate**
+
+Document exact required series and:
+
+```text
+p99 <= 5 ms
+max <= 7 ms
+exceededCpu = 0
+>=500 successful invocations per series
+complete telemetry
+```
+
+Remove any text that treats `p99 <= 8` / `max < 10` as current Issue #121 acceptance.
+
+- [ ] **Step 2: Document the exact conditional path**
+
+```text
+HMAC cache
+-> Stage 1 (preflight/anecdotal, may run before lock)
+-> if lifecycle FAIL: lifecycle DO + full Stage 1 rerun
+-> Task 11 lock + Stage 1 rerun from locked SHA
+-> always compatibility bridge
+-> candidate 0%
+-> preflight terminalized
+-> Stage 2
+-> exact candidate promotion
+-> candidate rollout acceptance
+-> versioned CPU-gate secret deletion
+-> hardening bounded verification
+```
+
+- [ ] **Step 3: Document exact version construction, telemetry acquisition, secrets, and evidence retention**
+
+Document:
+
+- `relay-cpu-version-config.mjs` as the only Issue #121 bridge/candidate Production config constructor;
+- complete base-Wrangler deep-clone preservation, canonical Production var replacement, forced `OCTG_RELAY_ENVIRONMENT=production`, path rebasing for temporary generated configs, dry-run equivalence tests, and metadata-only CPU-gate secret presence/absence verification;
+- Workers Observability REST invocation query plus companion sampling/count calculation, exact ad-hoc query IDs `octg-relay-cpu-invocations-v1` / `octg-relay-cpu-completeness-v1`, `chartType="aggregate"`, environment-only API Token authentication with target-account `Workers Observability Write`, Bearer-only request auth, pagination/completeness rules, `sampleInterval == 1` PASS prerequisite, protected normalized platform JSONL + metadata sidecar, and reducer command order;
+- HMAC/service/CPU-gate credential separation;
+- per-run Preview CPU-gate credential ownership, Task 5 provision/preflight/
+  cleanup tooling and Task 6 execution prerequisites;
+- global singleton ownership/no-expiry/target-fencing closure, multi-runner
+  recovery, busy/unavailable BLOCKED behavior and idle-before-hardening;
+- raw platform responses, normalized JSONL, run ledgers, and credentials as protected temporary artifacts that are never committed.
+
+- [ ] **Step 4: Run all local verification**
+
+```bash
+npm run typecheck
+npm test
+npm run test:preview-workflow
+npm run test:deno-deploy-workflow
+git diff --check
+```
+
+If installed:
+
+```bash
+npx --no-install markdownlint-cli2 docs/superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md docs/operations.md docs/deployment.md docs/configuration.md docs/troubleshooting-503-worker-resource-limits.md
+```
+
+Expected GREEN: zero failures.
+
+- [ ] **Step 5: Commit boundary**
+
+```bash
+git add docs/operations.md docs/deployment.md docs/configuration.md docs/troubleshooting-503-worker-resource-limits.md
+git commit -m "docs: add Worker CPU headroom rollout runbook"
+```
+
+- [ ] **Step 6: Lock immutable Stage 1/Stage 2 source revision**
+
+The candidate source revision is locked only after the Task 11 commit boundary above and all Tasks 1–10 local verification are GREEN. Read the repository HEAD SHA immediately after the final commit and record it as the locked SHA in the protected run ledger.
+
+Any Stage 1 evidence collected before this lock is explicitly preflight/anecdotal and may not anchor Stage 2. After locking:
+
+1. rerun Task 6 completely from the locked SHA;
+2. rerun Task 9 with `--phase2=<current-branch>` from the locked SHA, using the exact generated bridge/candidate configs produced by Task 10 from the locked SHA;
+3. record the regenerated manifest hashes alongside the locked SHA.
+
+Only the Stage 1 evidence and manifests produced from the locked SHA are valid inputs to Task 12.
+
+Before Task 12 remote execution:
+- read the current repository HEAD SHA;
+- require it to equal the locked SHA recorded in this step;
+
+If the repository state, generated config, or manifest digest differs from the locked revision, STOP as `BLOCKED / INCOMPLETE` and rerun Tasks 6, 9, and this lock step from the current state.
+
+---
+
+### Task 12: Execute authorized Stage 2, exact-candidate rollout, and post-gate hardening
+
+**Files:**
+- No source changes.
+- Runtime evidence remains outside the repository except explicitly approved sanitized review records.
+
+**Interfaces:**
+- Consumes: accepted Stage 1 evidence including Preview auth preflight/teardown,
+  exact generated bridge/candidate configs, slot-inclusive compatibility
+  manifests, Task 10 singleton-aware rollout tool, Task 11 runbook; Production
+  CPU-gate/service bearers from the Production secret store only. Evidence and
+  manifests must be produced from the Task 11 locked SHA.
+- Produces: Stage 2 PASS, candidate rollout acceptance evidence, and hardening verification needed to close Issue #121.
+
+- [ ] **Step 1: Require explicit Production mutation and telemetry authorization**
+
+Do not execute any remote mutation, measured request, or Workers Observability API query until the user/operator explicitly authorizes it.
+
+Before any telemetry query, require `CLOUDFLARE_API_TOKEN` to be an account-scoped API Token with `Workers Observability Write` for the target account. Use only `Authorization: Bearer <env token>`; do not fall back to Global API Key / email headers on authorization failure.
+
+Create protected temporary config/secrets/evidence directories with `umask 077`.
+
+- [ ] **Step 2: Generate exact configs and deploy/verify compatibility bridge at 100%**
+
+Regenerate the bridge/candidate configs from a complete deep clone of the current repository base config plus canonical current Production inputs immediately before remote use.
+
+Before bridge mutation, run the Task 10 baseline metadata check and require `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` absent from the current Production baseline. If it is present, STOP as `BLOCKED / INCOMPLETE`.
+
+Phase 2 inactive: candidate-compatible QuotaController inspection RPCs, stable normal behavior.
+
+Phase 2 active: same plus append-only v4/full lifecycle DO, offload=false for normal bridge traffic.
+
+Generate/verify the bridge manifest from the exact bridge config, deploy that bridge config, record bridge ScriptVersion ID and manifest hash, then use `versions view --json` to prove the bridge version has no CPU-gate secret binding.
+
+Verify the locked source revision: after generating the bridge config, read the repository HEAD SHA and require it equals the SHA recorded in Task 11. Compare the bridge manifest's source-closure digests to the Task 9 manifest from the locked SHA; require equivalence before deploy. If any value differs, STOP as `BLOCKED / INCOMPLETE` and rerun Tasks 6–11.
+
+
+- [ ] **Step 3: Upload the CPU-tested candidate from the exact candidate config and create 100/0 deployment**
+
+Generate/verify the candidate manifest from the exact candidate config and require Task 10 equivalence rules. After upload, use `versions view --json` to prove the candidate version contains the CPU-gate secret binding before creating the 100/0 deployment.
+
+Then:
+
+```text
+bridge 100%
+CPU-tested candidate 0%
+```
+
+Verify both exact version IDs are in the active deployment before preflight.
+
+Also verify the candidate manifest source-closure digests match the locked Task 9 manifest and the bridge manifest digests match the candidate manifest except for allowed Phase-2 routing/secret differences. If manifests differ beyond the approved delta, STOP as `BLOCKED / INCOMPLETE` and rerun Tasks 9–11.
+
+
+- [ ] **Step 4: Run compatibility preflight**
+
+Require exact candidate ScriptVersion on incoming Worker and terminalize the preflight fixture before measurement begins.
+
+Query the global singleton first. Recover any held/closing owner through the
+canonical requestId-based protocol, regardless of which process/journal created
+it. Require idle, then let setup atomically claim it for the new preflight ID.
+After target terminal proof, close-operation must prove idle again. Busy or
+unavailable exclusion is BLOCKED; no new ID, pool switch or alternate lock may
+bypass it. This applies to every subsequent measured lifecycle fixture.
+
+If any preflight operation remains non-terminal, STOP as `BLOCKED / INCOMPLETE`.
+
+The first measured Stage 2 fixture uses a fresh runner-owned requestId distinct from preflight.
+
+For the normal lifecycle series (`activation_normal` and `terminal_normal`) the
+driver creates a fresh fixture per sample and terminalizes it before the next
+sample, because the runner may own only one non-terminal CPU-gate operation at a
+time. For replay series (`activation_replay`, `terminal_replay`) and
+`renewal_normal`, one fixture is created and the same callback is repeated.
+
+- [ ] **Step 5: Run each Stage 2 series and acquire authoritative telemetry**
+
+For every canonical workload/invocation-class/concurrency series:
+
+1. run exactly one measured series; the series may be a single continuous window
+   for replay/renewal series, or a list of per-sample windows for normal series;
+2. close and record the exact half-open windows; auxiliary `cpu-gate-control`
+   calls (setup, fence, terminalization) are placed outside these windows;
+3. query Workers Observability invocations for the candidate ScriptVersion and
+   `executionModel=stateless`;
+4. run the identical-filter companion calculations query and require `sampleInterval == 1`;
+5. write protected normalized JSONL plus telemetry metadata sidecar;
+6. require exact `platformInvocationCount == normalizedInvocationCount` for PASS eligibility;
+7. run `relay-cpu-evidence.mjs`;
+8. record PASS / FAIL / BLOCKED before starting the next non-overlapping series.
+Executable acquisition/evaluation shape:
+
+```bash
+npm run telemetry:relay-cpu -- \
+  --script-name=<production-worker-name> \
+  --script-version=<candidate-version-id> \
+  --execution-model=stateless \
+  --windows-json=<protected-windows-json> \
+  --out=<protected-series-jsonl> \
+  --meta-out=<protected-series-meta-json>
+```
+
+The `--windows-json` argument supplies the ordered list of half-open
+`[windowStartMs, windowEndMs)` intervals for the series; for normal series this
+is one interval per sample. Control invocations are recorded in a separate
+`cpu-gate-control` ledger and are excluded from lifecycle series counts.
+
+```bash
+node scripts/relay-cpu-evidence.mjs \
+  --ledger=<protected-run-ledger> \
+  --telemetry=<protected-series-jsonl> \
+  --telemetry-meta=<protected-series-meta-json> \
+  --out=<protected-series-summary>
+```
+
+No upstream model traffic is generated by the 500-sample CPU matrix.
+
+If pagination/completeness cannot be proven, sampling metadata is missing/unverifiable, `sampleInterval != 1`, or platform/normalized invocation counts differ, the series is BLOCKED; do not infer PASS from driver success. A directly observed 5/7/0 violation may still produce FAIL from incomplete telemetry, but incomplete/sampled evidence never produces PASS.
+
+- [ ] **Step 6: Apply the exact Stage 2 failure transition**
+
+If **ingress or decision** FAIL:
+
+```text
+STOP
+-> do not enable lifecycle offload
+-> separately reviewed remediation required
+```
+
+If **activation_normal, activation_replay, renewal_normal, terminal_normal, or terminal_replay** FAIL while the current branch is Phase 2 inactive:
+If **activation_normal, activation_replay, renewal_normal, terminal_normal, or terminal_replay** FAIL while the current branch is Phase 2 inactive:
+
+```text
+STOP candidate rollout
+-> restore/verify current compatibility bridge at 100%
+-> invalidate old Phase-2-inactive candidate ScriptVersion
+-> invalidate old Phase-2-inactive Stage 1 and Stage 2 evidence
+-> invalidate old bridge/candidate compatibility manifests
+-> invalidate old compatibility-preflight artifacts/results
+-> invalidate old Task 11 local-verification result
+-> Task 7
+-> Task 8
+-> rerun Task 6 completely from fresh Stage 1 evidence
+-> rerun Task 9 with --phase2=active
+-> rerun Task 10 using new Phase-2-active bridge/candidate configs
+-> rerun Task 11 complete local verification gate
+-> restart Task 12 from Step 2
+```
+The restarted remote sequence is necessarily new:
+
+```text
+new Phase-2-active compatibility bridge
+  -> apply v4
+  -> new bridge 100%
+  -> new CPU-tested candidate upload
+  -> new bridge 100 / new candidate 0
+  -> new compatibility preflight
+  -> new Stage 2
+```
+
+The old Phase-2-inactive bridge version ID, candidate version ID, manifests, preflight result, Stage 1 evidence, Stage 2 evidence, and local-verification result are forbidden inputs to the Phase-2-active rollout.
+
+If Phase 2 is already active and a lifecycle series still FAILs, STOP for a separately reviewed remediation; do not loosen the CPU gate or add another authority layer.
+
+- [ ] **Step 7: Promote only the exact tested candidate**
+
+Only after every Stage 2 series PASS, gradually promote the same tested candidate ScriptVersion toward 100% in percentage steps documented in the runbook. At the first non-zero percentage, begin the rollout acceptance window.
+
+Do not rebuild, change generated normal-routing config, or delete the CPU-gate secret during promotion.
+
+- [ ] **Step 7.5: Verify candidate rollout acceptance at non-zero traffic**
+
+Require all of the following before advancing promotion past the first non-zero percentage:
+
+- candidate ScriptVersion observed as the serving Worker version for the acceptance window;
+- window duration at least one complete minute;
+- at least ten successful ordinary Production `/v1/responses` requests;
+- normal tokenization, admission, and upstream settlement;
+- error rate does not exceed documented baseline;
+- no observed 5/7/0 CPU violation attributed to the candidate;
+- acceptance recorded in the protected run ledger with exact window timestamps, request count, and observed version ID.
+
+If acceptance FAILs, STOP promotion, restore the compatibility bridge to 100%, keep the candidate at 0%, and treat the run as `BLOCKED / INCOMPLETE`. Do not create the hardening version.
+
+`hardening-create` MUST reject unless the ledger contains acceptance evidence for the same candidate ScriptVersion.
+
+- [ ] **Step 8: Prove all CPU-gate operations absent/terminal**
+
+Use runner-owned operation IDs and canonical inspection. Do not use global quota-counter equality.
+
+Recover the authoritative singleton owner even when absent from this runner's
+journal. Require close-operation success and a fresh singleton `idle` response
+after every target is terminal/fenced absent. A held/closing/unavailable slot
+blocks secret deletion. `hardening-create` must validate this proof alongside
+the matching candidate acceptance evidence; runner journal assertions alone
+are insufficient. Do not reset the slot as part of rollback or teardown.
+
+- [ ] **Step 9: Create the distinct hardening version**
+
+Run the Task 10 versioned-secret operation against the exact tested candidate version/config:
+
+```text
+wrangler versions secret delete OCTG_RELAY_CPU_GATE_AUTH_TOKEN
+```
+
+Record the new ScriptVersion and inspect it with `versions view --json`; CPU-gate secret binding absence is mandatory. Verify:
+
+```text
+source revision identical
+runtime code artifact digest identical
+DO compatibility manifest identical
+compatibility settings identical
+complete normal non-secret Production configuration identical
+all non-CPU-gate secrets equivalent
+only OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent
+hardening-create rejects missing candidate rollout acceptance evidence
+hardening-create rejects missing authoritative singleton idle proof
+```
+
+- [ ] **Step 10: Create the hardening deployment and run bounded verification**
+
+Create a deployment containing:
+
+```text
+CPU-tested candidate: 100%
+post-gate hardening:     0%
+```
+
+Verify both version IDs are active members of the deployment. Target the
+hardening ScriptVersion with the exact Cloudflare version override and run the
+bounded post-gate verification:
+
+```text
+hardening ScriptVersion observed
+all CPU-gate routes -> 404
+normal relay configuration remains enabled
+normal lifecycle service auth remains valid
+one bounded ordinary Production Responses relay smoke succeeds
+```
+
+If the deployment membership check or version override fails, STOP as
+`BLOCKED / INCOMPLETE` and do not proceed. If bounded verification FAILs, keep
+or restore the CPU-tested candidate at 100% and do not close Issue #121.
+
+- [ ] **Step 11: Promote hardening or rollback**
+
+PASS -> hardening 100%.
+
+FAIL -> restore the CPU-tested candidate 100%; Issue #121 remains open.
+
+- [ ] **Step 12: Final evidence/review boundary**
+
+Record only sanitized aggregates, version IDs, source SHA, manifest hashes, exact windows, and PASS/FAIL/BLOCKED outcomes. Delete protected raw API responses/normalized JSONL/config/secrets temporary artifacts according to the runbook.
+## Plan self-review
+
+### Spec coverage
+
+- CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, durable setup-fence after ambiguous setup, grant-token-independent recovery: Task 4.
+- Canonical workloads, exact Workers Observability invocation/completeness query IDs, grouped invocation -> exactly one authoritative CPU record normalization, canonical request-identity checks, `chartType="aggregate"`, Bearer-only `Workers Observability Write` API Token auth, sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
+- Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
+- Global cross-runner/pool/day singleton, no-expiry recovery and close-before-next
+  semantics: Task 2 contracts, Task 3 shared-state implementation/tests, Task 4
+  routes, Task 5 independent-runner tests, Tasks 9-10 compatibility and Task 12
+  execution/idle-before-hardening proof.
+- Existing `invalid_context` fence denial and unchanged Context exact keys:
+  Tasks 2-4; model placement in decision `metadata.model`: Tasks 4-5.
+- Preview-only CPU-gate credential generation/injection/auth/teardown: Task 5
+  tooling and Task 6 authorized execution, required regardless of Phase 2.
+- Conditional lifecycle DO: Tasks 7-8.
+- Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 complete base-config-preserving Production version construction, path-rebased temporary configs, dry-run equivalence, secret-presence verification, and rollout.
+- Type-only + runtime DO equivalence: Task 9.
+- Preflight terminalization/fresh measurement operation: Task 10.
+- Operations, exact telemetry/version-config runbook, rollback, source-revision lock after final commit, and secret teardown: Tasks 11-12.
+- Stage 2 exact candidate promotion, candidate rollout acceptance, full Phase-2-active restart after lifecycle FAIL, and distinct hardening version: Task 12.
+
+No spec section intentionally authorizes Workers Paid, direct DO storage mutation, D1 quota authority, public CPU-gate routes, or source implementation before this plan is separately reviewed.
+
+### Type consistency
+
+The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 4 consume those names without aliases. The lifecycle class/binding remain exactly `RelayGrantLifecycleController` / `RELAY_GRANT_LIFECYCLE_CONTROLLER`. CPU-gate recovery remains `pool + requestId`, never grant-token-based.
+
+Slot closure additionally requires the authoritative safe-integer generation;
+it does not change requestId-based target inspection/reconciliation or grant
+authentication. The spec's review-provenance section owns Finding-ID history;
+this plan does not independently declare a Review Gate PASS.
+
+### Proportion / task boundaries
+
+The plan deliberately keeps remote evidence/deployment in Tasks 6 and 12 instead of mixing it into source tasks. Task 5 implements telemetry acquisition with exact queryId/chartType/auth contracts, grouped invocation cardinality/identity normalization, and platform-sampling completeness/reducer seams; Task 10 implements complete base-config-preserving Production version construction, temporary-config path rebasing, dry-run equivalence tests, and metadata-only CPU-gate secret presence verification. Conditional Tasks 7-8 are the only Phase 2 implementation; they are skipped if Stage 1 lifecycle series pass. A later Stage 2 lifecycle FAIL explicitly invalidates the Phase-2-inactive artifacts and requires Tasks 7-11 to be replayed in the documented order, including a new Task 11 source-revision lock and rerun of Tasks 6 and 9 from the new locked SHA, before Task 12 restarts.
