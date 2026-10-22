@@ -1,4 +1,4 @@
-import { RELAY_REQUEST_ID_PATTERN } from "@octg/shared";
+import { RELAY_REQUEST_ID_PATTERN, relayRequestUtcDayOf } from "@octg/shared";
 import type {
   RelayCpuGateSlotClaimResult,
   RelayCpuGateSlotCloseResult,
@@ -33,17 +33,18 @@ export async function claimRelayCpuGateSlot(
 ): Promise<RelayCpuGateSlotClaimResult> {
   assertSlotIdentity(identity);
   assertOwner(owner);
+  const normalizedOwner = { pool: owner.pool, requestId: owner.requestId };
   return identity.storage.transaction(async (storage) => {
     const current = await storage.get<RelayCpuGateSlotState>(SLOT_KEY) ?? { kind: "idle" as const };
     if (current.kind !== "idle") {
-      return current.kind === "held" && current.owner.pool === owner.pool &&
-          current.owner.requestId === owner.requestId
+      return current.kind === "held" && current.owner.pool === normalizedOwner.pool &&
+          current.owner.requestId === normalizedOwner.requestId
         ? { kind: "claimed", slot: current }
         : { kind: "busy" };
     }
     const generation = (await storage.get<number>(GENERATION_KEY) ?? 0) + 1;
     if (!Number.isSafeInteger(generation)) throw new RangeError("CPU-gate slot generation exhausted.");
-    const slot = { kind: "held" as const, owner, generation };
+    const slot = { kind: "held" as const, owner: normalizedOwner, generation };
     await storage.put(GENERATION_KEY, generation);
     await storage.put(SLOT_KEY, slot);
     return { kind: "claimed", slot };
@@ -57,11 +58,12 @@ export async function closeRelayCpuGateSlot(
 ): Promise<RelayCpuGateSlotCloseResult> {
   assertSlotIdentity(identity);
   assertOwner(owner);
+  const normalizedOwner = { pool: owner.pool, requestId: owner.requestId };
   if (!Number.isSafeInteger(generation) || generation < 1) return { kind: "blocked" };
   const marked = await identity.storage.transaction(async (storage) => {
     const current = await storage.get<RelayCpuGateSlotState>(SLOT_KEY) ?? { kind: "idle" as const };
     if (current.kind === "idle") return { kind: "idle" as const };
-    if (!matchesOwner(current.owner, owner) || current.generation !== generation) {
+    if (!matchesOwner(current.owner, normalizedOwner) || current.generation !== generation) {
       return { kind: "blocked" as const };
     }
     if (current.kind === "held") {
@@ -74,23 +76,24 @@ export async function closeRelayCpuGateSlot(
   if (marked.kind === "idle") return { kind: "closed" };
   if (marked.kind === "blocked") return { kind: "blocked" };
 
-  const targetDay = requestDay(owner.requestId);
+  const targetDay = relayRequestUtcDayOf(normalizedOwner.requestId);
   if (targetDay === undefined) return { kind: "blocked" };
   const target = identity.env.QUOTA_CONTROLLER.get(
-    identity.env.QUOTA_CONTROLLER.idFromName(`quota:${owner.pool}:${targetDay}`),
+    identity.env.QUOTA_CONTROLLER.idFromName(`quota:${normalizedOwner.pool}:${targetDay}`),
   );
-  const fence = await target.fenceRelayCpuGateSetup(owner.requestId);
-  const inspection = await target.getRelayCpuGateGrantInspection(owner.requestId);
+  const fence = await target.fenceRelayCpuGateSetup(normalizedOwner.requestId);
+  const inspection = await target.getRelayCpuGateGrantInspection(normalizedOwner.requestId);
   const proof = fence.kind === "fenced" && inspection.kind === "absent" && inspection.fenced ||
     fence.kind === "fixture" && inspection.kind === "fixture" && !inspection.activeLease &&
       (inspection.state === "settled" && inspection.requestState === "settled" ||
         inspection.state === "released" && inspection.requestState === "released" ||
-        inspection.state === "reconciled_consumed" && inspection.requestState === "settled" ||
+        inspection.state === "reconciled_consumed" &&
+          (inspection.requestState === "reconciled" || inspection.requestState === "settled") ||
         inspection.state === "reconciled_unused" && inspection.requestState === "released");
   if (!proof) return { kind: "blocked" };
   return identity.storage.transaction(async (storage) => {
     const current = await storage.get<RelayCpuGateSlotState>(SLOT_KEY);
-    if (current?.kind !== "closing" || current.generation !== generation || !matchesOwner(current.owner, owner)) {
+    if (current?.kind !== "closing" || current.generation !== generation || !matchesOwner(current.owner, normalizedOwner)) {
       return { kind: "blocked" };
     }
     await storage.delete(SLOT_KEY);
@@ -112,18 +115,4 @@ function assertOwner(owner: RelayCpuGateSlotOwner): void {
 
 function matchesOwner(left: RelayCpuGateSlotOwner, right: RelayCpuGateSlotOwner): boolean {
   return left.pool === right.pool && left.requestId === right.requestId;
-}
-
-function requestDay(requestId: string): string | undefined {
-  if (!RELAY_REQUEST_ID_PATTERN.test(requestId)) return undefined;
-  const timestamp = requestId.slice(4, 14);
-  let milliseconds = 0;
-  for (const character of timestamp) {
-    const digit = "0123456789ABCDEFGHJKMNPQRSTVWXYZ".indexOf(character);
-    if (digit < 0 || milliseconds > Number.MAX_SAFE_INTEGER / 32) return undefined;
-    milliseconds = milliseconds * 32 + digit;
-  }
-  if (milliseconds > 281_474_976_710_655) return undefined;
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
 }

@@ -3,7 +3,6 @@ import type { RelayCpuGateFenceResult, RelayCpuGateGrantInspection, RelayCpuGate
 import { getEntry, loadInFlight, loadPool, loadUnresolved, normalizeInFlightState, withoutExpiredLeases } from "./store";
 import type { QuotaEnvLike, QuotaIdentity, QuotaStorage } from "./store";
 import { resolveCpuGateFixtureIdentity, resolveMaxInFlightRequests } from "./relay-config";
-import type { RelayCpuGateFixtureEnv } from "./relay-config";
 import { getRelayGrant } from "./relay-grant";
 
 export const CPU_GATE_FENCE_PREFIX = "cpu-gate-fence:";
@@ -39,7 +38,7 @@ export async function getRelayCpuGateSnapshot(
 
 export async function getRelayCpuGateGrantInspection(
   storage: QuotaStorage,
-  env: QuotaEnvLike & RelayCpuGateFixtureEnv,
+  env: QuotaEnvLike,
   identity: QuotaIdentity,
   requestId: string,
   nowMs: number,
@@ -74,7 +73,7 @@ export async function getRelayCpuGateGrantInspection(
 
 export async function fenceRelayCpuGateSetup(
   storage: QuotaStorage,
-  env: QuotaEnvLike & RelayCpuGateFixtureEnv,
+  env: QuotaEnvLike,
   identity: QuotaIdentity,
   requestId: string,
   nowMs: number,

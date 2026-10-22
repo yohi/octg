@@ -1,6 +1,5 @@
-// allow: SIZE_OK — single-responsibility Durable Object class; the relay change
-// adds only the four mandated thin RPC methods (+41 lines) to an already
-// 245-LOC legacy class.
+// allow: SIZE_OK — this class remains the single Durable Object RPC façade;
+// CPU-gate inspection, fixture matching and slot state transitions live in focused modules.
 import { DurableObject } from "cloudflare:workers";
 import {
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
@@ -50,7 +49,7 @@ import {
   savePool,
   saveUnresolved,
 } from "./store";
-import type { QuotaIdentity, QuotaStorage } from "./store";
+import type { QuotaEnvLike, QuotaIdentity, QuotaStorage } from "./store";
 import { admitRelayInTransaction } from "./relay-admission";
 import type { RelayAdmissionInput, RelayAdmissionResult } from "./relay-admission";
 import {
@@ -79,16 +78,8 @@ import type {
   RenewRelayResult,
 } from "./relay-grant";
 
-export interface QuotaControllerEnv {
-  readonly QUOTA_LIMIT_STANDARD?: string;
-  readonly QUOTA_LIMIT_MINI?: string;
-  readonly MAX_IN_FLIGHT_REQUESTS?: string;
-  readonly OCTG_RELAY_ENVIRONMENT?: string;
+export interface QuotaControllerEnv extends QuotaEnvLike {
   readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
-  readonly OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID?: string;
-  readonly OCTG_RELAY_CPU_GATE_STANDARD_MODEL?: string;
-  readonly OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID?: string;
-  readonly OCTG_RELAY_CPU_GATE_MINI_MODEL?: string;
 }
 
 export class QuotaController extends DurableObject<QuotaControllerEnv> {
