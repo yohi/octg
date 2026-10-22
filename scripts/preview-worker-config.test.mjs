@@ -464,3 +464,36 @@ test("rejects invalid Preview relay settings", () => {
     );
   }
 });
+
+test("adds Preview-local CPU-gate fixture identifiers without inheriting Production values", () => {
+  const config = buildPreviewWorkerConfig(baseConfig, {
+    ...validOptions,
+    relay: {
+      environment: "preview",
+      ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+      cpuGateFixtures: {
+        standardClientId: "preview-standard-client",
+        standardModel: "preview-standard-model",
+        miniClientId: "preview-mini-client",
+        miniModel: "preview-mini-model",
+      },
+    },
+  });
+
+  assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID, "preview-standard-client");
+  assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_MODEL, "preview-standard-model");
+  assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID, "preview-mini-client");
+  assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_MODEL, "preview-mini-model");
+  assert.equal(config.vars.OCTG_RELAY_CPU_GATE_AUTH_TOKEN, undefined);
+  assert.equal(JSON.stringify(config).includes("production-client-id"), false);
+});
+
+test("rejects secret CPU-gate values in Preview vars", () => {
+  assert.throws(() => buildPreviewWorkerConfig({
+    ...baseConfig,
+    vars: { ...baseConfig.vars, OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "secret-value" },
+  }, { ...validOptions, relay: {
+    environment: "preview",
+    ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+  } }), /secret/i);
+});

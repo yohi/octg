@@ -28,6 +28,14 @@ const RELAY_CONFIG_NAMES = Object.freeze([
   "OCTG_RELAY_INGRESS_ENDPOINT",
 ]);
 
+const CPU_GATE_FIXTURE_NAMES = Object.freeze([
+  "OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID",
+  "OCTG_RELAY_CPU_GATE_STANDARD_MODEL",
+  "OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID",
+  "OCTG_RELAY_CPU_GATE_MINI_MODEL",
+]);
+const CPU_GATE_SECRET_NAME = "OCTG_RELAY_CPU_GATE_AUTH_TOKEN";
+
 export function buildPreviewWorkerConfig(baseConfig, options) {
   if (baseConfig === null || typeof baseConfig !== "object") {
     throw new TypeError("Preview Worker configuration must be an object");
@@ -71,6 +79,11 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
   const productionRelayEndpoint = config.vars?.OCTG_RELAY_INGRESS_ENDPOINT;
+  for (const name of [CPU_GATE_SECRET_NAME, "OCTG_RELAY_SERVICE_AUTH_TOKEN", "OCTG_RELAY_CONTEXT_HMAC_KEY"]) {
+    if (config.vars?.[name] !== undefined) {
+      throw new Error(`Preview configuration must not contain secret value ${name} in vars`);
+    }
+  }
   const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
     ? normalizeEndpoint(config.vars.DENO_PREPARE_ENDPOINT)
     : undefined;
@@ -106,6 +119,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   for (const name of RELAY_CONFIG_NAMES) {
     delete config.vars[name];
   }
+  for (const name of CPU_GATE_FIXTURE_NAMES) delete config.vars[name];
   delete config.triggers;
   config.d1_databases = [{
     ...productionDatabase,
@@ -133,6 +147,19 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     validatePreviewRelayConfig(relay, productionRelayEndpoint);
     config.vars.OCTG_RELAY_ENVIRONMENT = relay.environment.trim();
     config.vars.OCTG_RELAY_INGRESS_ENDPOINT = relay.ingressEndpoint.trim();
+    if (relay.cpuGateFixtures !== undefined) {
+      for (const [key, name] of [
+        ["standardClientId", CPU_GATE_FIXTURE_NAMES[0]],
+        ["standardModel", CPU_GATE_FIXTURE_NAMES[1]],
+        ["miniClientId", CPU_GATE_FIXTURE_NAMES[2]],
+        ["miniModel", CPU_GATE_FIXTURE_NAMES[3]],
+      ]) {
+        const value = relay.cpuGateFixtures[key];
+        requireNonEmpty(`Preview ${key}`, value);
+        if (/secret|bearer|token|key/i.test(value)) throw new TypeError(`Preview ${key} must be a non-secret identifier`);
+        config.vars[name] = value.trim();
+      }
+    }
   }
 
   return config;
