@@ -16,7 +16,30 @@ import {
   parseRelayTerminalResponse,
   parseRelayQuotaSnapshot,
   relayErrorCodeStatus,
+  isRelayErrorCode,
   RelayProtocolError,
+} from "../src/index";
+import type {
+  RelayCpuGateDecisionContextV1,
+  RelayCpuGateControllerOperations,
+  RelayCpuGateFenceResult,
+  RelayCpuGateOperationAbsentV1,
+  RelayCpuGateOperationIncompatibleV1,
+  RelayCpuGateOperationInspectionV1,
+  RelayCpuGateOperationPendingV1,
+  RelayCpuGateSetupFenceRequestV1,
+  RelayCpuGateSetupFenceResponseV1,
+  RelayCpuGateSetupRequestV1,
+  RelayCpuGateSetupResponseV1,
+  RelayCpuGateSlotClaimResult,
+  RelayCpuGateSlotCloseResult,
+  RelayCpuGateSlotOwner,
+  RelayCpuGateSlotOperations,
+  RelayCpuGateSlotState,
+  RelayGrantLifecycleDispatchInput,
+  RelayGrantLifecycleDispatchResult,
+  RelayContextV1,
+  RelayDecisionRequestV1,
 } from "../src/index";
 
 const REQUEST_ID = "req_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -48,7 +71,7 @@ const VALID_CONTEXT = {
   nonce: NONCE,
   issuedAtMs: ISSUED_AT_MS,
   expiresAtMs: ISSUED_AT_MS + 60_000,
-};
+} satisfies RelayContextV1;
 
 const VALID_GRANT = {
   version: 1,
@@ -621,5 +644,142 @@ describe("relayErrorCodeStatus", () => {
     expect(relayErrorCodeStatus("upstream_timeout")).toBe(500);
     expect(relayErrorCodeStatus("upstream_invalid_response")).toBe(500);
     expect(relayErrorCodeStatus("internal_error")).toBe(500);
+  });
+
+  it("keeps invalid_context in the existing relay error contract", () => {
+    // Given: the existing denial code and a proposed internal-only code.
+    // When: error-code membership is checked.
+    // Then: invalid_context remains valid and no CPU-gate code enters the union.
+    expect(isRelayErrorCode("invalid_context")).toBe(true);
+    expect(isRelayErrorCode("cpu_gate_fenced")).toBe(false);
+  });
+
+  it("exposes lifecycle, CPU-gate, and global slot contracts with exact variants", () => {
+    // Given: representative values for every shared RPC result discriminant.
+    const lifecycleInput: RelayGrantLifecycleDispatchInput = {
+      action: "activation",
+      grantToken: "token",
+      callbackBody: new Uint8Array(),
+    };
+    const lifecycleResult: RelayGrantLifecycleDispatchResult = {
+      kind: "protocol_error",
+      code: "invalid_context",
+    };
+    const activationResult: RelayGrantLifecycleDispatchResult = {
+      kind: "activation",
+      response: { version: 1, activated: true, code: null },
+    };
+    const renewalResult: RelayGrantLifecycleDispatchResult = {
+      kind: "renewal",
+      response: { version: 1, renewed: true, code: null },
+    };
+    const terminalResult: RelayGrantLifecycleDispatchResult = {
+      kind: "terminal",
+      response: { version: 1, accepted: true, state: "settled", code: null },
+    };
+    const setupRequest: RelayCpuGateSetupRequestV1 = {
+      version: 1,
+      pool: "STANDARD",
+      requestId: REQUEST_ID,
+    };
+    const setupResponse: RelayCpuGateSetupResponseV1 = {
+      version: 1,
+      requestId: REQUEST_ID,
+      grantToken: "token",
+      grantId: GRANT_ID,
+      leaseGeneration: LEASE_GENERATION,
+      pool: "STANDARD",
+      admissionUtcDay: "2026-09-27",
+    };
+    const fenceRequest: RelayCpuGateSetupFenceRequestV1 = setupRequest;
+    const fenceResponse: RelayCpuGateSetupFenceResponseV1 = {
+      version: 1,
+      requestId: REQUEST_ID,
+      kind: "fenced",
+    };
+    const decisionContext: RelayCpuGateDecisionContextV1 = {
+      version: 1,
+      requestId: REQUEST_ID,
+      contextToken: "token",
+    };
+    const absent: RelayCpuGateOperationAbsentV1 = { version: 1, kind: "absent" };
+    const pending: RelayCpuGateOperationPendingV1 = { version: 1, kind: "pending_ambiguous" };
+    const incompatible: RelayCpuGateOperationIncompatibleV1 = {
+      version: 1,
+      error: "setup_state_incompatible",
+    };
+    const inspection: RelayCpuGateOperationInspectionV1 = {
+      version: 1,
+      kind: "fixture",
+      inspection: {
+        kind: "fixture",
+        state: "authorized",
+        requestState: "reserved",
+        reservedTokens: 0,
+        upperBoundTokens: 0,
+        maxOutputTokens: 0,
+        actualTokens: null,
+        activeLease: true,
+        cpuGateFixture: true,
+      },
+    };
+    const owner: RelayCpuGateSlotOwner = { pool: "STANDARD", requestId: REQUEST_ID };
+    const slot: RelayCpuGateSlotState = { kind: "held", owner, generation: 1 };
+    const claim: RelayCpuGateSlotClaimResult = { kind: "claimed", slot };
+    const close: RelayCpuGateSlotCloseResult = { kind: "blocked" };
+    const closed: RelayCpuGateSlotCloseResult = { kind: "closed" };
+    const busy: RelayCpuGateSlotClaimResult = { kind: "busy" };
+    const idle: RelayCpuGateSlotState = { kind: "idle" };
+    const closing: RelayCpuGateSlotState = { kind: "closing", owner, generation: 2 };
+    const fence: RelayCpuGateFenceResult = { kind: "fenced" };
+    const controlOperations: RelayCpuGateControllerOperations | undefined = undefined;
+    const slotOperations: RelayCpuGateSlotOperations | undefined = undefined;
+
+    // When: the lifecycle action and result are inspected.
+    // Then: all public contract discriminants remain the specified literals.
+    expect(lifecycleInput.action).toBe("activation");
+    expect(lifecycleResult.kind).toBe("protocol_error");
+    expect([activationResult.kind, renewalResult.kind, terminalResult.kind]).toEqual([
+      "activation",
+      "renewal",
+      "terminal",
+    ]);
+    const context: RelayContextV1 = VALID_CONTEXT;
+    const decision: RelayDecisionRequestV1 = { version: 1, metadata: VALID_META };
+    expect(Object.keys(context).sort()).toEqual([
+      "audience",
+      "clientId",
+      "environment",
+      "expiresAtMs",
+      "idempotencyKeyHash",
+      "issuedAtMs",
+      "nonce",
+      "requestId",
+      "route",
+      "version",
+    ]);
+    expect(decision.metadata.model).toBe(VALID_META.model);
+    expect(setupResponse.version).toBe(1);
+    expect(fenceRequest.requestId).toBe(REQUEST_ID);
+    expect(fenceResponse.kind).toBe("fenced");
+    expect(decisionContext.requestId).toBe(REQUEST_ID);
+    expect([absent.kind, pending.kind, incompatible.error, inspection.kind]).toEqual([
+      "absent",
+      "pending_ambiguous",
+      "setup_state_incompatible",
+      "fixture",
+    ]);
+    expect([claim.kind, busy.kind, close.kind, closed.kind, fence.kind, slot.kind, idle.kind, closing.kind]).toEqual([
+      "claimed",
+      "busy",
+      "blocked",
+      "closed",
+      "fenced",
+      "held",
+      "idle",
+      "closing",
+    ]);
+    expect(controlOperations).toBeUndefined();
+    expect(slotOperations).toBeUndefined();
   });
 });

@@ -20,6 +20,8 @@ import {
   RELAY_GRANT_AUDIENCE,
   RELAY_MAX_CALLBACK_BODY_BYTES,
   relayErrorCodeStatus,
+  relayShardIndex,
+  relayDecisionShardName,
   signRelayGrantCredential,
   utcDayOf,
   verifyRelayContext,
@@ -43,22 +45,7 @@ import { loadPolicy, loadRegistry } from "./policy";
 import { resolveRelayConfig } from "./relay-auth";
 import { resolveTokenBudget } from "./token-budget";
 
-const SHARD_MASK = 63;
-const FNV_OFFSET_BASIS = 2166136261;
-const FNV_PRIME = 16777619;
-
-function shardIndex(requestId: string): string {
-  let hash = FNV_OFFSET_BASIS;
-  for (let index = 0; index < requestId.length; index += 1) {
-    hash = Math.imul(hash ^ requestId.charCodeAt(index), FNV_PRIME) >>> 0;
-  }
-  return String(hash & SHARD_MASK).padStart(2, "0");
-}
-
-/** The exact DO name for a decision shard (design routing contract). */
-export function relayDecisionShardName(environment: RelayEnvironment, requestId: string): string {
-  return `relay-decision:v1:${environment}:${shardIndex(requestId)}`;
-}
+export { relayDecisionShardName };
 
 /** Stable terminal-report fingerprint shared by Worker-side terminal callbacks. */
 export function relayTerminalFingerprint(report: RelayTerminalV1): string {
@@ -83,7 +70,7 @@ function checkShardIdentity(
     return "invalid_name";
   }
   if (environmentPart !== environment) return "environment_mismatch";
-  return shardPart === shardIndex(requestId) ? "ok" : "shard_mismatch";
+  return shardPart === relayShardIndex(requestId) ? "ok" : "shard_mismatch";
 }
 
 /** SHA-256(clientId || NUL || rawKey) binding rule for the exact raw key. */

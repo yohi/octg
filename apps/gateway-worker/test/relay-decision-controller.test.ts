@@ -4,6 +4,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   quotaIdOf,
+  relayGrantLifecycleShardName,
   relayErrorCodeStatus,
   safetyMargin,
   signRelayContext,
@@ -183,6 +184,7 @@ describe("relayDecisionShardName", () => {
     expect(relayDecisionShardName("preview", REQUEST_ID_A)).toBe("relay-decision:v1:preview:37");
     expect(relayDecisionShardName("preview", REQUEST_ID_B)).toBe("relay-decision:v1:preview:18");
     expect(relayDecisionShardName("production", REQUEST_ID_A)).toBe("relay-decision:v1:production:37");
+    expect(relayGrantLifecycleShardName("preview", REQUEST_ID_A)).toBe("relay-grant-lifecycle:v1:preview:37");
   });
 });
 
