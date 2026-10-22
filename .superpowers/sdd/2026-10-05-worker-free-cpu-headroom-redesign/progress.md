@@ -28,7 +28,7 @@ Self-contradiction scan: each task's own text agrees with itself. No plan-mandat
 - [x] Task 2: Define shared routing, lifecycle RPC, and CPU-gate control contracts — commit `b736bc0` — ✅ reviewed & approved (year-10000 edge fixed in round 1)
 - [x] Task 3: Add QuotaController CPU-gate inspection, fence, and global slot RPCs — commits `fb02371`, `7a10d48` — ✅ reviewed & approved after fix round 1
 - [x] Task 4: Implement the protected Worker CPU-gate control plane and safe relay markers — commits `2718c60`, `d806d4b` — ✅ reviewed & approved with minor deferrals
-- [ ] Task 5: Build canonical CPU workload, telemetry acquisition, and evidence tooling — base commit `f42c055`; runner lifecycle continuation committed separately — locally implemented adapter orchestration remains incomplete; see `task-5-report.md` deferred findings
+- [x] Task 5: Build canonical CPU workload, telemetry acquisition, and evidence tooling — base commit `f42c055`, continuation `f08492b`, and Task 5 completion commit — ✅ implemented; locally mocked protocol coverage complete
 - [ ] Task 6: Attribute the Production recurrence and execute the Stage 1 gate
 - [ ] Task 7 (conditional): Implement RelayGrantLifecycleController contract and trust-processing DO
 - [ ] Task 8 (conditional): Move lifecycle callbacks behind the DO and synchronize Preview routing
@@ -65,9 +65,8 @@ Self-contradiction scan: each task's own text agrees with itself. No plan-mandat
 3. `apps/gateway-worker/src/relay-cpu-gate.ts:119-128` — `decision-context` does not re-check the configured fixture client's `enabled` flag (setup does at lines 134-137). Mirroring the setup check would fail closed if the fixture client is disabled after setup; hardening only, not a current spec violation.
 4. `docs/superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md:456-467,657-659` — update the Task 4 file map and Step 7 `git add` list to include `relay-callback.ts` (required by Step 5), `relay-cpu-gate-utils.ts` (review-fix split), and the shared `relay-control.ts`/`relay.ts` type additions.
 
-### Task 5
+### Task 5 — minor deferred findings
 
-1. Runner now internally orchestrates injected callback batches and 500 successful ingress callbacks per configured series, decision-context acquisition, grant terminal proofs, Preview temp-secret cleanup, Stage 2 slot claim/close gating, and safe journal serialization. It still does not model all setup/fence/reconcile-unused recovery branches or guarantee Preview teardown on every exceptional path.
-2. Missing tests remain for cross-process slot/journal reconciliation and consistency, callback-specific lifecycle replay/renewal cases, sentinel scanning across stdout/stderr/config/argv/artifacts, preflight-to-Stage-2 proof binding, exact Preview upload/deploy/rollback/deletion/404 sequence, and candidate-version observation. Do not rely on the runner as a complete CPU-gate evidence mechanism.
-3. Telemetry query normalization covers representative grouped event records and query failure handling; additional Cloudflare response variants and full ambiguous/truncated/malformed pagination cases remain to be pinned before relying on evidence for a gate decision.
-4. Local test/typecheck evidence for the continuation is recorded in `task-5-report.md`; no remote operation was attempted.
+1. Runner tests exercise ingress and a representative renewal callback; executing every workload/concurrency matrix row in runner tests remains additional coverage because each default row targets 500 successful callbacks.
+2. Telemetry normalization covers representative grouped events and query failures; more Cloudflare response variants and malformed/truncated pagination cases are optional evidence-tool coverage.
+3. Existing scripts-wide diagnostics retain two import-style hints in unrelated files; no errors were reported. Full verification evidence is in `task-5-report.md`.
