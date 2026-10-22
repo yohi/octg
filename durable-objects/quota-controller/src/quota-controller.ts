@@ -6,8 +6,18 @@ import {
   DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   nextUtcMidnight,
   parseIdempotencyKey,
+  RELAY_REQUEST_ID_PATTERN,
   remainingOf,
   tierOf,
+} from "@octg/shared";
+import type {
+  RelayCpuGateFenceResult,
+  RelayCpuGateGrantInspection,
+  RelayCpuGateSlotClaimResult,
+  RelayCpuGateSlotCloseResult,
+  RelayCpuGateSlotOwner,
+  RelayCpuGateSlotState,
+  RelayCpuGateSnapshot,
 } from "@octg/shared";
 import type {
   AcquireInFlightResult,
@@ -49,6 +59,18 @@ import {
   renewRelayInTransaction,
 } from "./relay-grant-lifecycle";
 import type { RelayGrantOperationContext } from "./relay-grant-lifecycle";
+import {
+  fenceRelayCpuGateSetup,
+  getRelayCpuGateGrantInspection,
+  getRelayCpuGateSnapshot,
+} from "./relay-cpu-gate";
+import {
+  claimRelayCpuGateSlot,
+  closeRelayCpuGateSlot,
+  getRelayCpuGateSlot,
+  isCpuGateSlotName,
+} from "./relay-cpu-gate-slot";
+import type { CpuGateSlotIdentity } from "./relay-cpu-gate-slot";
 import type {
   ActivateRelayResult,
   FinishRelayInput,
@@ -62,6 +84,11 @@ export interface QuotaControllerEnv {
   readonly QUOTA_LIMIT_MINI?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;
   readonly OCTG_RELAY_ENVIRONMENT?: string;
+  readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_MODEL?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_MODEL?: string;
 }
 
 export class QuotaController extends DurableObject<QuotaControllerEnv> {
@@ -99,6 +126,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     idempotencyKey?: string,
     clientId?: string,
   ): Promise<ReserveResult> {
+    this.assertQuotaIdentity();
     if (
       !Number.isSafeInteger(tokens) ||
       tokens < 0 ||
@@ -203,6 +231,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
   }
 
   async settle(requestId: string, actualTokens: number): Promise<SettleResult> {
+    this.assertQuotaIdentity();
     if (!Number.isSafeInteger(actualTokens) || actualTokens < 0) {
       throw new TypeError("Actual tokens must be a non-negative safe integer.");
     }
@@ -210,14 +239,17 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
   }
 
   async markUncertain(requestId: string): Promise<MarkUncertainResult> {
+    this.assertQuotaIdentity();
     return this.lifecycle.markUncertain(requestId);
   }
 
   async markReserveOutcomeUnknown(requestId: string): Promise<MarkReserveOutcomeUnknownResult> {
+    this.assertQuotaIdentity();
     return this.lifecycle.markReserveOutcomeUnknown(requestId);
   }
 
   async release(requestId: string): Promise<ReleaseResult> {
+    this.assertQuotaIdentity();
     return this.lifecycle.release(requestId);
   }
 
@@ -226,6 +258,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     limit: number,
     ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   ): Promise<AcquireInFlightResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       acquireInFlightLease(storage, { requestId, limit, ttlMs }),
     );
@@ -236,30 +269,35 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     generation: string,
     ttlMs = DEFAULT_IN_FLIGHT_LEASE_TTL_MS,
   ): Promise<RenewInFlightResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       renewInFlightLease(storage, { requestId, generation, ttlMs }),
     );
   }
 
   async admitRelay(input: RelayAdmissionInput): Promise<RelayAdmissionResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       admitRelayInTransaction(storage, this.env, this.identity, input, Date.now()),
     );
   }
 
   async activateRelay(input: RelayGrantBinding): Promise<ActivateRelayResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       activateRelayInTransaction(this.relayContext(storage), input),
     );
   }
 
   async renewRelay(input: RelayGrantBinding): Promise<RenewRelayResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       renewRelayInTransaction(this.relayContext(storage), input),
     );
   }
 
   async finishRelay(input: FinishRelayInput): Promise<FinishRelayResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       finishRelayInTransaction(this.relayContext(storage), input),
     );
@@ -269,6 +307,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     requestId: string,
     generation?: string,
   ): Promise<ReleaseInFlightResult> {
+    this.assertQuotaIdentity();
     return this.ctx.storage.transaction((storage) =>
       releaseInFlightLease(storage, { requestId, generation }),
     );
@@ -278,6 +317,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     requestId: string,
     disposition: ReconcileDisposition,
   ): Promise<ReconcileResult> {
+    this.assertQuotaIdentity();
     if (disposition !== "consumed" && disposition !== "unused") {
       throw new TypeError("Reconcile disposition must be consumed or unused.");
     }
@@ -285,14 +325,17 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
   }
 
   async getReconcileSnapshot(): Promise<ReconcileSnapshot> {
+    this.assertQuotaIdentity();
     return this.lifecycle.getReconcileSnapshot();
   }
 
   async getReconcileRequest(requestId: string): Promise<ReconcileRequestView | undefined> {
+    this.assertQuotaIdentity();
     return this.lifecycle.getReconcileRequest(requestId);
   }
 
   async finalizeDay(): Promise<FinalizeResult> {
+    this.assertQuotaIdentity();
     return this.lifecycle.finalizeDay();
   }
 
@@ -311,8 +354,54 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
   }
 
   async getState(): Promise<QuotaView> {
-    const { pool, utcDay } = this.identity;
+    const { pool, utcDay } = this.assertQuotaIdentity();
     const state = await loadPool(this.ctx.storage, this.env, { pool, utcDay });
     return { ...state, pool, remaining: remainingOf(state) };
+  }
+
+  async getRelayCpuGateSnapshot(): Promise<RelayCpuGateSnapshot> {
+    const identity = this.assertQuotaIdentity();
+    return getRelayCpuGateSnapshot(this.ctx.storage, this.env, identity, Date.now());
+  }
+
+  async getRelayCpuGateGrantInspection(requestId: string): Promise<RelayCpuGateGrantInspection> {
+    const identity = this.assertQuotaIdentity();
+    if (!RELAY_REQUEST_ID_PATTERN.test(requestId)) throw new TypeError("CPU-gate request ID is invalid.");
+    return getRelayCpuGateGrantInspection(this.ctx.storage, this.env, identity, requestId, Date.now());
+  }
+
+  async fenceRelayCpuGateSetup(requestId: string): Promise<RelayCpuGateFenceResult> {
+    const identity = this.assertQuotaIdentity();
+    if (!RELAY_REQUEST_ID_PATTERN.test(requestId)) throw new TypeError("CPU-gate request ID is invalid.");
+    return this.ctx.storage.transaction((storage) =>
+      fenceRelayCpuGateSetup(storage, this.env, identity, requestId, Date.now()),
+    );
+  }
+
+  async getRelayCpuGateSlot(): Promise<RelayCpuGateSlotState> {
+    return getRelayCpuGateSlot(this.cpuGateSlotIdentity);
+  }
+
+  async claimRelayCpuGateSlot(owner: RelayCpuGateSlotOwner): Promise<RelayCpuGateSlotClaimResult> {
+    return claimRelayCpuGateSlot(this.cpuGateSlotIdentity, owner);
+  }
+
+  async closeRelayCpuGateSlot(
+    owner: RelayCpuGateSlotOwner,
+    generation: number,
+  ): Promise<RelayCpuGateSlotCloseResult> {
+    return closeRelayCpuGateSlot(this.cpuGateSlotIdentity, owner, generation);
+  }
+
+  private get cpuGateSlotIdentity(): CpuGateSlotIdentity {
+    const idName = this.ctx.id.name;
+    if (!isCpuGateSlotName(idName, this.env.OCTG_RELAY_ENVIRONMENT)) {
+      throw new TypeError("CPU-gate slot RPC requires the environment-local singleton identity.");
+    }
+    return { idName, env: this.env, storage: this.ctx.storage };
+  }
+
+  private assertQuotaIdentity(): QuotaIdentity {
+    return this.identity;
   }
 }

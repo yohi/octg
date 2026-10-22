@@ -56,6 +56,10 @@ export interface QuotaEnvLike {
   readonly QUOTA_LIMIT_MINI?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;
   readonly OCTG_RELAY_ENVIRONMENT?: string;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_MODEL?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_MODEL?: string;
 }
 
 export interface QuotaIdentity {

@@ -15,6 +15,10 @@ export default defineConfig(async () => {
           bindings: {
             OCTG_KEY_PEPPER: "test-pepper",
             OCTG_RELAY_ENVIRONMENT: "preview",
+            OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID: "cpu-gate-standard-client",
+            OCTG_RELAY_CPU_GATE_STANDARD_MODEL: "cpu-gate-standard-model",
+            OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID: "cpu-gate-mini-client",
+            OCTG_RELAY_CPU_GATE_MINI_MODEL: "cpu-gate-mini-model",
             OCTG_UPSTREAM_API_TOKEN: "test-upstream-token",
             OCTG_UPSTREAM_BASE_URL: "https://aigw.invalid/openai",
             TEST_MIGRATIONS: migrations
