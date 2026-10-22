@@ -20,8 +20,10 @@
 - `QuotaController` remains the sole quota authority; D1 remains non-authoritative for admission/settlement decisions.
 - Never log or retain prompts, request/response bodies, client keys, service bearers, CPU-gate bearers, relay HMAC keys, grant credentials, or upstream credentials.
 - `OCTG_RELAY_CONTEXT_HMAC_KEY` remains Cloudflare-side only and is never provided to Deno or an external gate runner.
-- `OCTG_RELAY_SERVICE_AUTH_TOKEN` is used by Deno and the protected Stage 2 runner only for the existing lifecycle callback Authorization path.
+- `OCTG_RELAY_SERVICE_AUTH_TOKEN` is used by Deno and the protected same-environment runner only for existing decision/lifecycle callback Authorization (Preview for Stage 1, Production for Stage 2).
 - `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` is a distinct control-plane bearer; absent/invalid means every CPU-gate control route is disabled with 404.
+- Stage 1 uses a Preview-operator-owned per-run CPU-gate bearer independent of Production. Task 5 produces provisioning/preflight/teardown tooling; Task 6 executes it only with authorization, before collecting any series.
+- The global Stage 2 one-fixture bound is enforced by the durable singleton `cpu-gate-slot:v1:production` in the existing `QUOTA_CONTROLLER` namespace, across runners/pools/days/versions. It never expires automatically. Local journals are not locks; target terminal proof plus authoritative slot closure are required before another setup or hardening.
 - Public Responses semantics remain unchanged; Chat Completions remains unchanged; `invalid_json` remediation remains out of scope.
 - Preview and Production resources remain isolated.
 - If activation/renewal/terminal fails Stage 1 or Stage 2, lifecycle offload is activated and **all Stage 1 evidence is rerun**. Ingress/decision failure does not activate lifecycle offload.
@@ -50,7 +52,8 @@
 | `packages/shared/src/index.ts` | Export the new shared contracts/helpers. |
 | `durable-objects/quota-controller/src/relay-cpu-gate.ts` | Read-only CPU-gate snapshot/fixture inspection and canonical `cpuGateFixture` predicate. |
 | `durable-objects/quota-controller/src/relay-config.ts` | Shared QuotaController-side max-in-flight and CPU-gate fixture configuration parsing. |
-| `durable-objects/quota-controller/src/quota-controller.ts` | Expose exact read-only CPU-gate RPCs; retain all existing quota/lifecycle RPCs unchanged. |
+| `durable-objects/quota-controller/src/quota-controller.ts` | Expose snapshot/inspection/fence and singleton slot RPCs; distinguish control-only identity; preserve normal quota/lifecycle RPC contracts. |
+| `durable-objects/quota-controller/src/relay-cpu-gate-slot.ts` | Durable global claim/close state; target fencing and canonical closure proof before compare-and-clear. |
 | `apps/gateway-worker/src/relay-cpu-gate.ts` | Protected `/internal/relay/v1/cpu-gate/*` routes: snapshot, setup, operation inspection, reconcile-unused. |
 | `apps/gateway-worker/src/relay-grant-claims.ts` | One canonical `RelayGrant -> RelayGrantCredentialV1` mapping shared by Decision DO and CPU-gate setup. |
 | `apps/gateway-worker/src/relay-observation.ts` | Sanitized `octg.relay_invocation` supplementary markers. |
@@ -62,7 +65,7 @@
 | `scripts/relay-cpu-workloads.mjs` | Canonical workload builders and execution-condition definitions. |
 | `scripts/relay-cpu-evidence.mjs` | Pure normalized platform-telemetry series classifier and PASS/FAIL/BLOCKED reducer. |
 | `scripts/relay-cpu-telemetry.mjs` | Workers Observability REST API producer: exact-window invocation query, pagination/completeness checks, protected normalized JSONL. |
-| `scripts/run-relay-cpu-gate.mjs` | Protected Stage 1/Stage 2 driver, runner-owned request IDs, one-operation serialization, candidate version override. |
+| `scripts/run-relay-cpu-gate.mjs` | Protected driver, Preview credential lifecycle, singleton-aware restart recovery/closure, runner-owned IDs and candidate override. |
 | `scripts/do-compatibility-manifest.mjs` | Runtime bundle digest + type/source contract closure digest for bridge/candidate DO compatibility. |
 | `scripts/relay-cpu-version-config.mjs` | Deterministically generate complete temporary Production bridge/candidate Wrangler configs from canonical non-secret inputs; never contains secret values. |
 | `scripts/relay-cpu-rollout.mjs` | Validated bridge/candidate/hardening Wrangler command orchestration using generated exact version configs; no implicit production execution. |
@@ -101,6 +104,13 @@ Task 9  regenerate DO compatibility manifest from locked SHA
    |
 Task 12 authorized remote Stage 2 / acceptance / promotion / hardening evidence
 
+
+Task 9 consumes Task 3 slot implementation and Task 2 shared contracts. Task 10
+consumes Tasks 3-5 plus Task 9, including singleton-aware route/runner behavior.
+The initial Task 6 runs Phase 2 inactive without Tasks 7-8. Once lifecycle
+offload is selected, Task 8 (including migration-capable Preview v4 deployment)
+must finish before every full Task 6 rerun; each rerun uses fresh Preview
+credentials and replaces all earlier Stage 1 evidence.
 
 If Task 6 reports ingress or decision FAIL, STOP. Do not run Tasks 7-12 until a separately reviewed remediation changes that invocation class.
 
@@ -213,6 +223,9 @@ git commit -m "perf: reuse relay HMAC CryptoKey imports"
 
 **Interfaces:**
 - Consumes: existing `RelayEnvironment`, `RelayGrantState`, `RequestState`, `RELAY_REQUEST_ID_PATTERN`.
+- Preserves: `RelayAdmissionResult` denied branch uses only existing `RelayErrorCode`.
+  Fence denial is exactly `{kind:"denied",code:"invalid_context"}`; no
+  `cpu_gate_fenced` union member or new public/Deno error mapping is added.
 - Produces:
   - `relayShardIndex(requestId: string): string`
   - `relayDecisionShardName(environment, requestId): string`
@@ -224,6 +237,7 @@ git commit -m "perf: reuse relay HMAC CryptoKey imports"
   - `RelayGrantLifecycleControllerOperations`
   - `RelayCpuGateSetupRequestV1`
   - `RelayCpuGateSetupResponseV1`
+  - `RelayCpuGateDecisionContextV1`
   - `RelayCpuGateSetupFenceRequestV1`
   - `RelayCpuGateSetupFenceResponseV1`
   - `RelayCpuGateOperationRequestV1`
@@ -233,6 +247,14 @@ git commit -m "perf: reuse relay HMAC CryptoKey imports"
   - `RelayCpuGateOperationIncompatibleV1`
   - `RelayCpuGateFenceResult`
   - `RelayCpuGateControllerOperations`
+  - `RelayCpuGateSlotOwner`, `RelayCpuGateSlotState`, `RelayCpuGateSlotClaimResult`,
+    `RelayCpuGateSlotCloseResult`, `RelayCpuGateSlotOperations` exactly as defined
+    in the spec's Global Production CPU-gate slot section.
+
+The existing `RelayContextV1` exact ten-key shape remains unchanged and excludes
+`model`. Task 4 produces this Context; Task 5 selects the model in
+`RelayDecisionRequestV1.metadata.model`, never in Context. Keep the existing
+decision denied-to-reject mapping, including `invalid_context -> status:500`.
 - [ ] **Step 1: Write RED routing tests**
 
 Pin:
@@ -248,7 +270,7 @@ Pin:
 
 - [ ] **Step 2: Write RED type/contract tests**
 
-Extend `relay.test.ts` with compile/runtime shape assertions for the control result discriminants and exact lifecycle result kinds.
+Extend `relay.test.ts` with compile/runtime shape assertions for control/slot result discriminants and exact lifecycle result kinds. Assert `invalid_context` satisfies existing `RelayErrorCode`; `isRelayErrorCode("cpu_gate_fenced")` remains false. Task 3 tests assign the exact denial to `RelayAdmissionResult`, without adding a shared-package dependency on the quota-controller implementation. Pin Context's ten keys from the spec and unchanged `RelayDecisionRequestV1.metadata.model`; Task 4's signer/verifier tests round-trip both setup/decision contexts and reject an extra signed `model` claim.
 
 - [ ] **Step 3: Run RED**
 
@@ -285,17 +307,23 @@ git commit -m "refactor: share relay routing and CPU gate contracts"
 
 ---
 
-### Task 3: Add read-only QuotaController CPU-gate inspection RPCs
+### Task 3: Add QuotaController CPU-gate inspection, fence, and global slot RPCs
 
 **Files:**
 - Create: `durable-objects/quota-controller/src/relay-config.ts`
 - Create: `durable-objects/quota-controller/src/relay-cpu-gate.ts`
+- Create: `durable-objects/quota-controller/src/relay-cpu-gate-slot.ts`
 - Create: `durable-objects/quota-controller/test/relay-cpu-gate.test.ts`
+- Create: `durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts`
 - Modify: `durable-objects/quota-controller/src/relay-admission.ts`
 - Modify: `durable-objects/quota-controller/src/quota-controller.ts`
 - Modify: `durable-objects/quota-controller/src/store.ts`
 - Modify: `apps/gateway-worker/vitest.config.ts`
 
+**Interfaces:**
+- Consumes: Task 2 inspection/fence/slot contracts, existing admission transactions
+  and target `QUOTA_CONTROLLER` namespace. Add the namespace and runtime relay
+  environment to `QuotaControllerEnv` for slot-to-target RPCs, not raw secrets.
 - Produces:
   - `resolveMaxInFlightRequests(value?: string): number`
   - `resolveCpuGateFixtureIdentity(env, pool): {clientId: string; model: string} | undefined`
@@ -303,6 +331,8 @@ git commit -m "refactor: share relay routing and CPU gate contracts"
   - `getRelayCpuGateGrantInspection(storage, env, identity, requestId, nowMs): Promise<RelayCpuGateGrantInspection>`
   - `fenceRelayCpuGateSetup(storage, env, identity, requestId, nowMs): Promise<RelayCpuGateFenceResult>`
   - public DO RPCs with the same names/signatures.
+  - the three `RelayCpuGateSlotOperations` RPCs on the environment-local
+    control-only singleton, using the exact spec state and close protocol.
 
 `fenceRelayCpuGateSetup` is not read-only: it atomically checks for an existing fixture/non-fixture and writes a durable fence if neither exists. It must run inside the same storage transaction semantics as `admitRelay` so that `admitRelay` can observe the fence in the same transaction.
 - [ ] **Step 1: Write RED tests for snapshot read-only behavior**
@@ -354,26 +384,59 @@ Implement `fenceRelayCpuGateSetup` in `relay-cpu-gate.ts` and expose it as a Quo
 - otherwise atomically write a durable fence record and return `kind="fenced"`;
 - run inside the same storage transaction path as `admitRelay` so that a concurrent or delayed `admitRelay(A)` observes the fence within its transaction and fails closed.
 
-Modify `relay-admission.ts` so that `admitRelay` checks for a CPU-gate fence for the requestId within its transaction and returns `kind="denied"` with reason `cpu_gate_fenced` when a fence exists, regardless of quota state. This check is unconditional for every admission: it does not require the caller to opt in.
+Modify `relay-admission.ts` so that `admitRelay` checks for a CPU-gate fence for the requestId within its transaction and returns exactly `{kind:"denied",code:"invalid_context"}` when a fence exists, regardless of quota state. This check is unconditional for every admission: it does not require caller opt-in. Fence existence remains the internal inspection/fence discriminant, never a new `RelayErrorCode`. Preserve `RelayDecisionController`'s existing `rejectDecision(admission.code)` mapping and public fallback.
 
 - [ ] **Step 5: Write RED fence/admission collision tests**
 
 Using the real in-memory storage backend, prove:
 
 ```text
-fence before delayed admitRelay -> admitRelay returns denied with cpu_gate_fenced
-admitRelay before fence -> fence returns fixture and subsequent admitRelay with same ID is rejected by existing state
+fence before delayed admitRelay -> exact {kind:"denied",code:"invalid_context"}
+admitRelay before fence -> fence returns fixture; identical authorized retry may
+  return the saved grant, never a second grant/lease; mismatched or terminal
+  retries keep existing rejection semantics
 fence after reconcile-unused terminal -> fence returns fixture with terminal state; operation A is closed
 fence across two concurrent transactions -> both may return fenced (idempotent);
   only one durable fence is written; a delayed admitRelay for the same ID is
   rejected
 admitRelay transaction observes fence written by another concurrent call -> fails closed
+fence presence is proven separately with inspection.fenced / fence result, not rejection code
+```
+
+- [ ] **Step 5.5: Implement and test the authoritative singleton slot**
+
+Use `relay-cpu-gate-slot.ts` and the existing class/namespace, not a new DO class
+or migration. Explicitly recognize exactly `cpu-gate-slot:v1:<runtime-environment>`
+without relaxing the existing quota identity parser; guard every existing quota
+RPC (including in-flight-only RPCs) against control-only identities. Slot RPCs
+reject pool/day or wrong-environment identities. Store only owner, safe-integer
+generation and held/closing state; do not use quota counters or day finalization
+for slot storage. Claim and compare-and-clear are local storage transactions;
+target fencing/inspection RPCs run outside them. Implement the spec's no-expiry,
+closing-on-uncertainty and target-proof-before-release rules exactly.
+
+With real shared DO storage/stubs, not independent mock locks, test:
+
+```text
+A/B distinct IDs, same pool, simultaneous claims -> exactly one claimed
+A STANDARD / B MINI -> exactly one claimed across both pools
+A previous UTC day / B current day -> held A blocks B
+DO eviction / runner restart / missing journal -> durable owner is unchanged
+lease/grant expiry or elapsed wall time -> never frees slot
+unavailable claim -> no admission; both runners report BLOCKED
+A paused before admission; close A fences target; B claims; delayed A cannot admit
+close while A live/non_fixture/unverifiable -> closing retained, B busy
+terminal target but lost close acknowledgement -> restart can prove/finish close
+stale close generation cannot clear B; duplicate close on idle is no-op
+paused A resumes with stale close-operation HTTP request after B claims -> B remains held
+bridge/candidate stubs use same singleton and persistent schema
+all normal quota RPCs reject singleton; slot RPCs reject ordinary quota identities
 ```
 
 - [ ] **Step 6: GREEN**
 
 ```bash
-npm test -w apps/gateway-worker -- ../../durable-objects/quota-controller/test/relay-cpu-gate.test.ts ../../durable-objects/quota-controller/test/relay-admission.test.ts ../../durable-objects/quota-controller/test/index.test.ts
+npm test -w apps/gateway-worker -- ../../durable-objects/quota-controller/test/relay-cpu-gate.test.ts ../../durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts ../../durable-objects/quota-controller/test/relay-admission.test.ts ../../durable-objects/quota-controller/test/index.test.ts
 npm run typecheck -w apps/gateway-worker
 ```
 
@@ -382,7 +445,7 @@ Expected GREEN: inspection is read-only, fence/admission collision is authoritat
 - [ ] **Step 7: Commit boundary**
 
 ```bash
-git add durable-objects/quota-controller/src/relay-config.ts durable-objects/quota-controller/src/relay-cpu-gate.ts durable-objects/quota-controller/src/relay-admission.ts durable-objects/quota-controller/src/quota-controller.ts durable-objects/quota-controller/src/store.ts durable-objects/quota-controller/test/relay-cpu-gate.test.ts apps/gateway-worker/vitest.config.ts
+git add durable-objects/quota-controller/src/relay-config.ts durable-objects/quota-controller/src/relay-cpu-gate.ts durable-objects/quota-controller/src/relay-cpu-gate-slot.ts durable-objects/quota-controller/src/relay-admission.ts durable-objects/quota-controller/src/quota-controller.ts durable-objects/quota-controller/src/store.ts durable-objects/quota-controller/test/relay-cpu-gate.test.ts durable-objects/quota-controller/test/relay-cpu-gate-slot.test.ts apps/gateway-worker/vitest.config.ts
 git commit -m "feat: add relay CPU gate quota inspection and setup fence"
 ```
 
@@ -404,7 +467,7 @@ git commit -m "feat: add relay CPU gate quota inspection and setup fence"
 - Modify: `apps/gateway-worker/test/relay-callback.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2 control types/routing helper; Task 3 QuotaController inspection/admission/reconcile RPCs; existing relay HMAC signer.
+- Consumes: Task 2 control/slot/Context contracts; Task 3 inspection/admission/reconcile/global-slot RPCs; existing Cloudflare-side HMAC signer. Preview runtime credentials are provisioned by Task 5 tooling when Task 6 executes it.
 - Produces:
   - `resolveRelayCpuGateControl(env): {kind:"disabled"} | {kind:"enabled"; token:string}`
   - `verifyRelayCpuGateAuth(header, token): boolean`
@@ -412,6 +475,9 @@ git commit -m "feat: add relay CPU gate quota inspection and setup fence"
   - `handleRelayCpuGate(request: Request, env: Env): Promise<Response>`
   - `emitRelayInvocation(event: RelayInvocationEvent): void`
   - `RelayCpuGateSetupFenceResponseV1` route handler
+  - exact `RelayCpuGateDecisionContextV1` response with unchanged Context claims;
+  - authenticated slot GET and close-operation POST routes with the spec's exact
+    owner/generation input, 200/409/503 control envelopes and 404-disable rules.
 
 Pin:
 
@@ -430,8 +496,32 @@ Pin exact setup contract:
 - request ID must satisfy pattern and current UTC day via `relayRequestUtcDayOf`;
 - Worker chooses configured fixture client/model, nonce, environment, metadata, zero reservation/upper bound/output, no idempotency;
 - existing state collision is fail-closed without mutation;
+- an existing fixture collision returns `setup_state_ambiguous` and retains
+  the slot for recovery, never a definite no-live-fixture response;
 - successful admission is signed Cloudflare-side and returned as `RelayCpuGateSetupResponseV1`;
 - grant HMAC key is never part of a response/log.
+- Stage 2 setup claims the singleton before any target admission; busy returns
+  `cpu_gate_busy`/409 and unavailable returns `cpu_gate_slot_unavailable`/503,
+  with no admission. Success/denial/signing compensation never silently clears
+  the slot: close-operation must prove target closure. Include A/B different-ID
+  and different-pool route races using Task 3 shared storage.
+
+Pin decision-context for both runtime environments:
+
+- input is exactly `version,pool,requestId`, never a caller-selected model;
+- output signs the existing ten-key `RelayContextV1` from the spec with the
+  configured same-environment client and `idempotencyKeyHash=null`; no model,
+  pool or quota-day claim is added;
+- correct Preview control bearer yields a verifiable Preview context without
+  admission; missing/wrong/service bearer yields 401 without signing or DO call;
+- absent/invalid/equal-to-service secret yields 404 for every control route;
+- a validly signed context containing extra `model` is rejected as
+  `invalid_context` before admission;
+- decision body `metadata.model` supplies the Stage 1 Preview model or Stage 2
+  reject model; `RelayDecisionController` keeps existing denied mapping;
+- fenced admission returns existing `invalid_context`; the decision reject is
+  `{version:1,kind:"reject",code:"invalid_context",status:500}` within the
+  existing HTTP 200 callback, while setup enters definite-no-live recovery.
 
 Pin setup-fence contract:
 
@@ -515,15 +605,31 @@ Exact route set:
 
 ```text
 GET  /internal/relay/v1/cpu-gate/quota
+GET  /internal/relay/v1/cpu-gate/slot
 POST /internal/relay/v1/cpu-gate/setup
 POST /internal/relay/v1/cpu-gate/setup-fence
 POST /internal/relay/v1/cpu-gate/decision-context
 POST /internal/relay/v1/cpu-gate/operation-inspection
 POST /internal/relay/v1/cpu-gate/reconcile-unused
+POST /internal/relay/v1/cpu-gate/close-operation
 ```
 Keep control routes internal and before generic callback action parsing.
 
 Use the existing `QuotaController.admitRelay` transaction for setup. `admitRelay` must check for a CPU-gate fence for the requestId and fail closed if one exists. Never write DO storage directly.
+
+For Stage 2, claim the shared slot first and never bypass it on error or
+contention. Slot closure delegates to Task 3's singleton, which fences and
+inspects the target before compare-and-clear. A Worker check alone is not a
+lock. Recovery of a terminal target still requires close-operation and idle
+proof. Keep slot secrets out of responses (owner IDs/generation are non-secret).
+
+The Worker never unconditionally releases a slot in `finally`: after any
+post-claim rejection/exception, the runner retains the owner/generation and
+executes the same fence/target-inspection/close protocol. A lost HTTP response
+or crashed Worker is recovered from the singleton by the next authorized
+runner, even without a journal. If target closure cannot be proven, retain
+held/closing and report BLOCKED, rather than silently leaking or force-clearing
+the operation. All definite-denial and exception route tests pin this behavior.
 
 Move the grant-claims mapping from `RelayDecisionController` into `relay-grant-claims.ts` and consume it from both call sites.
 
@@ -566,10 +672,12 @@ git commit -m "feat: add protected relay CPU gate control plane"
 - Create: `scripts/relay-cpu-evidence.test.mjs`
 - Create: `scripts/run-relay-cpu-gate.mjs`
 - Create: `scripts/run-relay-cpu-gate.test.mjs`
+- Modify: `scripts/preview-worker-config.mjs`
+- Modify: `scripts/preview-worker-config.test.mjs`
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Task 4 CPU-gate HTTP contract; public `/v1/responses`; existing lifecycle callback routes; Cloudflare Workers Observability REST API.
+- Consumes: Task 4 CPU-gate/slot/decision-context HTTP contract; public `/v1/responses`; existing callback routes; Workers Observability REST API; operator-owned Preview-only relay credentials and isolated non-secret resource inputs.
 - Produces:
   - `WORKLOAD_CLASSES = ["baseline-small","baseline-large","incident-regression-stream","incident-regression-nonstream"]`
   - `CONCURRENCIES = [1,2,3]`
@@ -579,6 +687,40 @@ git commit -m "feat: add protected relay CPU gate control plane"
   - executable `npm run telemetry:relay-cpu -- ...`
   - protected normalized platform JSONL consumed by `relay-cpu-evidence.mjs`
   - protected sidecar telemetry metadata JSON consumed by the reducer.
+  - Preview-only per-run CPU-gate secret provisioning, auth/context preflight,
+    normal callback cleanup and secret teardown tooling for Task 6, following
+    the spec's Stage 1 Preview credential provisioning contract.
+
+- [ ] **Step 0: Pin and implement Preview credential lifecycle tooling locally**
+
+The authorized Preview operator/job generates a fresh 43-character base64url
+bearer from 32 random bytes for each run. It passes it to Preview candidate
+upload via a `0600` `--secrets-file` under a `0700` temporary directory and to
+the Stage 1 runner only as environment `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. The
+same job supplies the Preview service bearer separately; HMAC keys remain only
+in the Cloudflare-side Preview secret provisioning path. Production
+credentials/store access are not inputs. Use mocked Wrangler/network adapters
+for these local tests; this task executes no deploy.
+
+`preview-worker-config.mjs` produces only non-secret fixture identifiers and
+Preview-local D1/DO/relay settings, rejects secret values in `vars`, and never
+inherits Production fixture IDs or CPU-gate settings. Ordinary Preview builds
+do not enable the CPU gate. Phase-2-specific synchronization remains Task 8;
+this prerequisite is implemented before Task 6, even when Phase 2 is inactive.
+
+Tests prove provisioning precedes measurement; correct Preview bearer obtains
+a usable signed context; missing/wrong/service bearer returns 401; absent,
+invalid-shape or equal-to-service binding returns 404 and causes BLOCKED before
+measurement; Preview decision uses only the Preview service bearer; all normal
+Preview grants are terminalized. Pin the spec's exact Preview upload/deploy
+sequence, and its teardown sequence: versioned CPU-gate secret deletion,
+secret-less Preview version at 100%, metadata-only secret absence and unchanged
+other bindings, exact-version 404 verification. On success/failure/cancellation,
+terminalize known operations, close any held slot, execute that teardown, then
+discard secrets. Phase 2 active requires Task 8 Preview v4 before upload/rerun.
+Failed cleanup/teardown is BLOCKED with safe IDs, not reported success. Tests
+scan mocked stdout/stderr/ledgers/artifacts/config/argv for sentinel secrets and
+Context/grant tokens; temporary secret files are deleted in `finally`.
 
 The only authoritative telemetry producer is the Workers Observability REST API endpoint:
 
@@ -688,7 +830,7 @@ Cloudflare-Workers-Version-Overrides: <worker-name>="<candidate-version-id>"
 
 4. captures any `X-OCTG-Relay-Grant` headers returned by allowed callbacks;
 5. terminalizes the resulting grants via the normal `/internal/relay/v1/terminal`
-   callback using those grant credentials, then proves the fixture is terminal
+   callback using those grant credentials, then proves the normal grant terminal
    before starting the next sample.
 
 Stage 2 uses the reject model, so callbacks return reject before creating a
@@ -706,12 +848,20 @@ Tests must pin:
   non-fixture;
 - a Stage 1 decision callback with the context token performs normal admission
   and returns an `X-OCTG-Relay-Grant` header on allow;
-- the runner terminalizes the grant and proves the fixture terminal before the
+- the runner terminalizes the grant and proves the normal grant terminal before the
   next sample;
 - a Stage 2 decision callback with the reject model returns reject and creates
   no grant;
 - `concurrency=2,3` decision samples issue the expected number of simultaneous
   callbacks against the same active decision fixture.
+
+Stage 1 decision grants have normal nonzero budget reservations and do not
+satisfy the zero-reservation `cpuGateFixture` predicate. Their closure proof is
+the existing authenticated terminal callback response with `accepted=true` and
+terminal `state`; do not use the CPU-gate operation-inspection/reconcile-unused
+routes on these grants or relax their canonical fixture predicate. Missing or
+ambiguous terminal acknowledgement is BLOCKED and uses existing normal callback
+retry semantics with the same credential, never a fresh decision sample.
 
 `ingress` uses the same override header on `/v1/responses`. `activation`,
 `renewal`, and `terminal` use the Worker-signed grant credential obtained from
@@ -973,7 +1123,15 @@ Pin:
 - runner generates `req_<ULID>` before setup;
 - the runner never retries `setup(A)`; once `fenced` is durable for A, operation A
   is permanently closed;
-- only one non-terminal CPU-gate operation exists across both pools;
+- two independent Stage 2 runner instances with separate journals and distinct
+  IDs compete on Task 3's real shared singleton: only one may admit across
+  both pools; `maxInFlight >= 3` never substitutes for this exclusion;
+- restart without a journal reads the singleton owner and recovers/closes it
+  before any new setup; busy/unavailable is BLOCKED with no fallback;
+- paused A cannot admit after its target is fenced and slot passed to B;
+- expired lease, day rollover and bridge/candidate skew preserve the lock;
+- every target terminal/fenced-absent branch also calls close-operation and
+  proves singleton idle before a new operation or secret deletion;
 - ambiguous setup response -> call setup-fence for the same request ID and wait for
   durable `fenced` (or `fixture`/`non_fixture`);
 - `fenced` from setup-fence (followed by operation-inspect returning HTTP 404
@@ -998,6 +1156,12 @@ operation journal that records every runner-owned CPU-gate operation (pool,
 requestId, state, timestamps) without secrets. The journal is used for recovery
 across driver process restarts and is required to be empty or fully
 terminal/fenced absent before CPU-gate secret deletion.
+
+Before reading the journal on startup, query the shared slot. Recover its owner
+even when the local journal is missing or belongs to a different process. The
+global slot is authoritative; journal closure alone never frees it. Record only
+safe slot owner/generation/state in the journal. Slot/control calls are outside
+all measurement windows and cannot contribute CPU samples.
 
 The run ledger records per call:
 
@@ -1073,6 +1237,7 @@ node --test \
   scripts/relay-cpu-telemetry.test.mjs \
   scripts/relay-cpu-evidence.test.mjs \
   scripts/run-relay-cpu-gate.test.mjs
+node --test scripts/preview-worker-config.test.mjs
 ```
 
 Expected RED: files/exports do not exist.
@@ -1085,6 +1250,7 @@ node --test \
   scripts/relay-cpu-telemetry.test.mjs \
   scripts/relay-cpu-evidence.test.mjs \
   scripts/run-relay-cpu-gate.test.mjs
+node --test scripts/preview-worker-config.test.mjs
 npm run test:scripts
 ```
 
@@ -1098,6 +1264,7 @@ git add \
   scripts/relay-cpu-telemetry.mjs scripts/relay-cpu-telemetry.test.mjs \
   scripts/relay-cpu-evidence.mjs scripts/relay-cpu-evidence.test.mjs \
   scripts/run-relay-cpu-gate.mjs scripts/run-relay-cpu-gate.test.mjs \
+  scripts/preview-worker-config.mjs scripts/preview-worker-config.test.mjs \
   package.json
 git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
 ```
@@ -1112,7 +1279,9 @@ git commit -m "feat: add relay CPU gate telemetry and evidence tooling"
 
 **Interfaces:**
 
-- Consumes: Tasks 1-5, exact candidate source revision, protected Preview environment, Workers Observability REST API.
+- Consumes: Tasks 1-5 including Preview provisioning/preflight/teardown tooling,
+  exact candidate revision, isolated Preview resource inputs and operator-owned
+  Preview-only secrets, Workers Observability REST API.
 - Produces: Production recurrence attribution plus Stage 1 PASS/FAIL/BLOCKED matrix that selects the Phase 2 branch. **Stage 1 evidence produced before all implementation/config changes is not a binding source-revision anchor; it must be rerun if source changes occur after it is collected.**
 
 - [ ] **Step 1: Require explicit telemetry authorization and record immutable candidate identity**
@@ -1156,6 +1325,19 @@ If complete retrieval cannot be proven, a required field is absent, or attributi
 - [ ] **Step 3: Run Stage 1 in isolated Preview/temporary resources**
 
 Remote execution requires explicit authorization.
+
+Execute Task 5's Preview credential lifecycle before collecting any series:
+generate the independent per-run token, upload the Preview candidate with its
+secret binding, inject only Preview bearers into the runner, verify the exact
+candidate/runtime/resource isolation, and run the decision-context auth/context
+preflight. Require 401 for missing/wrong/service bearer and success for correct
+control bearer followed by a valid normal Preview decision. 404, unexpected
+401, invalid context or unfinished cleanup is BLOCKED, not a skipped series.
+Use only Preview registry models in decision `metadata.model`; never extend
+Context claims. Record only credential presence and preflight status, no token.
+After the run (including failure/cancellation), execute Task 5 cleanup and
+verified Preview secret teardown. This does not mutate Production and does not
+replace Task 12's distinct Production hardening sequence.
 
 Run one required workload/concurrency series at a time. For each series the
 runner records an ordered list of exact non-overlapping half-open windows
@@ -1367,6 +1549,9 @@ All prior Stage 1 evidence is invalid because implementation changed.
 
 **Interfaces:**
 - Consumes: Worker source tree plus an explicit Wrangler config path representing the exact bridge or candidate effective non-secret configuration.
+- Consumes: Task 3 global-slot implementation, control-only identity guards and
+  durable owner/generation/closing schema. These are required in both Phase 2
+  branches and in bridge/candidate code, even without a bridge CPU-gate secret.
 - Produces deterministic `DoCompatibilityManifest` with `runtimeBundleSha256`, per-root `sourceClosureSha256`, file lists, and `contractSha256`.
 
 Exact source roots:
@@ -1377,6 +1562,9 @@ quota-controller:
 
 quota-cpu-gate:
   durable-objects/quota-controller/src/relay-cpu-gate.ts
+
+quota-cpu-gate-slot:
+  durable-objects/quota-controller/src/relay-cpu-gate-slot.ts
 
 relay-grant-lifecycle:       # Phase 2 active only
   apps/gateway-worker/src/relay-grant-lifecycle-controller.ts
@@ -1468,7 +1656,10 @@ git commit -m "build: add Durable Object compatibility manifest"
 - Modify: `package.json`
 
 **Interfaces:**
-- Consumes: Tasks 3-5 and optional Tasks 7-8; Task 9 manifest; canonical Production non-secret inputs.
+- Consumes: Tasks 3-5 including global-slot RPCs/route/runner closure protocol and
+  optional Tasks 7-8; Task 9 manifest including slot runtime/type closure;
+  canonical Production non-secret inputs. Stage 1 Preview secret provisioning
+  is already owned by Task 5 and executed by Task 6, not deferred to this task.
 - Produces:
   - `buildRelayCpuProductionVersionConfigs(baseConfig, productionInputs, phase2)`
   - protected temporary `bridge-wrangler.json`
@@ -1743,6 +1934,15 @@ Phase 2 inactive:
 - normal non-secret configuration is exact/equal;
 - bridge CPU-gate secret absent, candidate CPU-gate secret present.
 
+For both Phase 2 branches, bridge and candidate must recognize the same
+`cpu-gate-slot:v1:production` identity and share slot RPC/schema/closure behavior.
+Use real shared DO storage/stubs in compatibility tests: A via candidate holds
+STANDARD, B via a bridge-compatible DO cannot claim MINI; eviction or rollback
+preserves A. The bridge Worker still exposes no enabled CPU-gate control route.
+Missing/changed slot root, identity guards, shared contract or storage semantics
+fails the manifest/compatibility gate before candidate upload. No new slot
+binding/class/migration or configuration-derived lock-name override is allowed.
+
 Phase 2 active:
 
 - bridge applies v4 and exports full lifecycle DO;
@@ -1822,10 +2022,20 @@ fresh requestId
 -> required bridge/candidate control smoke
 -> terminalize fixture
 -> operation-inspection terminal proof / activeLease=false
+-> close-operation / authoritative singleton idle proof
 -> only then permit Stage 2 series
 ```
 
 Phase 2 inactive uses `reconcile-unused`. Phase 2 active accepts a normal settled lifecycle smoke or recovery `reconcile-unused`.
+
+Both branches must close the shared slot after target closure. Test two runner
+processes with separate journals, different pools and distinct IDs racing for
+preflight: one wins, one reports BLOCKED before admission. A lost claim/close
+acknowledgement, expired lease, rollover or restart must never admit a second
+fixture. Preflight cannot advance with a held/closing/unknown slot. The
+`hardening-create` validator additionally requires authoritative `idle` proof;
+an empty local journal is insufficient. Rollback never deletes or resets slot
+storage and retains compatible slot RPCs for authorized recovery.
 
 Preflight request IDs and invocations are excluded from measurement windows/counts.
 
@@ -1906,6 +2116,10 @@ Document:
 - complete base-Wrangler deep-clone preservation, canonical Production var replacement, forced `OCTG_RELAY_ENVIRONMENT=production`, path rebasing for temporary generated configs, dry-run equivalence tests, and metadata-only CPU-gate secret presence/absence verification;
 - Workers Observability REST invocation query plus companion sampling/count calculation, exact ad-hoc query IDs `octg-relay-cpu-invocations-v1` / `octg-relay-cpu-completeness-v1`, `chartType="aggregate"`, environment-only API Token authentication with target-account `Workers Observability Write`, Bearer-only request auth, pagination/completeness rules, `sampleInterval == 1` PASS prerequisite, protected normalized platform JSONL + metadata sidecar, and reducer command order;
 - HMAC/service/CPU-gate credential separation;
+- per-run Preview CPU-gate credential ownership, Task 5 provision/preflight/
+  cleanup tooling and Task 6 execution prerequisites;
+- global singleton ownership/no-expiry/target-fencing closure, multi-runner
+  recovery, busy/unavailable BLOCKED behavior and idle-before-hardening;
 - raw platform responses, normalized JSONL, run ledgers, and credentials as protected temporary artifacts that are never committed.
 
 - [ ] **Step 4: Run all local verification**
@@ -1948,8 +2162,7 @@ Only the Stage 1 evidence and manifests produced from the locked SHA are valid i
 Before Task 12 remote execution:
 - read the current repository HEAD SHA;
 - require it to equal the locked SHA recorded in this step;
-- Consumes: accepted Stage 1 evidence, exact generated bridge/candidate configs, compatibility manifests, Task 10 rollout tool, Task 11 runbook.
-- Produces: Stage 2 PASS, candidate rollout acceptance evidence, and hardening verification needed to close Issue #121. Consumes Stage 1 evidence and manifests produced only from the Task 11 locked SHA.
+
 If the repository state, generated config, or manifest digest differs from the locked revision, STOP as `BLOCKED / INCOMPLETE` and rerun Tasks 6, 9, and this lock step from the current state.
 
 ---
@@ -1961,7 +2174,11 @@ If the repository state, generated config, or manifest digest differs from the l
 - Runtime evidence remains outside the repository except explicitly approved sanitized review records.
 
 **Interfaces:**
-- Consumes: accepted Stage 1 evidence, exact generated bridge/candidate configs, compatibility manifests, Task 10 rollout tool, Task 11 runbook.
+- Consumes: accepted Stage 1 evidence including Preview auth preflight/teardown,
+  exact generated bridge/candidate configs, slot-inclusive compatibility
+  manifests, Task 10 singleton-aware rollout tool, Task 11 runbook; Production
+  CPU-gate/service bearers from the Production secret store only. Evidence and
+  manifests must be produced from the Task 11 locked SHA.
 - Produces: Stage 2 PASS, candidate rollout acceptance evidence, and hardening verification needed to close Issue #121.
 
 - [ ] **Step 1: Require explicit Production mutation and telemetry authorization**
@@ -2006,6 +2223,13 @@ Also verify the candidate manifest source-closure digests match the locked Task 
 - [ ] **Step 4: Run compatibility preflight**
 
 Require exact candidate ScriptVersion on incoming Worker and terminalize the preflight fixture before measurement begins.
+
+Query the global singleton first. Recover any held/closing owner through the
+canonical requestId-based protocol, regardless of which process/journal created
+it. Require idle, then let setup atomically claim it for the new preflight ID.
+After target terminal proof, close-operation must prove idle again. Busy or
+unavailable exclusion is BLOCKED; no new ID, pool switch or alternate lock may
+bypass it. This applies to every subsequent measured lifecycle fixture.
 
 If any preflight operation remains non-terminal, STOP as `BLOCKED / INCOMPLETE`.
 
@@ -2132,6 +2356,13 @@ If acceptance FAILs, STOP promotion, restore the compatibility bridge to 100%, k
 
 Use runner-owned operation IDs and canonical inspection. Do not use global quota-counter equality.
 
+Recover the authoritative singleton owner even when absent from this runner's
+journal. Require close-operation success and a fresh singleton `idle` response
+after every target is terminal/fenced absent. A held/closing/unavailable slot
+blocks secret deletion. `hardening-create` must validate this proof alongside
+the matching candidate acceptance evidence; runner journal assertions alone
+are insufficient. Do not reset the slot as part of rollback or teardown.
+
 - [ ] **Step 9: Create the distinct hardening version**
 
 Run the Task 10 versioned-secret operation against the exact tested candidate version/config:
@@ -2151,6 +2382,7 @@ complete normal non-secret Production configuration identical
 all non-CPU-gate secrets equivalent
 only OCTG_RELAY_CPU_GATE_AUTH_TOKEN absent
 hardening-create rejects missing candidate rollout acceptance evidence
+hardening-create rejects missing authoritative singleton idle proof
 ```
 
 - [ ] **Step 10: Create the hardening deployment and run bounded verification**
@@ -2194,6 +2426,14 @@ Record only sanitized aggregates, version IDs, source SHA, manifest hashes, exac
 - CPU-gate trust boundary, zero-reservation authoritative admission, signing compensation, durable setup-fence after ambiguous setup, grant-token-independent recovery: Task 4.
 - Canonical workloads, exact Workers Observability invocation/completeness query IDs, grouped invocation -> exactly one authoritative CPU record normalization, canonical request-identity checks, `chartType="aggregate"`, Bearer-only `Workers Observability Write` API Token auth, sampling/count acquisition, normalized telemetry metadata, >=500 sample series, 5/7/0 reducer, marker-less CPU failure handling: Task 5.
 - Production recurrence attribution and executable Stage 1 telemetry/evidence sequence: Task 6.
+- Global cross-runner/pool/day singleton, no-expiry recovery and close-before-next
+  semantics: Task 2 contracts, Task 3 shared-state implementation/tests, Task 4
+  routes, Task 5 independent-runner tests, Tasks 9-10 compatibility and Task 12
+  execution/idle-before-hardening proof.
+- Existing `invalid_context` fence denial and unchanged Context exact keys:
+  Tasks 2-4; model placement in decision `metadata.model`: Tasks 4-5.
+- Preview-only CPU-gate credential generation/injection/auth/teardown: Task 5
+  tooling and Task 6 authorized execution, required regardless of Phase 2.
 - Conditional lifecycle DO: Tasks 7-8.
 - Always-required bridge and Worker/DO version skew: Task 9 manifest plus Task 10 complete base-config-preserving Production version construction, path-rebased temporary configs, dry-run equivalence, secret-presence verification, and rollout.
 - Type-only + runtime DO equivalence: Task 9.
@@ -2206,6 +2446,11 @@ No spec section intentionally authorizes Workers Paid, direct DO storage mutatio
 ### Type consistency
 
 The exact names used by dependent tasks are declared in Task 2; Task 3 and Task 4 consume those names without aliases. The lifecycle class/binding remain exactly `RelayGrantLifecycleController` / `RELAY_GRANT_LIFECYCLE_CONTROLLER`. CPU-gate recovery remains `pool + requestId`, never grant-token-based.
+
+Slot closure additionally requires the authoritative safe-integer generation;
+it does not change requestId-based target inspection/reconciliation or grant
+authentication. The spec's review-provenance section owns Finding-ID history;
+this plan does not independently declare a Review Gate PASS.
 
 ### Proportion / task boundaries
 
