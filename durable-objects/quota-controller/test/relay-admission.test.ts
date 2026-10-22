@@ -105,7 +105,7 @@ describe("QuotaController.admitRelay", () => {
     });
     expect(result.grant.authorizationExpiresAtMs - result.grant.issuedAtMs).toBe(3_600_000);
     expect(result.grant.credentialExpiresAtMs - result.grant.issuedAtMs).toBe(3_900_000);
-    expect(result.grant.retentionDeadlineMs).toBeGreaterThan(result.grant.issuedAtMs);
+    expect(result.grant.retentionDeadlineMs).toBe(Date.parse("2026-10-17T00:00:00Z"));
     expect(result.quota).toEqual({
       pool: "STANDARD",
       limit: Number(env.QUOTA_LIMIT_STANDARD),
