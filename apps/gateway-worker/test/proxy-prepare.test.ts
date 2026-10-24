@@ -165,6 +165,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   restorePrepare();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -560,6 +561,7 @@ describe("prepare routing", () => {
   it.each(["1e2", "0x10"] as const)(
     "routes non-decimal Content-Length %j through prepare",
     async (contentLength) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       // Given: the prepare threshold is above every numeric coercion of the malformed values.
       Object.defineProperty(env, "DENO_PREPARE_THRESHOLD_BYTES", { value: "1000", configurable: true });
       const { calls } = stubPreparedResponses(JSON.stringify({

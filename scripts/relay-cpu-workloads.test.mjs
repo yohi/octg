@@ -19,3 +19,10 @@ test("defines concurrency and the full required series matrix", () => {
   assert.deepEqual(CONCURRENCIES, [1, 2, 3]);
   assert.equal(requiredSeriesMatrix().length, 68);
 });
+
+test("incident workloads use Responses function-call items instead of Chat message shapes", () => {
+  const workload = buildWorkload("incident-regression-stream");
+  assert.ok(workload.input.some((item) => item.type === "function_call"));
+  assert.ok(workload.input.some((item) => item.type === "function_call_output"));
+  assert.ok(workload.input.every((item) => item.role !== "tool" && item.tool_calls === undefined));
+});

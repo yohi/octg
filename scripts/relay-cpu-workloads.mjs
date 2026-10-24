@@ -8,8 +8,8 @@ const LARGE = "Synthetic CPU gate measurement input with representative history.
 const INCIDENT_MESSAGES = Object.freeze([
   { role: "user", content: "Synthetic structural incident fixture; no customer content." },
   { role: "assistant", content: "Synthetic response history." },
-  { role: "assistant", tool_calls: [{ id: "call_fixture", type: "function", function: { name: "synthetic_tool", arguments: "{}" } }] },
-  { role: "tool", tool_call_id: "call_fixture", content: "Synthetic tool result." },
+  { type: "function_call", call_id: "call_fixture", name: "synthetic_tool", arguments: "{}" },
+  { type: "function_call_output", call_id: "call_fixture", output: "Synthetic tool result." },
 ]);
 
 export function buildWorkload(workloadClass) {

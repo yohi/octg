@@ -11,6 +11,7 @@ import { handleAdmin } from "./admin";
 import { runScheduled } from "./scheduled";
 import { verifyAccessJwt } from "./access";
 import { handleRelayCpuGate } from "./relay-cpu-gate";
+import { workerVersionHeaders } from "./version-metadata";
 import { emitRelayInvocation } from "./relay-observation";
 
 export { QuotaController, TokenizerController, RelayDecisionController };
@@ -66,8 +67,14 @@ export default {
       // Relay callbacks are routed before public routes to keep internal paths
       // isolated even if a future public route accidentally overlaps.
       if (url.pathname.startsWith("/internal/relay/v1/")) {
-        if (url.pathname.startsWith("/internal/relay/v1/cpu-gate/")) return await handleRelayCpuGate(request, env);
-        return await handleRelayCallback(request, env, ctx);
+        const response = url.pathname.startsWith("/internal/relay/v1/cpu-gate/")
+          ? await handleRelayCpuGate(request, env)
+          : await handleRelayCallback(request, env, ctx);
+        const attributed = new Response(response.body, response);
+        for (const [name, value] of Object.entries(workerVersionHeaders(env.CF_VERSION_METADATA))) {
+          attributed.headers.set(name, value);
+        }
+        return attributed;
       }
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         requestId = `req_${ulid()}`;

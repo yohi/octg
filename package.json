@@ -18,5 +18,5 @@
     "setup:local": "node scripts/setup.mjs local",
     "setup:deploy": "node scripts/setup.mjs deploy"
   },
-  "devDependencies": { "typescript": "^5.6.0" }
+  "devDependencies": { "tiktoken": "1.0.22", "typescript": "^5.6.0" }
 }

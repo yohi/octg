@@ -1,52 +1,130 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const INVOCATIONS_QUERY_ID = "octg-relay-cpu-invocations-v1";
 export const COMPLETENESS_QUERY_ID = "octg-relay-cpu-completeness-v1";
 const ENDPOINT = "https://api.cloudflare.com/client/v4/accounts";
+const MAX_PAGES_PER_WINDOW = 1000;
 
 function makeQuery(options, window, view, offset) {
-  const parameters = { timeFilter: { from: new Date(window.windowStartMs).toISOString(), to: new Date(window.windowEndMs).toISOString() }, filters: [{ key: "$workers.scriptName", operation: "eq", value: options.scriptName }, { key: "$workers.scriptVersion.id", operation: "eq", value: options.expectedScriptVersionId }, { key: "$workers.executionModel", operation: "eq", value: options.expectedExecutionModel }] };
-  if (view === "invocations") parameters.limit = 2000;
-  if (offset) { parameters.offset = offset; parameters.offsetDirection = "next"; }
+  const parameters = { datasets: ["cloudflare-workers"], filters: [{ key: "$workers.scriptName", type: "string", operation: "eq", value: options.scriptName }, { key: "$workers.scriptVersion.id", type: "string", operation: "eq", value: options.expectedScriptVersionId }, { key: "$workers.executionModel", type: "string", operation: "eq", value: options.expectedExecutionModel }] };
   if (view === "calculations") parameters.calculations = [{ operator: "uniq", key: "$metadata.requestId", keyType: "string", alias: "platform_invocation_count" }];
-  return { queryId: view === "invocations" ? INVOCATIONS_QUERY_ID : COMPLETENESS_QUERY_ID, view, dataset: "cloudflare-workers", ...(view === "calculations" ? { chartType: "aggregate", ignoreSeries: true } : {}), parameters };
+  return { queryId: view === "invocations" ? INVOCATIONS_QUERY_ID : COMPLETENESS_QUERY_ID, view,
+    timeframe: { from: window.windowStartMs, to: window.windowEndMs },
+    ...(view === "invocations" ? { limit: 2000 } : { chartType: "aggregate", ignoreSeries: true }),
+    ...(offset ? { offset, offsetDirection: "next" } : {}), parameters };
 }
 
-function getRecords(result) {
-  const groups = result?.invocations;
-  if (groups === null || typeof groups !== "object") throw new Error("Malformed invocations response");
-  return Object.entries(groups).map(([requestId, events]) => {
-    if (!Array.isArray(events)) throw new Error("Malformed invocation group");
-    const cpuEvents = events.filter((event) => typeof event?.$workers?.cpuTimeMs === "number");
-    const uniqueCpuEvents = new Map();
-    for (const candidate of cpuEvents) {
-      const candidateId = candidate.$metadata?.id;
-      if (typeof candidateId !== "string") throw new Error("Invocation event ID unavailable");
-      const prior = uniqueCpuEvents.get(candidateId);
-      if (prior !== undefined && JSON.stringify(prior) !== JSON.stringify(candidate)) throw new Error("Conflicting duplicate CPU event");
-      uniqueCpuEvents.set(candidateId, candidate);
-    }
-    if (uniqueCpuEvents.size !== 1) throw new Error("Invocation group must have exactly one CPU event");
-    const event = [...uniqueCpuEvents.values()][0];
-    const workers = event.$workers;
-    const metadata = event.$metadata;
-    const scriptVersionId = workers.scriptVersion?.id;
-    const timestamp = metadata.eventTimestampMs ?? metadata.timestamp;
-    if (typeof scriptVersionId !== "string" || typeof workers.scriptName !== "string" || typeof workers.outcome !== "string" || typeof workers.eventType !== "string" || typeof workers.executionModel !== "string" || typeof timestamp !== "number") throw new Error("Incomplete platform invocation");
-    if (workers.truncated === true) throw new Error("Truncated platform invocation");
-    const url = typeof metadata.url === "string" ? new URL(metadata.url) : undefined;
-    const trigger = typeof metadata.trigger === "string" ? new URL(metadata.trigger, "https://local.invalid") : undefined;
-    if (url && trigger && url.pathname !== trigger.pathname) throw new Error("Invocation route disagreement");
-    const routeDiscriminator = url?.pathname ?? trigger?.pathname;
-    if (!routeDiscriminator) throw new Error("Invocation route unavailable");
-    const eventId = metadata.id;
-    if (typeof eventId !== "string") throw new Error("Invocation event ID unavailable");
-    const requestIds = [metadata.requestId, workers.requestId].filter((value) => typeof value === "string");
-    if (requestIds.some((value) => value !== requestId)) throw new Error("Invocation request identity contradiction");
-    return { eventId, requestId, eventTimestampMs: timestamp, scriptName: workers.scriptName, scriptVersionId, cpuTimeMs: workers.cpuTimeMs, outcome: workers.outcome, eventType: workers.eventType, routeDiscriminator, executionModel: workers.executionModel };
+function eventTimestampOf(event) {
+  const meta = event?.$metadata;
+  const value = event?.timestamp ?? meta?.eventTimestampMs ?? meta?.timestamp;
+  return typeof value === "number" ? value : undefined;
+}
+
+function withinWindow(timestampMs, window) {
+  return timestampMs >= window.windowStartMs && timestampMs < window.windowEndMs;
+}
+
+function normalizedRouteOf(event) {
+  const meta = event?.$metadata;
+  const url = typeof meta?.url === "string" ? new URL(meta.url) : undefined;
+  const trigger = typeof meta?.trigger === "string" ? new URL(meta.trigger, "https://local.invalid") : undefined;
+  if (url && trigger && url.pathname !== trigger.pathname) throw new Error("Invocation route disagreement");
+  const routeDiscriminator = url?.pathname ?? trigger?.pathname;
+  if (!routeDiscriminator) throw new Error("Invocation route unavailable");
+  return routeDiscriminator;
+}
+
+function eventFingerprint(event) {
+  const meta = event?.$metadata;
+  const workers = event?.$workers ?? {};
+  return JSON.stringify({
+    scriptName: typeof workers.scriptName === "string" ? workers.scriptName : null,
+    scriptVersionId: typeof workers.scriptVersion?.id === "string" ? workers.scriptVersion.id : null,
+    executionModel: typeof workers.executionModel === "string" ? workers.executionModel : null,
+    eventType: typeof workers.eventType === "string" ? workers.eventType : null,
+    outcome: typeof workers.outcome === "string" ? workers.outcome : null,
+    cpuTimeMs: typeof workers.cpuTimeMs === "number" ? workers.cpuTimeMs : null,
+    truncated: workers.truncated === true,
+    url: typeof meta?.url === "string" ? meta.url : null,
+    trigger: typeof meta?.trigger === "string" ? meta.trigger : null,
+    eventTimestampMs: eventTimestampOf(event) ?? null,
+    eventRequestId: meta?.requestId ?? null,
+    workersRequestId: typeof workers.requestId === "string" ? workers.requestId : null,
   });
+}
+
+/**
+ * Parses one invocation group into its normalized CPU record plus scope facts.
+ * Exactly one distinct CPU-bearing event must exist per group; marker events
+ * never become the CPU record; exact-duplicate event ids are de-duplicated
+ * once per run while conflicting duplicates fail closed.
+ */
+function parseGroup(groupRequestId, rawEvents, scope) {
+  if (!Array.isArray(rawEvents)) throw new Error("Malformed invocation group");
+  let cpuRecord;
+  const groupSeenIds = new Set();
+  const truncated = [];
+  let inScopeEvents = 0;
+  for (const event of rawEvents) {
+    const workers = event?.$workers;
+    const meta = event?.$metadata;
+    const timestamp = eventTimestampOf(event);
+    const eventId = typeof meta?.id === "string" ? meta.id : undefined;
+    if (!eventId) throw new Error("Platform event ID unavailable");
+    if (eventId !== undefined) {
+      const fingerprint = eventFingerprint(event);
+      const prior = scope.globalEvents.get(eventId);
+      if (prior === undefined) {
+        scope.globalEvents.set(eventId, fingerprint);
+      } else if (prior !== fingerprint) {
+        throw new Error("Conflicting duplicate CPU event");
+      }
+      if (!scope.windowEvents.has(eventId)) { scope.windowEvents.add(eventId); scope.pageNewEvents += 1; }
+    }
+    if (!workers || typeof workers.scriptName !== "string" || typeof workers.scriptVersion?.id !== "string"
+      || typeof workers.executionModel !== "string" || !Number.isSafeInteger(timestamp)) throw new Error("Incomplete platform invocation");
+    if ([meta?.requestId, workers.requestId].some((id) => id !== undefined && id !== groupRequestId)) {
+      throw new Error("Invocation request identity contradiction");
+    }
+    const inScope = workers?.scriptName === scope.scriptName
+      && workers?.scriptVersion?.id === scope.expectedScriptVersionId
+      && workers?.executionModel === scope.expectedExecutionModel
+      && timestamp !== undefined
+      && withinWindow(timestamp, scope.window);
+    if (!inScope) continue;
+    inScopeEvents += 1;
+    if (workers.truncated === true) truncated.push(timestamp);
+    if (workers.cpuTimeMs === undefined) continue;
+    if (!Number.isFinite(workers.cpuTimeMs) || workers.cpuTimeMs < 0) throw new Error("Invalid platform CPU time");
+    if (eventId !== undefined && groupSeenIds.has(eventId)) continue;
+    if (eventId !== undefined) groupSeenIds.add(eventId);
+    if (typeof workers.scriptVersion?.id !== "string" || typeof workers.scriptName !== "string" || typeof workers.outcome !== "string" || typeof workers.eventType !== "string" || typeof workers.executionModel !== "string" || typeof timestamp !== "number") throw new Error("Incomplete platform invocation");
+    const previousCpuId = scope.groupCpuIds.get(groupRequestId);
+    if (previousCpuId !== undefined && previousCpuId !== eventId) throw new Error("Conflicting CPU events across invocation pages");
+    scope.groupCpuIds.set(groupRequestId, eventId);
+    const routeDiscriminator = normalizedRouteOf(event);
+    const requestIds = [meta?.requestId, workers.requestId].filter((value) => typeof value === "string");
+    if (requestIds.some((value) => value !== groupRequestId)) throw new Error("Invocation request identity contradiction");
+    if (groupSeenIds.size > 1) throw new Error("Invocation group must have exactly one CPU event");
+    if (eventId !== undefined && scope.recordEventIds.has(eventId)) continue;
+    if (eventId !== undefined) scope.recordEventIds.add(eventId);
+    cpuRecord = {
+      ...(eventId === undefined ? {} : { eventId }),
+      requestId: groupRequestId,
+      eventTimestampMs: timestamp,
+      scriptName: workers.scriptName,
+      scriptVersionId: workers.scriptVersion.id,
+      cpuTimeMs: workers.cpuTimeMs,
+      outcome: workers.outcome,
+      eventType: workers.eventType,
+      routeDiscriminator,
+      executionModel: workers.executionModel,
+    };
+  }
+  if (inScopeEvents > 0 && groupSeenIds.size === 0) throw new Error("Invocation group must have exactly one CPU event");
+  return { record: cpuRecord, truncated };
 }
 
 async function queryTelemetry(options, query, fetchImpl) {
@@ -54,53 +132,125 @@ async function queryTelemetry(options, query, fetchImpl) {
   if (!response.ok) throw new Error(`Workers Observability query failed (${response.status})`);
   const body = await response.json();
   if (body?.success !== true || body.result === undefined) throw new Error("Workers Observability returned an incomplete result");
+  if (body.result.run?.status !== "COMPLETED" || !body.result.statistics
+    || (body.result.statistics.abr_level ?? 1) !== 1) throw new Error("Workers Observability returned incomplete or sampled query data");
   return body.result;
+}
+
+function validateWindows(windows) {
+  if (!Array.isArray(windows) || windows.length === 0) throw new TypeError("Windows must be a non-empty array");
+  for (const window of windows) {
+    if (!Number.isSafeInteger(window?.windowStartMs) || !Number.isSafeInteger(window?.windowEndMs) || window.windowEndMs <= window.windowStartMs) {
+      throw new TypeError("Telemetry windows must be half-open [windowStartMs, windowEndMs)");
+    }
+  }
+  for (const index in windows) {
+    const window = windows[index];
+    for (const other of windows.slice(Number(index) + 1)) {
+      if (other.windowStartMs < window.windowEndMs && window.windowStartMs < other.windowEndMs) {
+        throw new TypeError("Telemetry windows must be non-overlapping");
+      }
+    }
+  }
+  return windows;
 }
 
 export async function fetchRelayCpuTelemetry(options) {
   const env = options.env ?? process.env;
   if (!env.CLOUDFLARE_ACCOUNT_ID || !env.CLOUDFLARE_API_TOKEN) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required in environment");
+  if (options.expectedExecutionModel !== "stateless" || !options.scriptName || !options.expectedScriptVersionId) throw new TypeError("Exact stateless Worker identity required");
+  const windows = validateWindows(options.windows);
   const safeOptions = { ...options, env };
   const fetchImpl = options.fetchImpl ?? fetch;
   const allRecords = [];
   const windowMeta = [];
+  const globalEvents = new Map();
+  const recordEventIds = new Set();
+  const groupCpuIds = new Map();
   let paginationComplete = true;
   let truncationObserved = false;
-  for (const window of options.windows) {
+  for (const window of windows) {
+    const scope = { scriptName: options.scriptName, expectedScriptVersionId: options.expectedScriptVersionId, expectedExecutionModel: options.expectedExecutionModel, window, globalEvents, recordEventIds, groupCpuIds, windowEvents: new Set(), pageNewEvents: 0 };
+    const records = [];
+    const truncatedTimestamps = [];
     let offset;
-    const seen = new Set();
-    let pagesDone = false;
-    while (!pagesDone) {
+    let windowPaginationComplete = false;
+    const seenCursors = new Set();
+    for (let page = 0; page < MAX_PAGES_PER_WINDOW; page += 1) {
+      scope.pageNewEvents = 0;
       const result = await queryTelemetry(safeOptions, makeQuery(safeOptions, window, "invocations", offset), fetchImpl);
-      const records = getRecords(result);
-      const entries = Object.values(result.invocations);
-      const nextCursor = entries.flat().at(-1)?.$metadata?.id;
-      allRecords.push(...records.filter((record) => record.eventTimestampMs >= window.windowStartMs && record.eventTimestampMs < window.windowEndMs && record.scriptName === options.scriptName && record.scriptVersionId === options.expectedScriptVersionId && record.executionModel === options.expectedExecutionModel));
-      if (entries.length === 0) pagesDone = true;
-      else if (typeof nextCursor !== "string" || seen.has(nextCursor)) throw new Error("Telemetry pagination cannot be proven complete");
-      else { seen.add(nextCursor); offset = nextCursor; }
+      const groups = result?.invocations;
+      if (groups === null || typeof groups !== "object" || Array.isArray(groups)) throw new Error("Malformed invocations response");
+      const flat = Object.values(groups).flat();
+      for (const [groupRequestId, rawEvents] of Object.entries(groups)) {
+        const { record, truncated } = parseGroup(groupRequestId, rawEvents, scope);
+        if (record) records.push(record);
+        truncatedTimestamps.push(...truncated);
+      }
+      if (flat.length === 0) { windowPaginationComplete = true; break; }
+      const cursor = flat.at(-1)?.$metadata?.id;
+      if (typeof cursor !== "string" || seenCursors.has(cursor)) {
+        windowPaginationComplete = false;
+        break;
+      }
+      if (scope.pageNewEvents === 0) { windowPaginationComplete = true; break; }
+      seenCursors.add(cursor);
+      offset = cursor;
     }
+    allRecords.push(...records);
     const result = await queryTelemetry(safeOptions, makeQuery(safeOptions, window, "calculations"), fetchImpl);
-    const calc = result.calculations;
+    const calc = result?.calculations;
     const aggregate = Array.isArray(calc) ? calc : [];
-    if (aggregate.length !== 1) throw new Error("Completeness aggregate unavailable");
-    const value = aggregate[0].value;
-    const interval = aggregate[0].sampleInterval;
-    const normalized = allRecords.filter((record) => record.eventTimestampMs >= window.windowStartMs && record.eventTimestampMs < window.windowEndMs).length;
-    const countValid = Number.isSafeInteger(value) && value >= 0;
-    windowMeta.push({ ...window, paginationComplete: true, truncationObserved: false, sampleInterval: Number.isFinite(interval) ? interval : null, platformInvocationCount: countValid ? value : null });
-    if (!countValid || interval !== 1 || value !== normalized) paginationComplete = paginationComplete && countValid;
+    const values = aggregate.length === 1 && aggregate[0].alias === "platform_invocation_count" ? aggregate[0].aggregates : undefined;
+    const count = Array.isArray(values) && values.length === 1 ? values[0] : undefined;
+    const valid = Number.isSafeInteger(count?.value) && count.value >= 0;
+    const value = valid ? count.value : null;
+    const interval = Number.isFinite(count?.sampleInterval) ? count.sampleInterval : null;
+    const truncatedHere = truncatedTimestamps.filter((timestamp) => withinWindow(timestamp, window)).length > 0;
+    windowMeta.push({
+      windowStartMs: window.windowStartMs,
+      windowEndMs: window.windowEndMs,
+      paginationComplete: windowPaginationComplete,
+      truncationObserved: truncatedHere,
+      sampleInterval: interval,
+      platformInvocationCount: value,
+    });
+    paginationComplete = paginationComplete && windowPaginationComplete;
+    truncationObserved = truncationObserved || truncatedHere;
   }
-  const meta = { version: 1, samplingVerified: paginationComplete && windowMeta.every((item) => item.sampleInterval === 1 && item.platformInvocationCount !== null && item.platformInvocationCount === allRecords.filter((record) => record.eventTimestampMs >= item.windowStartMs && record.eventTimestampMs < item.windowEndMs).length), normalizedInvocationCount: allRecords.length, paginationComplete, truncationObserved, queryComplete: true, windows: windowMeta };
-  await mkdir(dirname(options.outputPath), { recursive: true, mode: 0o700 });
-  await mkdir(dirname(options.metaOutputPath), { recursive: true, mode: 0o700 });
-  await writeFile(options.outputPath, allRecords.map((record) => JSON.stringify(record)).join("\n") + (allRecords.length ? "\n" : ""), { mode: 0o600 });
-  await writeFile(options.metaOutputPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+  const normalizedCountInWindow = (window) => allRecords.filter((record) => record.eventTimestampMs >= window.windowStartMs && record.eventTimestampMs < window.windowEndMs).length;
+  const samplingVerified = paginationComplete && truncationObserved === false && windowMeta.every((window) => window.sampleInterval === 1 && window.platformInvocationCount !== null && window.platformInvocationCount === normalizedCountInWindow(window));
+  const meta = {
+    version: 1,
+    samplingVerified,
+    normalizedInvocationCount: allRecords.length,
+    paginationComplete,
+    truncationObserved,
+    queryComplete: paginationComplete && windowMeta.every((window) => window.platformInvocationCount !== null),
+    windows: windowMeta,
+  };
+  if (options.outputPath || options.metaOutputPath) await persistProtectedExports(options, allRecords, meta);
   return { records: allRecords, meta };
+}
+
+
+async function persistProtectedExports(options, allRecords, meta) {
+  if (options.outputPath) {
+    await mkdir(dirname(options.outputPath), { recursive: true, mode: 0o700 });
+    await writeFile(options.outputPath, allRecords.map((record) => JSON.stringify(record)).join("\n") + (allRecords.length ? "\n" : ""), { mode: 0o600 });
+    await chmod(options.outputPath, 0o600);
+  }
+  if (options.metaOutputPath) {
+    await mkdir(dirname(options.metaOutputPath), { recursive: true, mode: 0o700 });
+    await writeFile(options.metaOutputPath, `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+    await chmod(options.metaOutputPath, 0o600);
+  }
 }
 
 export async function runTelemetryCli(argv = process.argv.slice(2)) {
   const args = Object.fromEntries(argv.map((item) => { const [key, ...value] = item.split("="); return [key, value.join("=")]; }));
+  const allowed = new Set(["--help", "--script-name", "--script-version", "--execution-model", "--windows-json", "--out", "--meta-out"]);
+  if (Object.keys(args).some((key) => !allowed.has(key))) throw new TypeError("Unknown telemetry argument");
   if ("--help" in args) { console.log("--script-name --script-version --execution-model=stateless --windows-json --out --meta-out"); return 0; }
   for (const name of ["--script-name", "--script-version", "--execution-model", "--windows-json", "--out", "--meta-out"]) if (!args[name]) throw new TypeError(`Missing ${name}`);
   if (args["--execution-model"] !== "stateless") throw new TypeError("execution model must be stateless");
