@@ -5,6 +5,14 @@ import * as ts from "typescript";
 import { assertNoCredentialLeak } from "./relay-cpu-protection.mjs";
 
 const SECRET = "OCTG_RELAY_CPU_GATE_AUTH_TOKEN";
+const PERSISTENT_PREVIEW_SECRETS = [
+  "OCTG_KEY_PEPPER",
+  "OCTG_UPSTREAM_API_TOKEN",
+  "DENO_TOKENIZER_AUTH_TOKEN",
+  "OCTG_RELAY_SERVICE_AUTH_TOKEN",
+  "OCTG_RELAY_INGRESS_AUTH_TOKEN",
+  "OCTG_RELAY_CONTEXT_HMAC_KEY",
+];
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ROUTES = ["quota", "slot", "setup", "setup-fence", "decision-context", "operation-inspection", "reconcile-unused", "close-operation"];
 
@@ -24,10 +32,12 @@ function validateIsolation(config, production, name) {
     relay = new URL(config.vars?.OCTG_RELAY_INGRESS_ENDPOINT);
     productionRelay = production.vars?.OCTG_RELAY_INGRESS_ENDPOINT ? new URL(production.vars.OCTG_RELAY_INGRESS_ENDPOINT) : undefined;
   } catch { throw new Error("Preview resource isolation not proven"); }
-  if (!name || config.name !== name || config.name === production.name || config.vars?.OCTG_RELAY_ENVIRONMENT !== "preview"
+  if (!name || config.name !== name || config.name === production.name || config.vars?.OCTG_RELAY_ENABLED !== "true"
+    || config.vars?.OCTG_RELAY_ENVIRONMENT !== "preview"
     || !database?.database_id || productionIds.has(database.database_id) || !Array.isArray(dos) || dos.length === 0
     || dos.some((entry) => entry.namespace_id || entry.script_name || !entry.class_name)
-    || relay.protocol !== "https:" || relay.username || relay.password || relay.href === productionRelay?.href
+    || relay.protocol !== "https:" || relay.username || relay.password || relay.pathname !== "/" || relay.search || relay.hash
+    || relay.origin === productionRelay?.origin
     || Object.keys(config.vars).some((key) => /(?:AUTH_TOKEN|HMAC_KEY|KEY_PEPPER|API_KEY|API_TOKEN)$/.test(key))) {
     throw new Error("Preview resource isolation not proven");
   }
@@ -46,7 +56,9 @@ export async function createPreviewDeploymentAdapters(options) {
   validateIsolation(config, production, workerName);
   const origin = new URL(options.origin);
   if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("Invalid Preview origin");
-  const credentials = [env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN, env.OCTG_RELAY_SERVICE_AUTH_TOKEN, env.CLOUDFLARE_API_TOKEN, env.OCTG_CANARY_CLIENT_KEY].filter(Boolean);
+  const credentials = [env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN, env.OCTG_RELAY_SERVICE_AUTH_TOKEN,
+    env.OCTG_RELAY_INGRESS_AUTH_TOKEN, env.OCTG_RELAY_CONTEXT_HMAC_KEY, env.CLOUDFLARE_API_TOKEN,
+    env.OCTG_CANARY_CLIENT_KEY].filter(Boolean);
   const outputSurfaces = { config, commands: [], stdout: [], stderr: [] };
   const execute = options.commandImpl ?? (async (args) => {
     if (options.executeRemote !== true) throw new Error("Explicit deployment execution required");
@@ -86,6 +98,11 @@ export async function createPreviewDeploymentAdapters(options) {
       const previous = await version(deployed[0]?.version_id);
       for (const binding of config.durable_objects.bindings) {
         if (!previous.resources.bindings.some((entry) => entry.type === "durable_object_namespace" && entry.class_name === binding.class_name)) throw new Error("Preview migration prerequisite missing");
+      }
+      for (const name of PERSISTENT_PREVIEW_SECRETS) {
+        if (!previous.resources.bindings.some((entry) => entry.type === "secret_text" && entry.name === name)) {
+          throw new Error("Preview secret prerequisite missing");
+        }
       }
       const stdout = await command(["versions", "upload", "--strict", "--secrets-file", secretsPath]);
       const id = stdout.match(new RegExp(`Worker Version ID:\\s*(${UUID})`))?.[1];

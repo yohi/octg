@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -67,6 +70,47 @@ test("runs the CLI when the entrypoint path is relative", () => {
   assert.equal(result.error, undefined);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /usage: node scripts\/preview-worker-config\.mjs/);
+});
+
+test("Preview config CLI includes only the explicitly configured MINI CPU-gate fixture", () => {
+  const scriptPath = fileURLToPath(new URL("./preview-worker-config.mjs", import.meta.url));
+  const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+  const directory = mkdtempSync(join(tmpdir(), "preview-worker-config-"));
+  const outputPath = join(directory, "preview.jsonc");
+  try {
+    const result = spawnSync(process.execPath, [scriptPath, "apps/gateway-worker/wrangler.jsonc", outputPath, "deno"], {
+      cwd: projectRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PREVIEW_DATABASE_ID: validOptions.databaseId,
+        PREVIEW_DATABASE_NAME: validOptions.databaseName,
+        PREVIEW_WORKER_NAME: validOptions.workerName,
+        PREVIEW_UPSTREAM_BASE_URL: validOptions.upstreamBaseUrl,
+        PREVIEW_QUOTA_LIMIT_STANDARD: validOptions.standardLimit,
+        PREVIEW_QUOTA_LIMIT_MINI: validOptions.miniLimit,
+        PREVIEW_MAX_INPUT_BYTES: validOptions.maxInputBytes,
+        PREVIEW_DENO_TOKENIZER_ENDPOINT: "https://preview-tokenizer.deno.dev/tokenize",
+        PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: "1",
+        PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: "5000",
+        PREVIEW_OCTG_RELAY_ENVIRONMENT: "preview",
+        PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT: "https://preview-relay.deno.dev",
+        PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID: "preview-mini-client",
+        PREVIEW_RELAY_CPU_GATE_MINI_MODEL: "gpt-5-mini",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(readFileSync(outputPath, "utf8"));
+    assert.equal(config.vars.OCTG_RELAY_ENABLED, "true");
+    assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, "preview");
+    assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev");
+    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID, "preview-mini-client");
+    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_MODEL, "gpt-5-mini");
+    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID, undefined);
+    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_MODEL, undefined);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("builds a DO-only Preview config without Deno values", () => {
@@ -438,25 +482,27 @@ test("strips production relay vars and applies Preview relay config when provide
     },
     relay: {
       environment: "preview",
-      ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+      ingressEndpoint: "https://preview-relay.deno.dev",
     },
   });
 
-  assert.equal(config.vars.OCTG_RELAY_ENABLED, undefined);
+  assert.equal(config.vars.OCTG_RELAY_ENABLED, "true");
   assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, "preview");
-  assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev/relay/v1/responses");
+  assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev");
   assert.equal(baseConfig.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://production-relay.example/relay/v1/responses");
 });
 
 test("rejects invalid Preview relay settings", () => {
   for (const relay of [
-    { environment: "staging", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
-    { environment: "production", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
-    { environment: "preview", ingressEndpoint: "https://production-relay.example/relay/v1/responses" },
-    { environment: "preview", ingressEndpoint: "https://production-relay.example:443/relay/v1/responses" },
-    { environment: "preview", ingressEndpoint: "http://preview-relay.deno.dev/relay/v1/responses" },
-    { environment: "preview", ingressEndpoint: "https://user:pass@preview-relay.deno.dev/relay/v1/responses" },
-    { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses/" },
+    { environment: "staging", ingressEndpoint: "https://preview-relay.deno.dev" },
+    { environment: "production", ingressEndpoint: "https://preview-relay.deno.dev" },
+    { environment: "preview", ingressEndpoint: "https://production-relay.example" },
+    { environment: "preview", ingressEndpoint: "https://production-relay.example:443" },
+    { environment: "preview", ingressEndpoint: "http://preview-relay.deno.dev" },
+    { environment: "preview", ingressEndpoint: "https://user:pass@preview-relay.deno.dev" },
+    { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses" },
+    { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev?route=relay" },
+    { environment: "preview", ingressEndpoint: "https://preview-relay.deno.dev/#relay" },
   ]) {
     assert.throws(
       () => buildPreviewWorkerConfig(baseConfig, { ...validOptions, relay }),
@@ -469,8 +515,8 @@ test("adds Preview-local CPU-gate fixture identifiers without inheriting Product
   const config = buildPreviewWorkerConfig(baseConfig, {
     ...validOptions,
     relay: {
-      environment: "preview",
-      ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+    environment: "preview",
+      ingressEndpoint: "https://preview-relay.deno.dev",
       cpuGateFixtures: {
         standardClientId: "preview-standard-client",
         standardModel: "preview-standard-model",
@@ -494,6 +540,6 @@ test("rejects secret CPU-gate values in Preview vars", () => {
     vars: { ...baseConfig.vars, OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "secret-value" },
   }, { ...validOptions, relay: {
     environment: "preview",
-    ingressEndpoint: "https://preview-relay.deno.dev/relay/v1/responses",
+    ingressEndpoint: "https://preview-relay.deno.dev",
   } }), /secret/i);
 });

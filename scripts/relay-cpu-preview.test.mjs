@@ -18,19 +18,27 @@ function previewAdapters(events) {
   };
 }
 
-test("Preview uses a real protected secrets file, authenticates before measurement and deploys the deletion-produced version", async () => {
+test("Preview uploads only the ephemeral bearer and deploys the deletion-produced version", async () => {
   const events = [];
   const adapters = previewAdapters(events);
   let path;
+  const relaySecrets = {
+    OCTG_RELAY_SERVICE_AUTH_TOKEN: "synthetic-preview-service-token",
+    OCTG_RELAY_INGRESS_AUTH_TOKEN: "synthetic-preview-ingress-token",
+    OCTG_RELAY_CONTEXT_HMAC_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  };
   adapters.uploadCandidate = async ({ secretsPath }) => {
     path = secretsPath;
     assert.equal((await stat(path)).mode & 0o777, 0o600);
     assert.equal((await stat(new URL(".", `file://${path}`))).mode & 0o777, 0o700);
-    assert.equal(JSON.parse(await readFile(path, "utf8")).OCTG_RELAY_CPU_GATE_AUTH_TOKEN, "synthetic-gate");
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+      OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "synthetic-gate",
+    });
     events.push("upload"); return { versionId: "candidate" };
   };
-  const result = await runPreviewLifecycle({ bearer: "synthetic-gate", adapters });
+  const result = await runPreviewLifecycle({ bearer: "synthetic-gate", relaySecrets, adapters });
   assert.equal(result.kind, "complete");
+  assert.equal(result.cleanupVerified, true);
   assert.deepEqual(events, ["upload", "deploy", "preflight", "measure", "close", "delete", "traffic", "404"]);
   await assert.rejects(access(path));
 });
@@ -41,6 +49,7 @@ test("failed preflight still closes operations and tears down its uploaded secre
   adapters.preflight = async () => { events.push("preflight"); return { ready: false }; };
   const result = await runPreviewLifecycle({ bearer: "synthetic-gate", adapters });
   assert.equal(result.kind, "blocked");
+  assert.equal(result.cleanupVerified, true);
   assert.deepEqual(events, ["upload", "deploy", "preflight", "close", "delete", "traffic", "404"]);
   assert.equal(result.versionId, "candidate");
 });
@@ -51,6 +60,7 @@ test("unproven operation closure retains the secret binding for recovery and rep
   adapters.beforeTeardown = async () => { events.push("close"); return { closed: false }; };
   const result = await runPreviewLifecycle({ bearer: "synthetic-gate", adapters });
   assert.equal(result.kind, "blocked");
+  assert.equal(result.cleanupVerified, false);
   assert.equal(result.versionId, "candidate");
   assert.equal(events.includes("delete"), false);
   assert.equal(JSON.stringify(result).includes("synthetic-gate"), false);

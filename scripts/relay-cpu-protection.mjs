@@ -6,11 +6,15 @@ import { join } from "node:path";
 export function generateCpuGateBearer() { return randomBytes(32).toString("base64url"); }
 
 export async function withPreviewSecretsFile({ token, directoryParent = tmpdir(), upload }) {
+  if (typeof token !== "string" || token.length === 0) {
+    throw new TypeError("Invalid Preview secret bundle");
+  }
   const directory = await mkdtemp(join(directoryParent, "octg-preview-cpu-gate-"));
   try {
     await chmod(directory, 0o700);
     const secretsPath = join(directory, "secrets.json");
-    await writeFile(secretsPath, JSON.stringify({ OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token }), { mode: 0o600 });
+    const secrets = { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token };
+    await writeFile(secretsPath, JSON.stringify(secrets), { mode: 0o600 });
     return await upload(secretsPath);
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

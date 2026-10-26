@@ -30,7 +30,8 @@ export async function executeCpuGateCli(argv, env, io) {
         pool: pairs["--pool"], model: pairs["--model"], journalPath: pairs["--journal"], ledgerPath: pairs["--ledger"],
         sourceRevision: pairs["--source-revision"], configPath: pairs["--preview-config"], executeRemote: true,
         fetchImpl: io.fetchImpl, commandImpl: io.commandImpl, runGate: io.runGate, signal: controller.signal });
-      writeSummary(JSON.stringify({ status: result.status, versionId: result.versionId, secretlessVersion: result.secretlessVersion, callCount: result.ledger?.calls.length ?? 0 }));
+      writeSummary(JSON.stringify({ status: result.status, cleanupVerified: result.cleanupVerified,
+        versionId: result.versionId, secretlessVersion: result.secretlessVersion, callCount: result.ledger?.calls.length ?? 0 }));
       return result.status === "PASS" ? 0 : 2;
     }
     const adapters = createRelayCpuHttpAdapters({ origin: pairs["--origin"], workerName: pairs["--worker-name"],

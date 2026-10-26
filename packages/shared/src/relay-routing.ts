@@ -7,6 +7,8 @@ const FNV_PRIME = 16777619;
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_ULID_TIMESTAMP = 281_474_976_710_655;
 
+export const RELAY_INGRESS_ROUTE = "/relay/v1/responses";
+
 export function relayShardIndex(requestId: string): string {
   let hash = FNV_OFFSET_BASIS;
   for (let index = 0; index < requestId.length; index += 1) {

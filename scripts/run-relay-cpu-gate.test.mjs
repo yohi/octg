@@ -81,17 +81,23 @@ test("blocks Stage 2 setup when the shared singleton is busy", async () => {
   assert.equal(setupCalled, false);
 });
 
-test("generates fresh base64url bearer and securely cleans Preview secret material", async () => {
+test("generates fresh base64url bearer and securely cleans only per-run Preview secret material", async () => {
   const token = generateCpuGateBearer();
   assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+  const relaySecrets = {
+    OCTG_RELAY_SERVICE_AUTH_TOKEN: "synthetic-preview-service-token",
+    OCTG_RELAY_INGRESS_AUTH_TOKEN: "synthetic-preview-ingress-token",
+    OCTG_RELAY_CONTEXT_HMAC_KEY: "synthetic-preview-hmac-key",
+  };
   let observedMode;
   let observedDirectoryMode;
   let observedPath;
-  await withPreviewSecretsFile({ token, directoryParent: "/tmp", upload: async (path) => {
+  await withPreviewSecretsFile({ token, relaySecrets, directoryParent: "/tmp", upload: async (path) => {
     const { statSync } = await import("node:fs");
     observedPath = path;
     observedMode = statSync(path).mode & 0o777;
     observedDirectoryMode = statSync(path.slice(0, path.lastIndexOf("/"))).mode & 0o777;
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token });
   } });
   const { existsSync } = await import("node:fs");
   assert.equal(observedMode, 0o600);

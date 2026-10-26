@@ -4,6 +4,7 @@ export async function runPreviewLifecycle({ bearer, adapters }) {
   let candidateVersion;
   let secretlessVersion;
   let failed = false;
+  let cleanupVerified = false;
   try {
     await withPreviewSecretsFile({ token: bearer, upload: async (secretsPath) => {
       try {
@@ -30,11 +31,12 @@ export async function runPreviewLifecycle({ bearer, adapters }) {
             const metadata = await adapters.verifyMetadata({ versionId: secretlessVersion, candidateVersionId: candidateVersion });
             if (metadata?.secretAbsent !== true || metadata.bindingsUnchanged !== true || metadata.deployedPercent !== 100) throw new Error("Secretless deployment not proven");
             if ((await adapters.verifyExactVersion({ versionId: secretlessVersion }))?.status !== 404) throw new Error("Control surface still enabled");
+            cleanupVerified = true;
           } catch { failed = true; }
         }
       }
     } });
   } catch { failed = true; }
   return { kind: failed ? "blocked" : "complete", ...(candidateVersion ? { versionId: candidateVersion } : {}),
-    ...(secretlessVersion ? { secretlessVersion } : {}) };
+    ...(secretlessVersion ? { secretlessVersion } : {}), cleanupVerified };
 }

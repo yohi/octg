@@ -28,6 +28,7 @@ import {
   parseRelayDecision,
   parseRelayJsonBody,
   parseRelayRenewalResponse,
+  RELAY_INGRESS_ROUTE,
   toPoolLower,
 } from "@octg/shared";
 import type {
@@ -56,7 +57,7 @@ import {
   type RelayGrantSession,
 } from "./relay-usage.ts";
 
-export const RELAY_INGRESS_ROUTE = "/relay/v1/responses";
+export { RELAY_INGRESS_ROUTE };
 
 const contextHeader = "x-octg-relay-context";
 const grantHeader = "x-octg-relay-grant";
