@@ -81,7 +81,7 @@ test("queries invocations and completeness with Bearer env auth and writes prote
   }
 });
 
-test("repeated non-empty pagination cursors cannot prove complete retrieval", async () => {
+test("a repeated pagination page with zero new event IDs proves completion", async () => {
   const pages = [
     invocationsResult([[cpuEvent({ $metadata: { id: "cursor-1", eventTimestampMs: 120, url: "https://host/v1/responses" } })]]),
     invocationsResult([[cpuEvent({ $metadata: { id: "cursor-2", eventTimestampMs: 130, url: "https://host/v1/responses" } })]]),
@@ -92,8 +92,8 @@ test("repeated non-empty pagination cursors cannot prove complete retrieval", as
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body);
       if (body.queryId.endsWith("invocations-v1")) {
-        // A server re-serving the same event on a repeated cursor page must
-        // stop only on zero NEW event ids.
+        // The final page can overlap a previous page. Completeness is proven by
+        // the zero-new-event condition, even when its cursor repeats.
         return Response.json(pages.shift() ?? invocationsResult([]));
       }
       calculationsQueries += 1;
@@ -101,8 +101,8 @@ test("repeated non-empty pagination cursors cannot prove complete retrieval", as
     },
   }));
   assert.equal(calculationsQueries, 1);
-  assert.equal(result.meta.paginationComplete, false);
-  assert.equal(result.meta.samplingVerified, false);
+  assert.equal(result.meta.paginationComplete, true);
+  assert.equal(result.meta.samplingVerified, true);
   assert.equal(result.meta.normalizedInvocationCount, 2);
 });
 

@@ -29,13 +29,133 @@ Self-contradiction scan: each task's own text agrees with itself. No plan-mandat
 - [x] Task 3: Add QuotaController CPU-gate inspection, fence, and global slot RPCs — commits `fb02371`, `7a10d48` — ✅ reviewed & approved after fix round 1
 - [x] Task 4: Implement the protected Worker CPU-gate control plane and safe relay markers — commits `2718c60`, `d806d4b` — ✅ reviewed & approved with minor deferrals
 - [x] Task 5: Build canonical CPU workload, telemetry acquisition, and evidence tooling — commits `f42c055`, `f08492b`, `6a41e43`, completed with commit `eba0193` — the independent P2 identity-consistency finding is fixed and its repair passed a fresh five-lane review (requirements, QA, code quality, security and context). Post-commit `npm test`: 1,605 passed; `npm run typecheck` passed. Focused independent QA: 247 passed; CLI help and execution guard behaved as expected. Live Task 6 evidence remains separate. See the latest checkpoint in `task-5-report.md`.
-- [ ] Task 6: Attribute the Production recurrence and execute the Stage 1 gate
+- [ ] Task 6: Attribute the Production recurrence and execute the Stage 1 gate — Production source SHA attributed to `8ab973066a7e97c1ec9b759e08f8f70930137bcd`; read-only Observability found three `/v1/responses` `exceededCpu` events, but retrieval is sampled (`sampleInterval≈10.69`) and diagnostic only. Preview URL/upstream/quota Variables are now verified, and Preview Worker/D1/DO isolation checks pass. Stage 1 remains BLOCKED under read-only access: the deployed Preview Worker lacks the `OCTG_RELAY_SERVICE_AUTH_TOKEN` secret binding and the credential-broker writable operation/approval is unavailable. No Worker deploy/Secret/traffic mutation or Stage 1 candidate execution occurred; no Phase 2 branch selected.
 - [ ] Task 7 (conditional): Implement RelayGrantLifecycleController contract and trust-processing DO
 - [ ] Task 8 (conditional): Move lifecycle callbacks behind the DO and synchronize Preview routing
 - [ ] Task 9: Generate and verify the Durable Object compatibility manifest
 - [ ] Task 10: Implement exact Production version configuration and bridge/candidate/hardening rollout tooling
 - [ ] Task 11: Synchronize operations documentation and run the complete local verification gate
 - [ ] Task 12 (authorized remote): Stage 2 / acceptance / promotion / hardening evidence
+
+## Task 6 prerequisite checkpoint
+
+- Implementation baseline at task start: `8f314e2d0d92f975bfdfdba3ea4a7fad13404f74`;
+  the feature worktree was clean. This identifies the inspected baseline, not a
+  live measurement or final candidate version.
+- Read Task 6's exact steps: Production recurrence attribution, isolated Preview
+  provisioning/preflight/measurement/cleanup, per-series authoritative telemetry,
+  and reducer results for all required series.
+- The task requires exact registered resources and an allow-listed credential
+  broker operation. No credential-broker capability is exposed by the connected
+  tool catalog. Registration, bounded write approval and credential issuance
+  cannot be inferred from a generic instruction to continue the plan.
+- Read-only GitHub Actions metadata inspection found repository Variables for
+  `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_PREVIEW_ACCOUNT_ID`, and Preview
+  environment Variables for the account ID, Preview base URL, D1 ID, input limit
+  and MINI quota. Required Preview workflow values `OCTG_PREVIEW_UPSTREAM_BASE_URL`
+  and `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD` were not present in the inspected
+  repository/Preview Variable-name lists. GitHub Secret names exist for Preview
+  Cloudflare and fixture credentials, but GitHub does not expose their values
+  through the API; no values were requested or read.
+- Initially, the two Preview variables were absent from the listed names. After
+  the operator said they were registered, read-only per-variable GETs confirmed
+  the Preview Environment values exactly match the supplied
+  `OCTG_PREVIEW_UPSTREAM_BASE_URL` and `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0`.
+  No source-SHA or deploy-commit Variable exists in repository or Preview scopes.
+- `gh run list --workflow 'Deploy Production'` omits reusable-workflow jobs, so
+  its standalone listing was incomplete. Full Actions run `37100239733`
+  (`Deploy Deno Tokenizer`) at `2026-10-03T05:34:09Z` had head SHA
+  `8ab973066a7e97c1ec9b759e08f8f70930137bcd` and includes a successful reusable
+  `Deploy Production / test-and-deploy` job. Master alignment passed; `Deploy
+  Worker` ran `05:37:08Z`–`05:37:15Z`, enclosing Cloudflare Version 145 creation
+  at `05:37:12.819547Z`. This attributes Version 145 to source SHA
+  `8ab973066a7e97c1ec9b759e08f8f70930137bcd`. The commit changes
+  `packages/shared/src/normalize.ts` and its test.
+- Operator supplied `OCTG_PREVIEW_BASE_URL`, `OCTG_PREVIEW_UPSTREAM_BASE_URL`,
+  `OCTG_PREVIEW_QUOTA_LIMIT_STANDARD=0`, Worker name `octg-gateway`, and
+  clarified that `2e874b06` is a Worker Version ID. Read-only Cloudflare MCP
+  Portal lookup verified the full version ID `2e874b06-f51b-4fc5-94ba-a5e19f2127d3`,
+  version number 145, created `2026-10-03T05:37:12.819547Z`, source `wrangler`.
+  The Preview Environment variable values were separately confirmed to match the
+  upstream URL and quota. Worker `octg-gateway-preview` also exists in the
+  authenticated Cloudflare account.
+- Following the explicit request to run the read-only Portal query, Production
+  Observability for this Worker version was queried for
+  `[2026-10-18T00:00:00Z, 2026-10-25T00:00:00Z)`. The query completed and found
+  three `exceededCpu` invocation events, all `POST /v1/responses`, at
+  `2026-10-18T21:05:31.712Z`, `2026-10-20T07:24:59.463Z`, and
+  `2026-10-21T18:31:05.998Z`; reported CPU times were 10, 17 and 10 ms. Trace
+  correlation found a `prepare` finish (`success`, Deno provider, 1264 ms) then
+  `upstream` start for the 2026-10-20 event. The other two returned partial
+  stage sequences; missing events are not proof a stage did not occur.
+- Completeness companion query completed but returned
+  `sampleInterval=10.687022900763358` and estimated count 2,800 for 213 sampled
+  unique requests. Invocation query `abr_level=100`; companion calculation
+  `abr_level=10`; per-trace event queries `abr_level=1`. Query-level ABR values
+  do not override the calculation's sample interval. Production data is therefore
+  sampled/incomplete and diagnostic only, not complete Stage 1/acceptance evidence.
+- Three follow-up 10-minute completeness queries around the individual failures
+  were rejected by the Observability MCP response validator because returned
+  `calculations[].series[].data[].value` fields were strings where its schema
+  requires numbers. These connector errors are not empty-data results and are not
+  used as evidence. Do not repeat the same connector query shape; use the Cloudflare
+  API executor after re-authentication or the Task 5 acquisition CLI instead.
+- User-run Task 5 CLI with 10-minute windows failed closed with
+  `Invocation group must have exactly one CPU event`. Direct read-only API
+  diagnostics show the 2026-10-18 10-minute window included two in-scope invocation
+  groups without a CPU event (at 21:03:15Z and 21:04:18Z), before the known failure.
+  Three 1-minute windows centered on the observed failures each returned COMPLETED,
+  `abr_level=1`, `sampleInterval=1`, exactly one CPU event per group, no missing IDs,
+  scope, timestamps or routes, no request-ID contradictions, and no truncation.
+  The 1-minute windows contain 7 `exceededCpu` events total, all on `POST /v1/responses`: 10-18 21:05:27.976Z (215 ms), 21:05:30.148Z (10 ms), 21:05:31.712Z (10 ms); 10-20 07:24:59.463Z (17 ms), 07:25:01.347Z (10 ms); 10-21 18:31:01.492Z (605 ms), 18:31:05.998Z (10 ms).
+- User then ran the local CLI with those 1-minute windows: 7 records normalized,
+  `samplingVerified=false`. The protected metadata showed `paginationComplete=false`
+  for all three windows despite sampleInterval 1 and exact platform/normalized count.
+  A direct read-only pagination probe found Cloudflare page 2 returned 9 repeated
+  event IDs and the same cursor, with zero new IDs. The CLI checked repeated cursor
+  before its zero-new-event completion condition, incorrectly marking complete data
+  incomplete.
+- Added regression coverage; it failed before the fix and passed after moving the
+  zero-new-event check before repeated-cursor rejection. `node --test
+  scripts/relay-cpu-telemetry.test.mjs`: 23 passed. Full `npm test`: 1,605 passed;
+  `npm run typecheck`: passed; `git diff --check`: passed. The user reran the
+  protected CLI after the fix: `normalizedInvocationCount=7`,
+  `samplingVerified=true`; metadata confirms all three windows pagination-complete,
+  sampleInterval 1, no truncation, and exact platform/normalized counts 3/2/2.
+- Read-only Worker settings report `usage_model=standard` and no explicit CPU
+  `limits`. Version metadata has `source=wrangler` and no source revision
+  annotation. The exact Git SHA is attributable via GitHub Actions: run
+  `37100239733` (`Deploy Deno Tokenizer`) had `headSha=8ab973066a7e97c1ec9b759e08f8f70930137bcd`;
+  its reusable `Deploy Production / test-and-deploy` job completed successfully,
+  the master-alignment step passed, and its `Deploy Worker` step ran
+  `2026-10-03T05:37:08Z`–`05:37:15Z`, enclosing Version 145 creation at
+  `05:37:12.819547Z`. Thus this Worker version was deployed from source SHA
+  `8ab973066a7e97c1ec9b759e08f8f70930137bcd`. No version code or Secret was fetched.
+- The 2026-10-04 Preview Smoke run completed `version-smoke`, including isolated
+  config preparation, D1/DO migrations, candidate upload, smoke, and traffic
+  restoration. Current Preview upstream URL and STANDARD quota match the
+  read-only GitHub Environment Variable GETs.
+- Read-only Cloudflare settings checks confirm Production is `production`, Preview
+  is `preview`, D1 IDs differ, and no Durable Object namespace IDs are shared.
+  The existing Preview Worker does not have an `OCTG_RELAY_SERVICE_AUTH_TOKEN`
+  secret binding (only binding presence was checked; no values were read). Task 5's
+  Stage 1 HTTP adapter requires this service token to call Preview relay lifecycle
+  routes, but its current secrets-file helper uploads only the per-run CPU-gate
+  bearer. A reviewed provisioning change is needed to inject a Preview-only service
+  token through the approved broker path before Stage 1 can pass.
+- Cloudflare API re-authentication completed. A read-only deployment GET confirms
+  Version 145 (`2e874b06-f51b-4fc5-94ba-a5e19f2127d3`) was deployed at
+  `2026-10-03T05:37:14.134339Z`, source `wrangler`, with 100% traffic. Its record
+  has no Git SHA annotation; SHA attribution is from the successful, master-aligned
+  GitHub Actions deploy job. No writes were performed.
+- Still needed: registered credential-broker environment/operation and scope-bound
+  writable approval to provision a Preview-only service token, upload/deploy the
+  candidate and gate token, run synthetic fixture calls, delete the versioned
+  Secret, and restore the secretless version to 100%. Do not send credential
+  values in chat.
+- Task 7/8 remain conditional on actual Stage 1 results: lifecycle FAIL selects
+  them, ingress/decision FAIL requires separate remediation, and BLOCKED evidence
+  does not select a branch. No acceptance claim is made.
 
 ## Deferred minor findings (for final whole-branch review)
 

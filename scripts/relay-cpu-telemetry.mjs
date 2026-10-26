@@ -188,12 +188,12 @@ export async function fetchRelayCpuTelemetry(options) {
         truncatedTimestamps.push(...truncated);
       }
       if (flat.length === 0) { windowPaginationComplete = true; break; }
+      if (scope.pageNewEvents === 0) { windowPaginationComplete = true; break; }
       const cursor = flat.at(-1)?.$metadata?.id;
       if (typeof cursor !== "string" || seenCursors.has(cursor)) {
         windowPaginationComplete = false;
         break;
       }
-      if (scope.pageNewEvents === 0) { windowPaginationComplete = true; break; }
       seenCursors.add(cursor);
       offset = cursor;
     }
