@@ -111,20 +111,28 @@ function correlatedAssignments(records, windows, expected) {
 }
 
 export function evaluateCpuSeries(records, metadata, expected) {
-  if (!Array.isArray(records) || records.some((record) => !record || !Number.isFinite(record.cpuTimeMs)
+  if (!Array.isArray(records)) {
+    return { status: "BLOCKED", reason: "invalid normalized platform records" };
+  }
+  const routes = SERIES_ROUTES[expected?.invocationClass];
+  const siblingRoutes = new Set(Object.values(SERIES_ROUTES).flat().filter((route) => !routes?.includes(route)));
+  if (records.some((record) => !record || !Number.isFinite(record.cpuTimeMs)
     || record.cpuTimeMs < 0 || !Number.isSafeInteger(record.eventTimestampMs)
     || !isNonEmptyString(record.eventId) || !isNonEmptyString(record.requestId)
-    || !isMeasurementId(record.measurementId)
+    || (!isMeasurementId(record.measurementId) && !siblingRoutes.has(record.routeDiscriminator))
     || !isNonEmptyString(record.outcome) || !isNonEmptyString(record.eventType))
-    || new Set(records.map((record) => record.eventId)).size !== records.length
-    || new Set(records.map((record) => record.measurementId)).size !== records.length) {
+    || new Set(records.map((record) => record.eventId)).size !== records.length) {
+    return { status: "BLOCKED", reason: "invalid normalized platform records" };
+  }
+  const targetRecords = records.filter((record) => routes?.includes(record.routeDiscriminator));
+  if (targetRecords.some((record) => !isMeasurementId(record.measurementId))
+    || new Set(targetRecords.map((record) => record.measurementId)).size !== targetRecords.length) {
     return { status: "BLOCKED", reason: "invalid normalized platform records" };
   }
   const windows = metadata?.windows ?? [];
   if (windows.some((window, index) => windows.slice(index + 1).some((other) => window.windowStartMs < other.windowEndMs && other.windowStartMs < window.windowEndMs))) {
     return { status: "BLOCKED", reason: "overlapping windows" };
   }
-  const routes = SERIES_ROUTES[expected?.invocationClass];
   if (routes === undefined) return { status: "BLOCKED", reason: "ambiguous invocation route" };
   const identityError = seriesIdentityError(expected);
   if (identityError !== undefined) return { status: "BLOCKED", reason: identityError };
@@ -132,16 +140,21 @@ export function evaluateCpuSeries(records, metadata, expected) {
   if (ledgerError !== undefined) return { status: "BLOCKED", reason: ledgerError };
   if (!exactWindowIdentity(expected.windows, windows)) return { status: "BLOCKED", reason: "telemetry window identity mismatch" };
 
+  const expectedScope = (record) => record.scriptVersionId === expected.candidateScriptVersion
+    && record.scriptName === expected.scriptName
+    && record.executionModel === "stateless"
+    && windows.some((window) => withinWindow(record, window));
+  const unknownRoute = records.some((record) => !routes.includes(record.routeDiscriminator)
+    && !siblingRoutes.has(record.routeDiscriminator));
+  if (unknownRoute || records.some((record) => !expectedScope(record))) {
+    return { status: "BLOCKED", reason: "telemetry record outside the expected series scope" };
+  }
   const inScope = (records ?? []).filter((record) =>
     record.scriptVersionId === expected.candidateScriptVersion
     && record.scriptName === expected.scriptName
     && record.executionModel === "stateless"
     && routes.includes(record.routeDiscriminator)
     && windows.some((window) => withinWindow(record, window)));
-  if (inScope.length !== (records ?? []).length) {
-    return { status: "BLOCKED", reason: "telemetry record outside the expected series scope" };
-  }
-
   const distribution = cpuDistribution(inScope);
   const cpuViolation = inScope.some((record) => record.outcome === "exceededCpu")
     || distribution.max > CPU_GATE.maxMs || distribution.p99 > CPU_GATE.p99MaxMs;
@@ -169,7 +182,7 @@ export function evaluateCpuSeries(records, metadata, expected) {
 
   const windowCountMatch = windows.every((window) => {
     return Number.isSafeInteger(window.platformInvocationCount) && window.platformInvocationCount >= 0
-      && inScope.filter((record) => withinWindow(record, window)).length === window.platformInvocationCount;
+      && records.filter((record) => withinWindow(record, window)).length === window.platformInvocationCount;
   });
   const windowsComplete = windows.every((window) => window.paginationComplete === true && window.truncationObserved === false
     && window.sampleInterval === 1 && Number.isSafeInteger(window.platformInvocationCount) && window.platformInvocationCount >= 0);
@@ -180,9 +193,9 @@ export function evaluateCpuSeries(records, metadata, expected) {
     && metadata?.truncationObserved === false
     && windowsComplete
     && windowCountMatch
-    && platformTotal === inScope.length
+    && platformTotal === records.length
     && metadata?.normalizedInvocationCount === records?.length
-    && metadata?.normalizedInvocationCount === assigned.length
+    && targetRecords.length === assigned.length
     && assigned.length === expected.expectedSuccessfulInvocations
     && (expected.calls ?? []).length === assigned.length;
   if (!complete) {

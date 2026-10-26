@@ -99,7 +99,7 @@ test("blocks a complete multi-window series below the minimum 500 successes", ()
   assert.equal(result.status, "BLOCKED");
 });
 
-test("blocks an in-scope callback record whose measurement correlation ID is missing", () => {
+test("blocks a target-series record whose measurement correlation ID is missing", () => {
   const records = baseRecords();
   delete records[0].measurementId;
 
@@ -276,6 +276,37 @@ function completeSeries() {
 test("passes 500 successes across disjoint windows with exact measurement IDs", () => {
   const { records, metadata, expected } = completeSeries();
   assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
+});
+
+test("ignores an ID-less callback from another route when evaluating a complete ingress series", () => {
+  const { records, metadata, expected } = completeSeries();
+  const callbackEvent = callRecord({
+    eventId: "callback-event",
+    measurementId: undefined,
+    eventTimestampMs: 150,
+    routeDiscriminator: "/internal/relay/v1/activation",
+  });
+  records.push(callbackEvent);
+  metadata.normalizedInvocationCount += 1;
+  metadata.windows[0].platformInvocationCount += 1;
+
+  assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
+});
+
+test("blocks an ID-less callback when that callback route is the target series", () => {
+  const { records, metadata, expected } = completeSeries();
+  expected.invocationClass = "activation_normal";
+  expected.calls = expected.calls.map((call) => ({
+    ...call,
+    invocationClass: "activation_normal",
+    routeDiscriminator: "/internal/relay/v1/activation",
+  }));
+  records.forEach((record) => { record.routeDiscriminator = "/internal/relay/v1/activation"; });
+  delete records[0].measurementId;
+
+  const result = evaluateCpuSeries(records, metadata, expected);
+
+  assert.deepEqual(result, { status: "BLOCKED", reason: "invalid normalized platform records" });
 });
 
 test("blocks a same-route telemetry event substituted for a missing measurement call", () => {
