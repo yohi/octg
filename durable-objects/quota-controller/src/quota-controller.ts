@@ -361,7 +361,7 @@ export class QuotaController extends DurableObject<QuotaControllerEnv> {
     return getRelayCpuGateGrantInspection(this.ctx.storage, this.env, identity, requestId, Date.now());
   }
 
-  async fenceRelayCpuGateSetup(requestId: string): Promise<RelayCpuGateFenceResult> {
+  fenceRelayCpuGateSetup(requestId: string): Promise<RelayCpuGateFenceResult> {
     const identity = this.assertQuotaIdentity();
     if (!RELAY_REQUEST_ID_PATTERN.test(requestId)) throw new TypeError("CPU-gate request ID is invalid.");
     return this.ctx.storage.transaction((storage) =>

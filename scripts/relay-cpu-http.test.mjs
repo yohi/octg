@@ -25,7 +25,7 @@ test("decision grant references remain in memory for authenticated terminal clea
   const calls = [];
   const adapters = createRelayCpuHttpAdapters({ ...options, env, fetchImpl: async (url, init) => {
     calls.push({ url: String(url), init });
-    return String(url).endsWith("decision")
+    return new URL(url).pathname.endsWith("decision")
       ? Response.json({ version: 1, kind: "allow", grantId: "grant-id", leaseGeneration: "lease" }, { headers: { "X-OCTG-Relay-Grant": "opaque-grant", "X-OCTG-Worker-Version": "candidate" } })
       : Response.json({ version: 1, accepted: true, state: "released", code: null }, { headers: { "X-OCTG-Worker-Version": "candidate" } });
   } });
@@ -50,7 +50,30 @@ test("ingress uses only client authorization and discards the response body", as
     return new Response("synthetic body", { headers: { "X-OCTG-Worker-Version": "candidate" } });
   } });
   const response = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", workload: { input: "synthetic" } });
-  assert.deepEqual(response, { status: 200, scriptVersionId: "candidate", outcome: "completed" });
+  assert.equal(response.status, 200);
+  assert.equal(response.scriptVersionId, "candidate");
+  assert.equal(response.outcome, "completed");
+  assert.match(response.measurementId, /^[0-9a-f-]{36}$/);
+});
+
+test("measured HTTP attempts carry a unique non-secret telemetry correlation ID", async () => {
+  const urls = [];
+  const adapters = createRelayCpuHttpAdapters({ ...options, env, fetchImpl: async (url, init) => {
+    urls.push(new URL(url));
+    assert.equal(init.headers.Authorization, "Bearer client-token");
+    assert.equal(String(init.body).includes(urls.at(-1).searchParams.get("octg_cpu_gate_measurement_id")), false);
+    return new Response("synthetic body", { headers: { "X-OCTG-Worker-Version": "candidate" } });
+  } });
+  const first = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-1", workload: { input: "synthetic" } });
+  const second = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-2", workload: { input: "synthetic" } });
+  const firstId = urls[0].searchParams.get("octg_cpu_gate_measurement_id");
+  const secondId = urls[1].searchParams.get("octg_cpu_gate_measurement_id");
+
+  assert.match(firstId, /^[0-9a-f-]{36}$/);
+  assert.match(secondId, /^[0-9a-f-]{36}$/);
+  assert.notEqual(firstId, secondId);
+  assert.equal(first.measurementId, firstId);
+  assert.equal(second.measurementId, secondId);
 });
 
 test("unsafe origins, reused credentials and upstream errors fail without credential details", async () => {

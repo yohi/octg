@@ -11,8 +11,17 @@ export const RELAY_INGRESS_ROUTE = "/relay/v1/responses";
 
 export function relayShardIndex(requestId: string): string {
   let hash = FNV_OFFSET_BASIS;
-  for (let index = 0; index < requestId.length; index += 1) {
-    hash = Math.imul(hash ^ requestId.charCodeAt(index), FNV_PRIME) >>> 0;
+  for (const character of requestId) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined) continue;
+    if (codePoint > 0xffff) {
+      // Preserve the shard contract, which hashes each UTF-16 code unit.
+      const scalar = codePoint - 0x10000;
+      hash = Math.imul(hash ^ (0xd800 + (scalar >> 10)), FNV_PRIME) >>> 0;
+      hash = Math.imul(hash ^ (0xdc00 + (scalar & 0x3ff)), FNV_PRIME) >>> 0;
+    } else {
+      hash = Math.imul(hash ^ codePoint, FNV_PRIME) >>> 0;
+    }
   }
   return String(hash & SHARD_MASK).padStart(2, "0");
 }

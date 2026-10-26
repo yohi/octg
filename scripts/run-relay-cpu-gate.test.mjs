@@ -66,6 +66,19 @@ test("executes exactly 500 successful callbacks for an injected series", async (
   assert.equal(result.ledger.calls.length, 500);
 });
 
+test("persists the measurement correlation ID returned by each HTTP callback", async () => {
+  const result = await runRelayCpuGate({ mode: "stage1", adapters: {
+    series: [{ invocationClass: "ingress", workloadClass: "baseline-small", concurrency: 1 }],
+    workerName: "candidate",
+    candidateVersionId: "version-1",
+    sampleCount: 1,
+    callback: async () => ({ status: 200, measurementId: "measurement-id-1", scriptVersionId: "version-1" }),
+  } });
+
+  assert.equal(result.status, "PASS");
+  assert.equal(result.ledger.calls[0].measurementId, "measurement-id-1");
+});
+
 test("blocks Stage 2 setup when the shared singleton is busy", async () => {
   let setupCalled = false;
   const result = await runRelayCpuGate({

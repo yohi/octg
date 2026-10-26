@@ -16,6 +16,13 @@ describe("relay routing", () => {
     expect(relayShardIndex("req_01ARZ3NDEKTSV4RRFFQ69G5FCV")).toMatch(/^\d{2}$/);
   });
 
+  it("preserves the UTF-16 shard assignment for supplementary Unicode IDs", () => {
+    // Given: a client identifier containing a supplementary Unicode character.
+    // When: its stable FNV shard is calculated.
+    // Then: both UTF-16 code units retain the existing shard contract.
+    expect(relayShardIndex("client-😀-id")).toBe("54");
+  });
+
   it("uses separate exact decision and lifecycle shard names", () => {
     // Given: a request routed in each relay environment.
     // When: names are generated for both controller namespaces.

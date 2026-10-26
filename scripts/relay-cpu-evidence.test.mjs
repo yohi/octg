@@ -17,13 +17,15 @@ const WINDOWS = [
 ];
 
 function ledgerCall(overrides = {}) {
+  const callOrdinal = overrides.callOrdinal ?? 1;
   return {
     stage: "stage1",
     invocationClass: "ingress",
     workloadClass: "baseline-small",
     concurrency: 2,
     candidateSourceRevision: "source-rev-1",
-    callOrdinal: 1,
+    callOrdinal,
+    measurementId: `measurement-${callOrdinal}`,
     timestampMs: 110,
     routeDiscriminator: "/v1/responses",
     status: 200,
@@ -35,6 +37,7 @@ function ledgerCall(overrides = {}) {
 function callRecord(overrides = {}) {
   return {
     eventId: "e1",
+    measurementId: "measurement-1",
     requestId: "platform-id",
     eventTimestampMs: 110,
     scriptName: "worker",
@@ -70,7 +73,7 @@ function baseExpected(overrides = {}) {
 function baseRecords() {
   return [
     callRecord({ eventId: "e1", eventTimestampMs: 110, routeDiscriminator: "/v1/responses", cpuTimeMs: 5 }),
-    callRecord({ eventId: "e2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses", cpuTimeMs: 4 }),
+    callRecord({ eventId: "e2", measurementId: "measurement-2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses", cpuTimeMs: 4 }),
   ];
 }
 
@@ -134,7 +137,7 @@ test("blocks on an unassigned in-scope record instead of passing over it", () =>
 test("fails on a direct CPU violation even when telemetry completeness is broken", () => {
   const records = [
     callRecord({ eventId: "e1", eventTimestampMs: 110, routeDiscriminator: "/v1/responses", cpuTimeMs: 9 }),
-    callRecord({ eventId: "e2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses" }),
+    callRecord({ eventId: "e2", measurementId: "measurement-2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses" }),
   ];
   const result = evaluateCpuSeries(records, { ...baseMetadata(), samplingVerified: false }, baseExpected());
   assert.equal(result.status, "FAIL");
@@ -144,7 +147,7 @@ test("fails on a direct CPU violation even when telemetry completeness is broken
 test("fails on exceededCpu markers without application finish markers", () => {
   const records = [
     callRecord({ eventId: "e1", eventTimestampMs: 110, routeDiscriminator: "/v1/responses", outcome: "exceededCpu", cpuTimeMs: 1 }),
-    callRecord({ eventId: "e2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses" }),
+    callRecord({ eventId: "e2", measurementId: "measurement-2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses" }),
   ];
   const result = evaluateCpuSeries(records, baseMetadata(), baseExpected());
   assert.equal(result.status, "FAIL");
@@ -154,7 +157,7 @@ test("fails on exceededCpu markers without application finish markers", () => {
 test("fails when p99 exceeds 5ms but max stays within 7ms", () => {
   const records = [
     callRecord({ eventId: "e1", eventTimestampMs: 110, routeDiscriminator: "/v1/responses", cpuTimeMs: 2 }),
-    callRecord({ eventId: "e2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses", cpuTimeMs: 6 }),
+    callRecord({ eventId: "e2", measurementId: "measurement-2", eventTimestampMs: 210, routeDiscriminator: "/v1/responses", cpuTimeMs: 6 }),
   ];
   const result = evaluateCpuSeries(records, baseMetadata(), baseExpected());
   assert.equal(result.status, "FAIL");
@@ -222,31 +225,38 @@ test("blocks on records with unexpected script name, execution model or version"
   assert.equal(evaluateCpuSeries(modelDrift, baseMetadata(), baseExpected()).status, "BLOCKED");
 });
 
-test("matches concurrent callbacks by ordinal route and timestamp tolerance", () => {
+test("matches concurrent callbacks with nearby timestamps by exact measurement ID", () => {
   const expected = baseExpected({
     invocationClass: "decision",
-    calls: [
-      ledgerCall({ invocationClass: "decision", concurrency: 2, callOrdinal: 1, timestampMs: 110, routeDiscriminator: "/internal/relay/v1/decision" }),
-      ledgerCall({ invocationClass: "decision", concurrency: 2, callOrdinal: 2, timestampMs: 112, routeDiscriminator: "/internal/relay/v1/decision" }),
-    ],
+    expectedSuccessfulInvocations: 500,
+    calls: Array.from({ length: 500 }, (_, index) => ledgerCall({
+      invocationClass: "decision",
+      concurrency: 2,
+      callOrdinal: index + 1,
+      measurementId: `measurement-${index + 1}`,
+      timestampMs: 110,
+      routeDiscriminator: "/internal/relay/v1/decision",
+    })),
+    windows: [{ windowStartMs: 100, windowEndMs: 200 }],
   });
-  const records = [
-    callRecord({ eventId: "p1", eventTimestampMs: 112, routeDiscriminator: "/internal/relay/v1/decision" }),
-    callRecord({ eventId: "p2", eventTimestampMs: 113, routeDiscriminator: "/internal/relay/v1/decision", cpuTimeMs: 5 }),
-  ];
-  const result = evaluateCpuSeries(records, { ...baseMetadata(), windows: [
-    windowMeta({ platformInvocationCount: 2 }),
-    windowMeta({ windowStartMs: 200, windowEndMs: 300, platformInvocationCount: 0 }),
-  ] }, expected);
-  assert.equal(result.status, "BLOCKED");
+  const records = Array.from({ length: 500 }, (_, index) => callRecord({
+    eventId: `decision-event-${index}`,
+    measurementId: `measurement-${index + 1}`,
+    eventTimestampMs: 111,
+    routeDiscriminator: "/internal/relay/v1/decision",
+  }));
+  const metadata = baseMetadata({ normalizedInvocationCount: 500, windows: [windowMeta({ platformInvocationCount: 500 })] });
+
+  assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
 });
 
 function completeSeries() {
   const records = Array.from({ length: 500 }, (_, index) => callRecord({
+    measurementId: `measurement-${index + 1}`,
     eventId: `event-${index}`, eventTimestampMs: index < 250 ? 110 : 210,
   }));
   const expected = baseExpected({ expectedSuccessfulInvocations: 500, calls: records.map((record, index) =>
-    ledgerCall({ callOrdinal: index + 1, timestampMs: record.eventTimestampMs })) });
+    ledgerCall({ callOrdinal: index + 1, measurementId: record.measurementId, timestampMs: record.eventTimestampMs })) });
   const metadata = baseMetadata({ normalizedInvocationCount: 500, windows: [
     windowMeta({ platformInvocationCount: 250 }),
     windowMeta({ windowStartMs: 200, windowEndMs: 300, platformInvocationCount: 250 }),
@@ -254,9 +264,33 @@ function completeSeries() {
   return { records, expected, metadata };
 }
 
-test("passes 500 successes across disjoint windows without requiring domain request IDs", () => {
+test("passes 500 successes across disjoint windows with exact measurement IDs", () => {
   const { records, metadata, expected } = completeSeries();
   assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
+});
+
+test("blocks a same-route telemetry event substituted for a missing measurement call", () => {
+  const { records, metadata, expected } = completeSeries();
+  expected.calls[250].measurementId = "expected-measurement-250";
+  records[250].measurementId = "unrelated-measurement";
+
+  assert.equal(evaluateCpuSeries(records, metadata, expected).status, "BLOCKED");
+});
+
+test("emits p50, p90 and p95 alongside the CPU gate p99 summary", () => {
+  const { records, metadata, expected } = completeSeries();
+  records.forEach((record, index) => { record.cpuTimeMs = (index % 5) + 1; });
+
+  const result = evaluateCpuSeries(records, metadata, expected);
+
+  assert.deepEqual({ status: result.status, p50: result.p50, p90: result.p90, p95: result.p95, p99: result.p99, max: result.max }, {
+    status: "PASS",
+    p50: 3,
+    p90: 5,
+    p95: 5,
+    p99: 5,
+    max: 5,
+  });
 });
 
 test("blocks invalid CPU numbers, duplicate event IDs, failed calls and duplicate ordinals", () => {
@@ -264,8 +298,10 @@ test("blocks invalid CPU numbers, duplicate event IDs, failed calls and duplicat
     ({ records }) => { records[0].cpuTimeMs = NaN; },
     ({ records }) => { records[0].cpuTimeMs = -1; },
     ({ records }) => { records[0].eventId = records[1].eventId; },
+    ({ records }) => { records[1].measurementId = records[0].measurementId; },
     ({ expected }) => { expected.calls[0].status = 500; },
     ({ expected }) => { expected.calls[0].callOrdinal = 2; },
+    ({ expected }) => { expected.calls[1].measurementId = expected.calls[0].measurementId; },
   ]) {
     const fixture = completeSeries();
     mutate(fixture);

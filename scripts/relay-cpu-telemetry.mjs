@@ -6,6 +6,8 @@ export const INVOCATIONS_QUERY_ID = "octg-relay-cpu-invocations-v1";
 export const COMPLETENESS_QUERY_ID = "octg-relay-cpu-completeness-v1";
 const ENDPOINT = "https://api.cloudflare.com/client/v4/accounts";
 const MAX_PAGES_PER_WINDOW = 1000;
+const MEASUREMENT_ID_QUERY = "octg_cpu_gate_measurement_id";
+const MEASUREMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function makeQuery(options, window, view, offset) {
   const parameters = { datasets: ["cloudflare-workers"], filters: [{ key: "$workers.scriptName", type: "string", operation: "eq", value: options.scriptName }, { key: "$workers.scriptVersion.id", type: "string", operation: "eq", value: options.expectedScriptVersionId }, { key: "$workers.executionModel", type: "string", operation: "eq", value: options.expectedExecutionModel }] };
@@ -34,6 +36,28 @@ function normalizedRouteOf(event) {
   const routeDiscriminator = url?.pathname ?? trigger?.pathname;
   if (!routeDiscriminator) throw new Error("Invocation route unavailable");
   return routeDiscriminator;
+}
+
+function measurementIdOf(event) {
+  const metadata = event?.$metadata;
+  const ids = [metadata?.url, metadata?.trigger]
+    .filter((value) => typeof value === "string")
+    .flatMap((value) => {
+      try {
+        const url = new URL(value, "https://local.invalid");
+        const id = url.searchParams.get(MEASUREMENT_ID_QUERY);
+        return id === null ? [] : [id];
+      } catch {
+        return [];
+      }
+    });
+  const uniqueIds = new Set(ids);
+  if (uniqueIds.size !== 1) throw new Error("Measurement correlation ID unavailable or contradictory");
+  const [measurementId] = uniqueIds;
+  if (measurementId === undefined || !MEASUREMENT_ID_PATTERN.test(measurementId)) {
+    throw new Error("Measurement correlation ID unavailable or contradictory");
+  }
+  return measurementId;
 }
 
 function eventFingerprint(event) {
@@ -105,6 +129,7 @@ function parseGroup(groupRequestId, rawEvents, scope) {
     if (previousCpuId !== undefined && previousCpuId !== eventId) throw new Error("Conflicting CPU events across invocation pages");
     scope.groupCpuIds.set(groupRequestId, eventId);
     const routeDiscriminator = normalizedRouteOf(event);
+    const measurementId = measurementIdOf(event);
     const requestIds = [meta?.requestId, workers.requestId].filter((value) => typeof value === "string");
     if (requestIds.some((value) => value !== groupRequestId)) throw new Error("Invocation request identity contradiction");
     if (groupSeenIds.size > 1) throw new Error("Invocation group must have exactly one CPU event");
@@ -113,6 +138,7 @@ function parseGroup(groupRequestId, rawEvents, scope) {
     cpuRecord = {
       ...(eventId === undefined ? {} : { eventId }),
       requestId: groupRequestId,
+      measurementId,
       eventTimestampMs: timestamp,
       scriptName: workers.scriptName,
       scriptVersionId: workers.scriptVersion.id,

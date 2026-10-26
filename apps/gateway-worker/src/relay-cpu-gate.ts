@@ -41,7 +41,7 @@ function context(env: Env, requestId: string, clientId: string): RelayContextV1 
     requestId,
     clientId,
     idempotencyKeyHash: null,
-    nonce: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", ""),
+    nonce: btoa(String.fromCodePoint(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", ""),
     issuedAtMs,
     expiresAtMs: issuedAtMs + 60_000,
   };

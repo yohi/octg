@@ -19,6 +19,10 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+function isMeasurementId(value) {
+  return typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
 function exactWindowIdentity(expectedWindows, windows) {
   if (!Array.isArray(expectedWindows) || expectedWindows.length === 0) return false;
   if (!Array.isArray(windows) || expectedWindows.length !== windows.length) return false;
@@ -44,9 +48,12 @@ function ledgerIdentityError(expected, routes) {
   const calls = expected.calls ?? [];
   if (calls.length === 0) return "ledger has no recorded measurement calls";
   const ordinals = new Set();
+  const measurementIds = new Set();
   for (const call of calls) {
     if (!Number.isSafeInteger(call?.callOrdinal) || call.callOrdinal < 1 || ordinals.has(call.callOrdinal)) return "invalid call ordinal";
     ordinals.add(call.callOrdinal);
+    if (!isMeasurementId(call?.measurementId) || measurementIds.has(call.measurementId)) return "invalid measurement correlation ID";
+    measurementIds.add(call.measurementId);
     if (call?.stage !== expected.stage) return "ledger call stage drift";
     if (call?.invocationClass !== expected.invocationClass) return "ledger call invocation class drift";
     if (call?.workloadClass !== expected.workloadClass) return "ledger call workload drift";
@@ -60,9 +67,16 @@ function ledgerIdentityError(expected, routes) {
   return undefined;
 }
 
-function percentile99(records) {
-  const values = [...records].map((record) => record.cpuTimeMs).sort((a, b) => a - b);
-  return values[Math.ceil(values.length * 0.99) - 1] ?? 0;
+function cpuDistribution(records) {
+  const values = records.map((record) => record.cpuTimeMs).sort((a, b) => a - b);
+  const percentile = (ratio) => values[Math.ceil(values.length * ratio) - 1] ?? 0;
+  return {
+    p50: percentile(0.5),
+    p90: percentile(0.9),
+    p95: percentile(0.95),
+    p99: percentile(0.99),
+    max: values.at(-1) ?? 0,
+  };
 }
 
 function successfulCall(call, expected) {
@@ -84,6 +98,7 @@ function correlatedAssignments(records, windows, expected) {
     let candidate;
     for (const record of remaining) {
       if (record.routeDiscriminator !== call.routeDiscriminator) continue;
+      if (record.measurementId !== call.measurementId) continue;
       const window = windows.find((item) => withinWindow(record, item));
       if (window === undefined) continue;
       const distance = Math.abs(record.eventTimestampMs - call.timestampMs);
@@ -99,8 +114,10 @@ export function evaluateCpuSeries(records, metadata, expected) {
   if (!Array.isArray(records) || records.some((record) => !record || !Number.isFinite(record.cpuTimeMs)
     || record.cpuTimeMs < 0 || !Number.isSafeInteger(record.eventTimestampMs)
     || !isNonEmptyString(record.eventId) || !isNonEmptyString(record.requestId)
+    || !isMeasurementId(record.measurementId)
     || !isNonEmptyString(record.outcome) || !isNonEmptyString(record.eventType))
-    || new Set(records.map((record) => record.eventId)).size !== records.length) {
+    || new Set(records.map((record) => record.eventId)).size !== records.length
+    || new Set(records.map((record) => record.measurementId)).size !== records.length) {
     return { status: "BLOCKED", reason: "invalid normalized platform records" };
   }
   const windows = metadata?.windows ?? [];
@@ -125,15 +142,15 @@ export function evaluateCpuSeries(records, metadata, expected) {
     return { status: "BLOCKED", reason: "telemetry record outside the expected series scope" };
   }
 
+  const distribution = cpuDistribution(inScope);
   const cpuViolation = inScope.some((record) => record.outcome === "exceededCpu")
-    || inScope.some((record) => record.cpuTimeMs > CPU_GATE.maxMs) || percentile99(inScope) > CPU_GATE.p99MaxMs;
+    || distribution.max > CPU_GATE.maxMs || distribution.p99 > CPU_GATE.p99MaxMs;
   if (cpuViolation) {
     return {
       status: "FAIL",
       cpuTimesMs: inScope.map((record) => record.cpuTimeMs),
       exceededCpu: inScope.filter((record) => record.outcome === "exceededCpu").length,
-      p99: percentile99(inScope),
-      max: Math.max(...inScope.map((record) => record.cpuTimeMs), 0),
+      ...distribution,
     };
   }
 
@@ -172,11 +189,10 @@ export function evaluateCpuSeries(records, metadata, expected) {
     return { status: "BLOCKED", reason: "incomplete or mismatched telemetry", matchedInvocations: assigned.length };
   }
 
-  const values = assigned.map((record) => record.cpuTimeMs).sort((a, b) => a - b);
-  const p99 = values[Math.ceil(values.length * 0.99) - 1] ?? 0;
-  const max = values.at(-1) ?? 0;
-  if (p99 > CPU_GATE.p99MaxMs || max > CPU_GATE.maxMs) return { status: "FAIL", p99, max, exceededCpu: 0 };
-  return { status: "PASS", p99, max, exceededCpu: 0, matchedInvocations: assigned.length };
+  if (distribution.p99 > CPU_GATE.p99MaxMs || distribution.max > CPU_GATE.maxMs) {
+    return { status: "FAIL", ...distribution, exceededCpu: 0 };
+  }
+  return { status: "PASS", ...distribution, exceededCpu: 0, matchedInvocations: assigned.length };
 }
 
 export async function runEvidenceCli(argv = process.argv.slice(2)) {

@@ -27,7 +27,7 @@ export async function getRelayCpuGateSlot(identity: CpuGateSlotIdentity): Promis
   return (await identity.storage.get<RelayCpuGateSlotState>(SLOT_KEY)) ?? { kind: "idle" };
 }
 
-export async function claimRelayCpuGateSlot(
+export function claimRelayCpuGateSlot(
   identity: CpuGateSlotIdentity,
   owner: RelayCpuGateSlotOwner,
 ): Promise<RelayCpuGateSlotClaimResult> {

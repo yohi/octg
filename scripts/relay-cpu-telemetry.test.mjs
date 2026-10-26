@@ -5,9 +5,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fetchRelayCpuTelemetry, INVOCATIONS_QUERY_ID, COMPLETENESS_QUERY_ID } from "./relay-cpu-telemetry.mjs";
 
+function telemetryUrl(measurementId) {
+  return `https://host/v1/responses?octg_cpu_gate_measurement_id=${measurementId}`;
+}
+
 function cpuEvent(overrides = {}) {
+  const { $metadata: metadataOverrides = {}, ...eventOverrides } = overrides;
+  const metadata = overrides.$metadata === undefined
+    ? { id: "cursor", eventTimestampMs: 120 }
+    : { ...metadataOverrides };
+  if (!Object.hasOwn(metadata, "url") && typeof metadata.id === "string") metadata.url = telemetryUrl(metadata.id);
   return {
-    $metadata: { id: "cursor", eventTimestampMs: 120, url: "https://host/v1/responses" },
+    $metadata: metadata,
     $workers: {
       scriptName: "octg-preview",
       scriptVersion: { id: "candidate-v1" },
@@ -16,7 +25,7 @@ function cpuEvent(overrides = {}) {
       eventType: "cpu",
       executionModel: "stateless",
     },
-    ...overrides,
+    ...eventOverrides,
   };
 }
 
@@ -81,11 +90,44 @@ test("queries invocations and completeness with Bearer env auth and writes prote
   }
 });
 
+test("extracts the per-invocation measurement ID from platform URL metadata", async () => {
+  const measurementId = "measurement-id-1";
+  const result = await fetchRelayCpuTelemetry(baseOptions({
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return Response.json(body.queryId.endsWith("invocations-v1")
+        ? invocationsResult([[cpuEvent({ $metadata: {
+          id: "event-1",
+          eventTimestampMs: 120,
+          url: `https://host/v1/responses?octg_cpu_gate_measurement_id=${measurementId}`,
+        } })]])
+        : calculationsResult(1));
+    },
+  }));
+
+  assert.equal(result.records[0].measurementId, measurementId);
+});
+
+test("fails closed when platform URL metadata omits the measurement ID", async () => {
+  await assert.rejects(fetchRelayCpuTelemetry(baseOptions({
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return Response.json(body.queryId.endsWith("invocations-v1")
+        ? invocationsResult([[cpuEvent({ $metadata: {
+          id: "event-redacted",
+          eventTimestampMs: 120,
+          url: "https://host/v1/responses",
+        } })]])
+        : calculationsResult(1));
+    },
+  })), /Measurement correlation ID unavailable/);
+});
+
 test("a repeated pagination page with zero new event IDs proves completion", async () => {
   const pages = [
-    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-1", eventTimestampMs: 120, url: "https://host/v1/responses" } })]]),
-    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-2", eventTimestampMs: 130, url: "https://host/v1/responses" } })]]),
-    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-2", eventTimestampMs: 130, url: "https://host/v1/responses" } })]]),
+    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-1", eventTimestampMs: 120, url: telemetryUrl("cursor-1") } })]]),
+    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-2", eventTimestampMs: 130, url: telemetryUrl("cursor-2") } })]]),
+    invocationsResult([[cpuEvent({ $metadata: { id: "cursor-2", eventTimestampMs: 130, url: telemetryUrl("cursor-2") } })]]),
   ];
   let calculationsQueries = 0;
   const result = await fetchRelayCpuTelemetry(baseOptions({
@@ -130,7 +172,7 @@ test("de-duplicates exact duplicate event ids once and rejects conflicting dupli
         if (body.queryId.endsWith("invocations-v1")) {
           return Response.json(body.offset
             ? invocationsResult([])
-            : invocationsResult([[duplicate, cpuEvent({ $workers: cpuEvent().$workers, $metadata: { id: "cursor", eventTimestampMs: 190, url: "https://host/v1/responses" } })]]));
+            : invocationsResult([[duplicate, cpuEvent({ $workers: cpuEvent().$workers, $metadata: { id: "cursor", eventTimestampMs: 190, url: telemetryUrl("cursor") } })]]));
         }
         return Response.json(calculationsResult(2));
       },
@@ -220,7 +262,7 @@ test("detects $workers.truncated on any in-scope event, not only the chosen CPU 
   const pages = [
     invocationsResult([[
       // In-scope non-CPU marker event carrying the truncation fact.
-      cpuEvent({ $workers: { scriptName: "octg-preview", scriptVersion: { id: "candidate-v1" }, eventType: "fetch", outcome: "ok", executionModel: "stateless", truncated: true }, $metadata: { id: "cursor-truncated", eventTimestampMs: 150, url: "https://host/v1/responses" } }),
+      cpuEvent({ $workers: { scriptName: "octg-preview", scriptVersion: { id: "candidate-v1" }, eventType: "fetch", outcome: "ok", executionModel: "stateless", truncated: true }, $metadata: { id: "cursor-truncated", eventTimestampMs: 150, url: telemetryUrl("cursor-truncated") } }),
       cpuEvent(),
     ]]),
   ];
@@ -297,10 +339,10 @@ test("matches per-window platform Invocation counts across two windows", async (
       const body = JSON.parse(init.body);
       if (body.queryId.endsWith("invocations-v1")) {
         if (!body.offset) {
-          return Response.json(invocationsResult([[cpuEvent({ $metadata: { id: "c1", eventTimestampMs: 120, url: "https://host/v1/responses" } })]]));
+          return Response.json(invocationsResult([[cpuEvent({ $metadata: { id: "c1", eventTimestampMs: 120, url: telemetryUrl("c1") } })]]));
         }
         if (body.offset === "c1") {
-          return Response.json(invocationsResult([[cpuEvent({ $metadata: { id: "c2", eventTimestampMs: 250, url: "https://host/v1/responses" } })]]));
+          return Response.json(invocationsResult([[cpuEvent({ $metadata: { id: "c2", eventTimestampMs: 250, url: telemetryUrl("c2") } })]]));
         }
         return Response.json(invocationsResult([]));
       }

@@ -275,11 +275,18 @@ Secret bindings exist first. See the [Wrangler Secrets
 documentation](https://developers.cloudflare.com/workers/configuration/secrets/)
 and [`versions secret delete` reference](https://developers.cloudflare.com/workers/wrangler/commands/workers/#versions-secret-delete).
 The runner performs authenticated Preview preflight before measurement;
-`--execute` explicitly enables the remote operations. Its JSON summary reports
-`cleanupVerified` separately from runner `status`: runner `PASS` means the
-planned workload completed, not that the CPU gate passed. Keep the journal and
-ledger protected for telemetry acquisition and evidence reduction; do not add
-raw telemetry or credentials to Git.
+`--execute` explicitly enables the remote operations. Each measured HTTP attempt
+gets a fresh, non-secret `octg_cpu_gate_measurement_id` query value. Cloudflare
+Workers Observability must retain query strings in `$metadata.url`; the telemetry
+normalizer requires the value and the evidence reducer joins each ledger call to
+one exact platform event. Missing, redacted, duplicate, or mismatched IDs block
+the series. The ID is not an auth token and is never placed in request/response
+bodies or application logs.
+
+The runner JSON summary reports `cleanupVerified` separately from runner
+`status`: runner `PASS` means the planned workload completed, not that the CPU
+gate passed. Keep the journal and ledger protected for telemetry acquisition
+and evidence reduction; do not add raw telemetry or credentials to Git.
 
 ### Automatic cleanup and recovery
 
@@ -343,9 +350,10 @@ NODE
 done
 ```
 
-Every reducer summary must be reviewed. Missing or incomplete telemetry,
-sampling metadata other than a verified interval of `1`, truncated records, or
-any source/version/window mismatch is `BLOCKED / INCOMPLETE`. Use the Task 6
+Every reducer summary must include p50/p90/p95/p99/max, `exceededCpu`, and the
+matched invocation count. Missing or incomplete telemetry, sampling metadata
+other than a verified interval of `1`, truncated records, or any
+source/version/window/correlation-ID mismatch is `BLOCKED / INCOMPLETE`. Use the Task 6
 acceptance thresholds and conditional branch rules in the [CPU headroom plan](./superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md); a local test pass is not Stage 1 evidence.
 
 If `cleanupVerified` is false, cleanup could not be proven. Keep the protected
@@ -957,13 +965,13 @@ automated workflow variable.
 Record CPU as separate series and never pool them together:
 
 - each stateless Worker class (ingress buckets and the decision, activation,
-  renewal, and terminal callbacks): 10 ms Free limit, p99 at most 8 ms, max
-  below 10 ms;
+  renewal, and terminal callbacks): 10 ms Free limit, p99 at most 5 ms, max at
+  most 7 ms, and `exceededCpu = 0`;
 - `RelayDecisionController.decide` and every QuotaController RPC class
   (`admitRelay`, activation, renewal, terminal): the documented 30,000 ms DO
   default, p99 at most 24,000 ms, max below 30,000 ms;
-- record `exceededCpu`, sample counts, and tail margins per class; a DO pass
-  never excuses a stateless Worker failure.
+- record p50/p90/p95/p99/max, `exceededCpu`, sample counts, and tail margins per
+  class; a DO pass never excuses a stateless Worker failure.
 
 A rollout gate requires zero CPU failures in every required Worker and DO
 series, correct quota behavior for injected failures, and Gateway B matches,

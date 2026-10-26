@@ -44,7 +44,9 @@ async function invoke(callback, input, ledger, identity, route, clock, isSuccess
   const response = await callback(input);
   const success = isSuccessfulSample(response);
   const { windows, ...callIdentity } = identity;
-  ledger.calls.push({ ...callIdentity, callOrdinal, timestampMs, routeDiscriminator: route, status: response.status, success, outcomeHint: response.outcome ?? "unknown", ...(input.requestId ? { requestId: input.requestId } : {}) });
+  ledger.calls.push({ ...callIdentity, callOrdinal, timestampMs, routeDiscriminator: route, status: response.status, success,
+    outcomeHint: response.outcome ?? "unknown", ...(input.requestId ? { requestId: input.requestId } : {}),
+    ...(typeof response.measurementId === "string" ? { measurementId: response.measurementId } : {}) });
   return response;
 }
 
@@ -66,6 +68,8 @@ async function runSeries(identity, adapters, ledger, options) {
   let seriesComplete = false;
   const retainFixture = identity.invocationClass.endsWith("_replay") || identity.invocationClass === "renewal_normal";
   const closeFixture = async (terminalize = true) => {
+    let terminalFailed = false;
+    let terminalError;
     try {
       if (fixture && (terminalize || !adapters.setup)) {
         if (!adapters.terminalizeFixture) throw new Error("fixture terminal adapter unavailable");
@@ -73,14 +77,32 @@ async function runSeries(identity, adapters, ledger, options) {
         if (terminal?.accepted !== true || !["settled", "released", "reconciled_consumed", "reconciled_unused"].includes(terminal.state)) throw new Error("fixture terminal proof unavailable");
         if (operation) { operation.state = "target_terminal"; operation.lastTransitionAt = (adapters.clock ?? now)(); }
       }
-    } finally {
-      if (operation && adapters.setup) {
+    } catch (error) {
+      terminalFailed = true;
+      terminalError = error;
+    }
+
+    let closureFailed = false;
+    let closureError;
+    if (operation && adapters.setup) {
+      try {
         const closed = await closeOwnedOperation({ operation, adapters, requireSlot: mode === "stage2-series" });
         operation.lastTransitionAt = (adapters.clock ?? now)();
         if (journalPath) await persistJournal(journalPath, operations);
-        if (closed.kind !== "closed") throw new Error("fixture closure not proven");
-      } else if (operation?.state === "target_terminal") operation.state = "closed";
+        if (closed.kind !== "closed") {
+          closureFailed = true;
+          closureError = new Error("fixture closure not proven");
+        }
+      } catch (error) {
+        closureFailed = true;
+        closureError = error;
+      }
+    } else if (operation?.state === "target_terminal") {
+      operation.state = "closed";
     }
+
+    if (closureFailed) throw closureError;
+    if (terminalFailed) throw terminalError;
     fixture = undefined; operation = undefined; prepared = false;
   };
   const route = identity.invocationClass === "ingress" ? "/v1/responses" : `/internal/relay/v1/${identity.invocationClass.split("_")[0]}`;
