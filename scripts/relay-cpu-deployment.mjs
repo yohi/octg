@@ -85,8 +85,19 @@ export async function createPreviewDeploymentAdapters(options) {
   }
   async function deployedVersions() {
     const deployments = JSON.parse(await command(["deployments", "list", "--json"]));
-    if (!Array.isArray(deployments) || !Array.isArray(deployments[0]?.versions)) throw new Error("Preview deployment metadata unavailable");
-    return deployments[0].versions;
+    if (!Array.isArray(deployments) || deployments.length === 0) throw new Error("Preview deployment metadata unavailable");
+    if (deployments.length === 1) {
+      if (!Array.isArray(deployments[0].versions)) throw new Error("Preview deployment metadata unavailable");
+      return deployments[0].versions;
+    }
+    const latest = deployments.reduce((newest, deployment) => {
+      const createdOn = Date.parse(deployment?.created_on);
+      const newestCreatedOn = Date.parse(newest?.created_on);
+      if (!Number.isFinite(createdOn) || !Number.isFinite(newestCreatedOn)) throw new Error("Preview deployment metadata unavailable");
+      return createdOn > newestCreatedOn ? deployment : newest;
+    });
+    if (!Array.isArray(latest.versions)) throw new Error("Preview deployment metadata unavailable");
+    return latest.versions;
   }
   const percentage = (versions, id) => versions.length === 1 && versions[0].version_id === id ? versions[0].percentage : 0;
   return {

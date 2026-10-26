@@ -99,6 +99,15 @@ test("blocks a complete multi-window series below the minimum 500 successes", ()
   assert.equal(result.status, "BLOCKED");
 });
 
+test("blocks an in-scope callback record whose measurement correlation ID is missing", () => {
+  const records = baseRecords();
+  delete records[0].measurementId;
+
+  const result = evaluateCpuSeries(records, baseMetadata(), baseExpected());
+
+  assert.deepEqual(result, { status: "BLOCKED", reason: "invalid normalized platform records" });
+});
+
 test("rejects overlapping windows before evaluation", () => {
   const metadata = baseMetadata({ windows: [
     windowMeta({ windowEndMs: 250, platformInvocationCount: 2 }),

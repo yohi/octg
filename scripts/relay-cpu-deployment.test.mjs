@@ -76,6 +76,49 @@ test("Preview candidate upload stops before mutation when a persistent Worker se
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["deployments", "list"], ["versions", "view"]]);
 });
 
+test("Preview upload validates bindings against the deployment with the newest created_on", async () => {
+  const viewed = [];
+  const adapters = await createPreviewDeploymentAdapters({
+    config,
+    productionConfig,
+    configPath: "preview.json",
+    workerName: "gateway-preview",
+    origin: "https://preview.example",
+    env: { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "synthetic-gate" },
+    commandImpl: async (args) => {
+      if (args[0] === "deployments") return { stdout: JSON.stringify([
+        { created_on: "2026-01-01T00:00:00Z", versions: [{ version_id: baseline, percentage: 100 }] },
+        { created_on: "2026-02-01T00:00:00Z", versions: [{ version_id: candidate, percentage: 100 }] },
+      ]), stderr: "" };
+      if (args[1] === "view") {
+        viewed.push(args[2]);
+        return { stdout: JSON.stringify({ id: args[2], resources: { bindings: [...bindings, ...previewRelaySecrets] } }), stderr: "" };
+      }
+      if (args[1] === "upload") return { stdout: `Worker Version ID: ${hardening}`, stderr: "" };
+      assert.fail(`Unexpected command: ${args.join(" ")}`);
+    },
+  });
+
+  await adapters.uploadCandidate({ secretsPath: "protected/secrets.json" });
+  assert.deepEqual(viewed, [candidate]);
+});
+
+test("Preview deployment metadata remains unavailable when the newest deployment has no versions array", async () => {
+  const adapters = await createPreviewDeploymentAdapters({
+    config,
+    productionConfig,
+    configPath: "preview.json",
+    workerName: "gateway-preview",
+    origin: "https://preview.example",
+    env: { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "synthetic-gate" },
+    commandImpl: async (args) => args[0] === "deployments"
+      ? { stdout: JSON.stringify([{ created_on: "2026-01-01T00:00:00Z", versions: [{ version_id: baseline, percentage: 100 }] }, { created_on: "2026-02-01T00:00:00Z" }]), stderr: "" }
+      : assert.fail(`Unexpected command: ${args.join(" ")}`),
+  });
+
+  await assert.rejects(adapters.observeCandidate({ versionId: candidate }), /Preview deployment metadata unavailable/);
+});
+
 test("secretless verification detects a persistent Preview relay secret binding loss", async () => {
   const adapters = await createPreviewDeploymentAdapters({
     config,

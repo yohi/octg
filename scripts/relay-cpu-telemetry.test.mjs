@@ -123,6 +123,22 @@ test("fails closed when platform URL metadata omits the measurement ID", async (
   })), /Measurement correlation ID unavailable/);
 });
 
+test("keeps a callback event without a measurement ID so its series is blocked by evidence validation", async () => {
+  const callbackEvent = cpuEvent({ $metadata: {
+    id: "callback-event",
+    eventTimestampMs: 120,
+    url: "https://host/internal/relay/v1/activation",
+  } });
+  const result = await fetchRelayCpuTelemetry(baseOptions({
+    fetchImpl: async (_url, init) => Response.json(JSON.parse(init.body).view === "invocations"
+      ? invocationsResult([[callbackEvent]]) : calculationsResult(1)),
+  }));
+
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].routeDiscriminator, "/internal/relay/v1/activation");
+  assert.equal(result.records[0].measurementId, undefined);
+});
+
 test("a repeated pagination page with zero new event IDs proves completion", async () => {
   const pages = [
     invocationsResult([[cpuEvent({ $metadata: { id: "cursor-1", eventTimestampMs: 120, url: telemetryUrl("cursor-1") } })]]),

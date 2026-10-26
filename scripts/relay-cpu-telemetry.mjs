@@ -38,7 +38,7 @@ function normalizedRouteOf(event) {
   return routeDiscriminator;
 }
 
-function measurementIdOf(event) {
+function measurementIdOf(event, routeDiscriminator) {
   const metadata = event?.$metadata;
   const ids = [metadata?.url, metadata?.trigger]
     .filter((value) => typeof value === "string")
@@ -52,6 +52,7 @@ function measurementIdOf(event) {
       }
     });
   const uniqueIds = new Set(ids);
+  if (uniqueIds.size === 0 && /^\/internal\/relay\/v1\/(decision|activation|renewal|terminal)$/.test(routeDiscriminator)) return undefined;
   if (uniqueIds.size !== 1) throw new Error("Measurement correlation ID unavailable or contradictory");
   const [measurementId] = uniqueIds;
   if (measurementId === undefined || !MEASUREMENT_ID_PATTERN.test(measurementId)) {
@@ -129,7 +130,7 @@ function parseGroup(groupRequestId, rawEvents, scope) {
     if (previousCpuId !== undefined && previousCpuId !== eventId) throw new Error("Conflicting CPU events across invocation pages");
     scope.groupCpuIds.set(groupRequestId, eventId);
     const routeDiscriminator = normalizedRouteOf(event);
-    const measurementId = measurementIdOf(event);
+    const measurementId = measurementIdOf(event, routeDiscriminator);
     const requestIds = [meta?.requestId, workers.requestId].filter((value) => typeof value === "string");
     if (requestIds.some((value) => value !== groupRequestId)) throw new Error("Invocation request identity contradiction");
     if (groupSeenIds.size > 1) throw new Error("Invocation group must have exactly one CPU event");
