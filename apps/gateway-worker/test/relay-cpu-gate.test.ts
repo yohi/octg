@@ -127,6 +127,10 @@ async function closeSlot(ownerId: string, pool: PoolName, generation: number): P
 }
 
 describe("relay CPU-gate routes", () => {
+  // SELF.fetch crosses Workerd's stream transport, which can pull/cancel a body
+  // independently of handler code. Therefore stream callbacks cannot reliably
+  // attribute body access to the handler; these entrypoint assertions instead
+  // prove denied status and zero Durable Object identity lookups.
   it("disables missing or service-equal control credentials before reading the body", async () => {
     const request = new Request(`${URL}/setup`, { method: "POST", body: "not-json" });
     const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
@@ -185,12 +189,17 @@ describe("relay CPU-gate routes", () => {
     ["invalid", "not-a-valid-control-token"],
     ["ingress-equal", "i".repeat(32)],
   ])("disables %s control credentials before a DO lookup", async (_label, token) => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
     const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token });
-    const response = await SELF.fetch(controlRequest("slot"));
-    expect(response.status).toBe(404);
-    expect(idFromName).not.toHaveBeenCalled();
-    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+    try {
+      const response = await SELF.fetch(controlRequest("slot"));
+      expect(response.status).toBe(404);
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
   });
 
   it.each([
@@ -198,15 +207,21 @@ describe("relay CPU-gate routes", () => {
     ["slot", "POST", "GET"],
     ["setup", "GET", "POST"],
   ] as const)("rejects %s with the required %s-only method", async (route, method, allowed) => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
     const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
-    const response = await SELF.fetch(new Request(`${URL}/${route}`, {
-      method,
-      headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
-    }));
-    expect(response.status).toBe(405);
-    expect(response.headers.get("Allow")).toBe(allowed);
-    expect(idFromName).not.toHaveBeenCalled();
+    try {
+      const response = await SELF.fetch(new Request(`${URL}/${route}`, {
+        method,
+        headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+      }));
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe(allowed);
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
   });
 
   it("returns the exact compensated setup envelope only after reconciliation proof", async () => {

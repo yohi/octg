@@ -69,3 +69,26 @@ Exit status: 0
 - Version-header assertion covers a returned 400; the existing `relay-version-headers.test.ts` checks that outer-routed internal unauthorized errors carry a version header. The outer `index.ts` catch-generated 500 is intentionally not asserted.
 - Public `/v1/responses` version-header regression was confirmed by the existing integration assertion in `relay-client.test.ts` (24 tests rerun and passed).
 - No assertions rely on Workerd stream pull/cancel transport behavior; denial is established via status and zero `idFromName` calls. No credential/body logging assertions were added because there is no relevant observable log contract in these tests.
+
+## Review follow-up
+
+- **Important — body read/cancel attribution:** Chose the documented limitation path instead of instrumented stream assertions. A note in `relay-cpu-gate.test.ts` explains that `SELF.fetch` traverses Workerd's stream transport, where transport-driven `pull()`/`cancel()` cannot reliably be attributed to handler calls. Existing SELF.fetch denial tests remain, with 404/401 status and zero `idFromName` assertions. No stream transport behavior is treated as proof of handler behavior.
+- **Minor — shared environment cleanup:** The newly added invalid/ingress-equal control, wrong-method, and internal returned-4xx version-header tests now restore the original control token in `finally`. The preexisting missing-token case likewise restores its original value in `finally`.
+- Re-ran the required focused test command and `npm run typecheck`; results are recorded in the follow-up below.
+
+### Follow-up verification
+
+`npm run test --workspace @octg/gateway-worker -- test/relay-cpu-gate.test.ts test/relay-version-headers.test.ts`
+
+```text
+Test Files  3 passed (3)
+Tests       38 passed (38)
+Exit status: 0
+```
+
+`npm run typecheck`
+
+```text
+Deno task check and TypeScript checks for all workspaces completed.
+Exit status: 0
+```
