@@ -719,7 +719,7 @@ The specification must be reviewed whenever those tests or externally visible co
 
 ## 19. Responses Relay (v1)
 
-This section is the single internal wire and state contract for the optional free-worker Responses relay through Deno. Names, limits, semantics, and ownership are normative: no extra HTTP headers, envelope fields, route, or status remapping may be invented. The shared v1 types, stable error union, and strict parsers live in `packages/shared/src/relay.ts`; runtime behavior is implemented behind this contract and never changes legacy Chat Completions or legacy Responses behavior.
+This section is the single internal wire and state contract for the optional free-worker Responses relay through Deno. Names, limits, semantics, and ownership are normative: no unannounced HTTP headers, envelope fields, or routes may be added to the closed Relay v1 wire contract, and no status remapping may be invented. The internal CPU-gate control-plane extension in §19.7 is separate from these Relay v1 callbacks and does not widen their wire envelope. The shared v1 types, stable error union, and strict parsers live in `packages/shared/src/relay.ts`; runtime behavior is implemented behind this contract and never changes legacy Chat Completions or legacy Responses behavior.
 
 ### 19.1 Runtime configuration and environment isolation
 
@@ -899,3 +899,22 @@ Internal error envelope is exactly `{version:1,error:{code:RelayErrorCode}}`; it
 | 500 | `internal_error` | all internal auth, configuration, callback, lease-lost, malformed relay, upstream transport, and unknown-reserve failures, unless public headers have already been sent |
 
 Upstream non-2xx status/body remains the existing public upstream response contract, not an internal relay error. Deno never maps policy or quota decisions to 503. Internal callback failures use HTTP 500; Worker maps them to public `500 internal_error`. Once response headers are sent, terminate the stream on later failure; never replace it with a new error response.
+
+### 19.7 Internal CPU-gate control-plane extension
+
+These internal control routes are separate from the closed Deno Relay v1 callback routes in §19.2. They exist only for bounded CPU-gate control and do not add routes, headers, or fields to the Deno Relay v1 wire envelope.
+
+| Method | Exact route |
+| --- | --- |
+| `GET` | `/internal/relay/v1/cpu-gate/quota` |
+| `GET` | `/internal/relay/v1/cpu-gate/slot` |
+| `POST` | `/internal/relay/v1/cpu-gate/setup` |
+| `POST` | `/internal/relay/v1/cpu-gate/setup-fence` |
+| `POST` | `/internal/relay/v1/cpu-gate/decision-context` |
+| `POST` | `/internal/relay/v1/cpu-gate/operation-inspection` |
+| `POST` | `/internal/relay/v1/cpu-gate/reconcile-unused` |
+| `POST` | `/internal/relay/v1/cpu-gate/close-operation` |
+
+Control authentication uses the distinct bearer secret `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`; it is not the Relay service or ingress bearer. If control is absent, malformed, equal to the service bearer, or equal to the ingress bearer, the control route is hidden with `404`. When control is enabled, a missing or incorrect control bearer returns `401`, before request-body reading or any Durable Object lookup. The 8,192-byte request body limit applies to all control requests. Invalid input, unavailable dependencies, and ambiguous state fail closed. This control plane performs no direct Durable Object storage mutation; handlers must use the authorized Durable Object operations.
+
+`X-OCTG-Worker-Version` is a stateless-only internal Worker attribution header (`local` in non-deployed tests). The `index.ts` wrapper adds it when a relay handler returns a `Response`, including handler-returned error statuses such as 4xx, 500, and 503. The outer `index.ts` catch currently generates a separate generic 500 without that wrapper. This header is not specified for that catch-generated response and is not evidence of DO code version or CPU PASS. This contract does not claim Stage 1/2 readiness.

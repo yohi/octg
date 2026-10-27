@@ -188,6 +188,58 @@ test("relay rollout documentation keeps ownership, sharding, admission and rollb
   assert.match(operations, /never depend on D1 writes/);
 });
 
+test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes", () => {
+  const EXPECTED_CPU_GATE_ROUTES = Object.freeze([
+    Object.freeze({ route: "quota", method: "GET" }),
+    Object.freeze({ route: "slot", method: "GET" }),
+    Object.freeze({ route: "setup", method: "POST" }),
+    Object.freeze({ route: "setup-fence", method: "POST" }),
+    Object.freeze({ route: "decision-context", method: "POST" }),
+    Object.freeze({ route: "operation-inspection", method: "POST" }),
+    Object.freeze({ route: "reconcile-unused", method: "POST" }),
+    Object.freeze({ route: "close-operation", method: "POST" }),
+  ]);
+  const specification = read("SPEC.md");
+  const source = read("apps/gateway-worker/src/relay-cpu-gate.ts");
+  const section19 = specification.match(/^## 19\. Responses Relay \(v1\)([\s\S]*)/m)?.[1];
+  const section197 = section19?.match(/^### 19\.7 Internal CPU-gate control-plane extension\s*\n([\s\S]*)/m)?.[1];
+
+  assert.ok(section19, "SPEC §19 must exist");
+  assert.ok(section197, "SPEC §19.7 CPU-gate route section must exist");
+
+  const routesMatch = source.match(/const ROUTES\s*=\s*\[([\s\S]*?)\]\s*as const\s*;/);
+  assert.ok(routesMatch, "CPU-gate source ROUTES tuple must be unambiguous");
+  const sourceNames = [...routesMatch[1].matchAll(/"([a-z-]+)"/g)].map((match) => match[1]);
+  assert.equal(sourceNames.length, routesMatch[1].match(/,/g)?.length + 1, "source ROUTES tuple must contain only route literals");
+  assert.equal(new Set(sourceNames).size, sourceNames.length, "source ROUTES must not contain duplicates");
+  const methodByRoute = new Map(EXPECTED_CPU_GATE_ROUTES.map(({ route, method }) => [route, method]));
+  const sourceInventory = sourceNames.map((route) => ({ route, method: methodByRoute.get(route) ?? "UNKNOWN" }));
+
+  const routeTable = section197.match(/\| Method \| Exact route \|\n\| --- \| --- \|\n((?:\|[^\n]*\n)+)/);
+  assert.ok(routeTable, "§19.7 must contain its bounded method/route table");
+  const routeRows = [...routeTable[1].matchAll(/^\|\s*`(GET|POST)`\s*\|\s*`([^`]+)`\s*\|$/gm)];
+  const specInventory = routeRows.map((match) => {
+    const prefix = "/internal/relay/v1/cpu-gate/";
+    assert.ok(match[2].startsWith(prefix), `§19.7 route must use ${prefix}`);
+    return { route: match[2].slice(prefix.length), method: match[1] };
+  });
+  assert.equal(new Set(specInventory.map(({ route }) => route)).size, specInventory.length, "SPEC routes must not contain duplicates");
+  assert.deepEqual(sourceInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal source ROUTES");
+  assert.deepEqual(specInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal §19.7 routes and methods");
+
+  assert.match(section19, /no unannounced HTTP headers, envelope fields, or routes may be added to the closed Relay v1 wire contract/i);
+  assert.match(section19, /All relay ingress and callback routes accept \*\*POST only\*\*/);
+  assert.match(section197, /`OCTG_RELAY_CPU_GATE_AUTH_TOKEN`/);
+  assert.ok(section197.indexOf("404") >= 0 && section197.indexOf("404") < section197.indexOf("401"), "hidden-route 404 behavior must precede enabled-control 401 behavior");
+  assert.match(section197, /returns `401`, before request-body reading or any Durable Object lookup/);
+  assert.match(section197, /8,192-byte request body limit/);
+  assert.match(section197, /no direct Durable Object storage mutation|does not directly mutate Durable Object storage/i);
+  assert.match(section197, /stateless-only/i);
+  assert.match(section197, /Stage 1\/2[^\n]*readiness|does not establish Stage 1\/2 readiness/i);
+  assert.match(section197, /X-OCTG-Worker-Version[\s\S]*?local[\s\S]*?4xx[\s\S]*?500[\s\S]*?503/);
+  assert.match(section197, /outer `index\.ts` catch[\s\S]*?without that wrapper[\s\S]*?not.*DO code version.*CPU PASS/i);
+});
+
 test("all Markdown documentation keeps relative links resolvable", () => {
   const documentationFiles = markdownFiles(root);
   const unresolved = [];
