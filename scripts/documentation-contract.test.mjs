@@ -217,12 +217,20 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
 
   const routeTable = section197.match(/\| Method \| Exact route \|\n\| --- \| --- \|\n((?:\|[^\n]*\n)+)/);
   assert.ok(routeTable, "§19.7 must contain its bounded method/route table");
-  const routeRows = [...routeTable[1].matchAll(/^\|\s*`(GET|POST)`\s*\|\s*`([^`]+)`\s*\|$/gm)];
-  const specInventory = routeRows.map((match) => {
+  const routeLines = routeTable[1].trimEnd().split("\n");
+  const specInventory = routeLines.map((line) => {
+    const match = line.match(/^\|\s*`(GET|POST)`\s*\|\s*`([^`]+)`\s*\|$/);
+    assert.ok(match, `§19.7 route-table row must parse as exactly one GET/POST route: ${line}`);
     const prefix = "/internal/relay/v1/cpu-gate/";
     assert.ok(match[2].startsWith(prefix), `§19.7 route must use ${prefix}`);
-    return { route: match[2].slice(prefix.length), method: match[1] };
+    const route = match[2].slice(prefix.length);
+    const expectedRoute = EXPECTED_CPU_GATE_ROUTES.find(({ route: expected }) => expected === route);
+    assert.ok(expectedRoute, `§19.7 route must be in the frozen inventory: ${route}`);
+    assert.equal(match[1], expectedRoute.method, `§19.7 method must match frozen inventory for ${route}`);
+    return { route, method: match[1] };
   });
+  assert.equal(specInventory.length, EXPECTED_CPU_GATE_ROUTES.length, "§19.7 route count must equal frozen inventory");
+  assert.equal(specInventory.length, sourceNames.length, "§19.7 route count must equal source ROUTES");
   assert.equal(new Set(specInventory.map(({ route }) => route)).size, specInventory.length, "SPEC routes must not contain duplicates");
   assert.deepEqual(sourceInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal source ROUTES");
   assert.deepEqual(specInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal §19.7 routes and methods");
