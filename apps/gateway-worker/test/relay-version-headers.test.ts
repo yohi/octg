@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 describe("internal relay invocation version attribution", () => {
@@ -16,6 +16,17 @@ describe("internal relay invocation version attribution", () => {
     const response = await SELF.fetch(request);
     // Then: rejection still identifies the incoming Worker invocation.
     expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
+    expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
+  });
+
+  it("includes the Worker version on an internal returned 4xx response", async () => {
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "c".repeat(43) });
+    const response = await SELF.fetch(new Request(
+      "https://worker.example/internal/relay/v1/cpu-gate/quota?pool=STANDARD&utcDay=invalid",
+      { headers: { Authorization: `Bearer ${"c".repeat(43)}` } },
+    ));
+    expect(response.status).toBe(400);
     expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
     expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
   });

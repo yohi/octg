@@ -130,10 +130,12 @@ describe("relay CPU-gate routes", () => {
   it("disables missing or service-equal control credentials before reading the body", async () => {
     const request = new Request(`${URL}/setup`, { method: "POST", body: "not-json" });
     const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
     Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
     try {
       const response = await SELF.fetch(request);
       expect(response.status).toBe(404);
+      expect(idFromName).not.toHaveBeenCalled();
     } finally {
       if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
       else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
@@ -177,6 +179,34 @@ describe("relay CPU-gate routes", () => {
     expect(response.status).toBe(404);
     expect(get).not.toHaveBeenCalled();
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+  });
+
+  it.each([
+    ["invalid", "not-a-valid-control-token"],
+    ["ingress-equal", "i".repeat(32)],
+  ])("disables %s control credentials before a DO lookup", async (_label, token) => {
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token });
+    const response = await SELF.fetch(controlRequest("slot"));
+    expect(response.status).toBe(404);
+    expect(idFromName).not.toHaveBeenCalled();
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+  });
+
+  it.each([
+    ["quota", "POST", "GET"],
+    ["slot", "POST", "GET"],
+    ["setup", "GET", "POST"],
+  ] as const)("rejects %s with the required %s-only method", async (route, method, allowed) => {
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    const response = await SELF.fetch(new Request(`${URL}/${route}`, {
+      method,
+      headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+    }));
+    expect(response.status).toBe(405);
+    expect(response.headers.get("Allow")).toBe(allowed);
+    expect(idFromName).not.toHaveBeenCalled();
   });
 
   it("returns the exact compensated setup envelope only after reconciliation proof", async () => {
