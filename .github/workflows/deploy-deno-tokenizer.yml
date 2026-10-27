@@ -61,7 +61,8 @@ jobs:
   deploy:
     name: Deploy to Deno Deploy
     needs: validate
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)
+    # TODO(Task 10): Replace this HOLD only after the reviewed staging CPU-gate release safety is ready.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deno-production
@@ -309,6 +310,7 @@ jobs:
   deploy-production:
     name: Deploy Production
     needs: deploy
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.deploy.result == 'success'
+    # TODO(Task 10): Keep Production mutation held until the reviewed CPU-gate replacement is ready.
+    if: false
     uses: ./.github/workflows/deploy-production.yml
     secrets: inherit

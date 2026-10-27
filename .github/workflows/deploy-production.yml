@@ -21,6 +21,11 @@ jobs:
         with:
           ref: master
 
+      - name: Enforce Issue 121 release HOLD
+        run: |
+          echo "::error::Production Worker deployment is held for Issue 121 release safety."
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

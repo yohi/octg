@@ -188,6 +188,115 @@ test("relay rollout documentation keeps ownership, sharding, admission and rollb
   assert.match(operations, /never depend on D1 writes/);
 });
 
+test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes", () => {
+  const EXPECTED_CPU_GATE_ROUTES = Object.freeze([
+    Object.freeze({ route: "quota", method: "GET" }),
+    Object.freeze({ route: "slot", method: "GET" }),
+    Object.freeze({ route: "setup", method: "POST" }),
+    Object.freeze({ route: "setup-fence", method: "POST" }),
+    Object.freeze({ route: "decision-context", method: "POST" }),
+    Object.freeze({ route: "operation-inspection", method: "POST" }),
+    Object.freeze({ route: "reconcile-unused", method: "POST" }),
+    Object.freeze({ route: "close-operation", method: "POST" }),
+  ]);
+  const specification = read("SPEC.md");
+  const source = read("apps/gateway-worker/src/relay-cpu-gate.ts");
+  const section19 = specification.match(/^## 19\. Responses Relay \(v1\)([\s\S]*)/m)?.[1];
+  const section197Headings = section19
+    ? [...section19.matchAll(/^### 19\.7 Internal CPU-gate control-plane extension[ \t]*$/gm)]
+    : [];
+  assert.equal(section197Headings.length, 1, "SPEC §19.7 heading must occur exactly once");
+  const section197Heading = section197Headings[0];
+  const section197Start = section197Heading.index + section197Heading[0].length + 1;
+  const section197Body = section19.slice(section197Start);
+  const nextSectionHeading = section197Body?.match(/^#{2,3} /m);
+  const section197 = section197Body?.slice(0, nextSectionHeading?.index ?? section197Body.length);
+
+  assert.ok(section19, "SPEC §19 must exist");
+  assert.ok(section197, "SPEC §19.7 CPU-gate route section must exist");
+
+  const routesMatch = source.match(/const ROUTES\s*=\s*\[([\s\S]*?)\]\s*as const\s*;/);
+  assert.ok(routesMatch, "CPU-gate source ROUTES tuple must be unambiguous");
+  const sourceNames = [...routesMatch[1].matchAll(/"([a-z-]+)"/g)].map((match) => match[1]);
+  assert.equal(sourceNames.length, routesMatch[1].match(/,/g)?.length + 1, "source ROUTES tuple must contain only route literals");
+  assert.equal(new Set(sourceNames).size, sourceNames.length, "source ROUTES must not contain duplicates");
+  const methodByRoute = new Map(EXPECTED_CPU_GATE_ROUTES.map(({ route, method }) => [route, method]));
+  const sourceInventory = sourceNames.map((route) => ({ route, method: methodByRoute.get(route) ?? "UNKNOWN" }));
+
+  const routeBlock = section197.match(/The bounded route inventory contains one method\/path pair per non-empty line:\n\n```text\n([\s\S]*?)\n```/);
+  assert.ok(routeBlock, "§19.7 must contain its explicitly bounded route inventory");
+  const routeLines = routeBlock[1].split("\n").filter((line) => line.trim() !== "");
+  const specInventory = routeLines.map((line) => {
+    const match = line.match(/^(GET|POST) (\/\S+)$/);
+    assert.ok(match, `§19.7 bounded route inventory line must parse as exactly one GET/POST method/path pair: ${line}`);
+    const prefix = "/internal/relay/v1/cpu-gate/";
+    assert.ok(match[2].startsWith(prefix), `§19.7 route must use ${prefix}`);
+    const route = match[2].slice(prefix.length);
+    const expectedRoute = EXPECTED_CPU_GATE_ROUTES.find(({ route: expected }) => expected === route);
+    assert.ok(expectedRoute, `§19.7 route must be in the frozen inventory: ${route}`);
+    assert.equal(match[1], expectedRoute.method, `§19.7 method must match frozen inventory for ${route}`);
+    return { route, method: match[1] };
+  });
+  assert.equal(specInventory.length, EXPECTED_CPU_GATE_ROUTES.length, "§19.7 route count must equal frozen inventory");
+  assert.equal(specInventory.length, sourceNames.length, "§19.7 route count must equal source ROUTES");
+  assert.equal(new Set(specInventory.map(({ route }) => route)).size, specInventory.length, "SPEC routes must not contain duplicates");
+  assert.deepEqual(sourceInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal source ROUTES");
+  assert.deepEqual(specInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal §19.7 routes and methods");
+  const sectionOutsideRouteBlock = section197.replace(routeBlock[0], "");
+  const strayRoutes = new Set(
+    [...sectionOutsideRouteBlock.matchAll(/\/internal\/relay\/v1\/cpu-gate\/([A-Za-z0-9_-]+)/g)]
+      .map((match) => match[1]),
+  );
+  assert.deepEqual([...strayRoutes], [], "explicit CPU-gate route paths must appear only inside the bounded inventory");
+
+  assert.match(section19, /no unannounced HTTP headers, envelope fields, or routes may be added to the closed Relay v1 wire contract/i);
+  assert.match(section19, /All relay ingress and callback routes accept \*\*POST only\*\*/);
+  assert.match(section197, /`OCTG_RELAY_CPU_GATE_AUTH_TOKEN`/);
+  assert.ok(section197.indexOf("404") >= 0 && section197.indexOf("404") < section197.indexOf("401"), "hidden-route 404 behavior must precede enabled-control 401 behavior");
+  assert.match(section197, /returns `401`, before request-body reading or any Durable Object lookup/);
+  assert.match(section197, /8,192-byte request body limit/);
+  assert.match(section197, /no direct Durable Object storage mutation|does not directly mutate Durable Object storage/i);
+  assert.match(section197, /stateless-only/i);
+  assert.match(section197, /Stage 1\/2[^\n]*readiness|does not establish Stage 1\/2 readiness/i);
+  assert.match(section197, /X-OCTG-Worker-Version[\s\S]*?local[\s\S]*?4xx[\s\S]*?500[\s\S]*?503/);
+  assert.match(section197, /outer `index\.ts` catch[\s\S]*?without that wrapper[\s\S]*?not.*DO code version.*CPU PASS/i);
+});
+
+test("production runbook distinguishes current-ref HOLD, historical cutover and future release authorization", () => {
+  const operations = read("docs/operations.md");
+  const deployment = read("docs/deployment.md");
+  const runbook = `${operations}\n${deployment}`.replace(/\s+/g, " ");
+
+  for (const restriction of [
+    "Deno Deploy",
+    "D1 migrations",
+    "Worker deploy",
+    "HOLD_CODE_PRESENT",
+    "HOLD_ACTIVE",
+    "HOLD_CUTOVER_BLOCKED",
+    "previously running traffic",
+    "old Workflow definitions",
+    "preapproved jobs",
+  ]) assert.ok(runbook.includes(restriction), `runbook must document ${restriction}`);
+  for (const requiredCondition of [
+    "approved operator cutover decision",
+    "all running, queued, pending, and approval-waiting Production-capable jobs",
+    "historical `workflow_dispatch`",
+    "old-SHA reusable",
+    "deployment-branch restrictions and required",
+    "Production deployment credential reachability",
+    "verified and",
+    "bounded",
+  ]) {
+    assert.ok(runbook.includes(requiredCondition), `HOLD_ACTIVE requires evidence of ${requiredCondition}`);
+  }
+  assert.match(runbook, /HOLD_CUTOVER_BLOCKED \/ HOLD_ACTIVE_NOT_PROVEN/);
+  assert.match(runbook, /HOLD_ACTIVE[\s\S]*?approved operator cutover decision[\s\S]*?Production-capable jobs[\s\S]*?workflow_dispatch[\s\S]*?old-SHA reusable[\s\S]*?deployment-branch restrictions[\s\S]*?credential reachability/i);
+  assert.match(runbook, /HOLD_CUTOVER_BLOCKED[\s\S]*?(?:missing|absent|incomplete)[\s\S]*?(?:proof|evidence)/i);
+  assert.match(runbook, /Issue #121[\s\S]*?Tasks 9.?12/i);
+  assert.match(runbook, /NOT VERIFIED/);
+});
+
 test("all Markdown documentation keeps relative links resolvable", () => {
   const documentationFiles = markdownFiles(root);
   const unresolved = [];

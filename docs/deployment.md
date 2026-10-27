@@ -157,6 +157,47 @@ Use `/v1/models` rather than a copied model list to select a model available in 
 
 ## GitHub Actions
 
+### Production CPU-gate interim release HOLD
+
+The current-ref restriction is unconditional while the interim release HOLD is
+in force: do not run Deno Deploy, apply Worker D1 migrations, or deploy the Worker
+from the current source ref. `HOLD_CODE_PRESENT` means deny/control code is
+present in this source tree only. It does not prove a Production cutover.
+`HOLD_ACTIVE` requires positive, timestamped evidence for **all** of the
+following necessary conditions: an approved operator cutover decision; all
+running, queued, pending, and approval-waiting Production-capable jobs stopped
+or safely contained; historical `workflow_dispatch` and old-SHA reusable
+workflow dispatch/reuse routes blocked or safely contained; effective
+`deno-production` Environment deployment-branch restrictions and required
+reviewers; and Production deployment credential reachability verified and
+bounded to approved trusted routes. If any condition cannot be controlled or
+observed, the status must remain
+`HOLD_CUTOVER_BLOCKED / HOLD_ACTIVE_NOT_PROVEN`. Do not claim `HOLD_ACTIVE`
+without that operator evidence; missing proof never authorizes deployment.
+
+The cutover operator must inventory before/after run IDs and attempt numbers,
+queued/active/rerunnable/Environment-waiting jobs and approval states, selected
+ref and SHA, actual `deno-production` deployment-branch and reviewer rules,
+credential scopes, the exact authorized emergency/rollback path, operator
+authority, and UTC evidence timestamps. Mark residual unknowns `UNKNOWN` and
+retain evidence in the approved protected location without secret values.
+Already-running traffic is not rolled back as a cutover action. Old Workflow
+definitions and preapproved jobs are not protected by new YAML alone: inspect
+and disposition them in the actual Production control plane. Never recommend
+unverified `wrangler deploy` of newest master as an emergency workaround. See
+the [no-gap operator cutover runbook](./operations.md#production-cpu-gate-release-hold-and-cutover).
+
+Release unblocking is deferred to Issue #121 Tasks 9–12 and is **NOT VERIFIED**
+here: Task 6 Stage 1 at locked SHA; conditional Tasks 7/8 only on lifecycle
+FAIL; Task 9 exact DO compatibility manifest; Task 10 generated bridge/candidate
+configs with bridge 100% / candidate 0%, fenced fixture terminalization and
+authoritative singleton idle; Task 11 immutable SHA lock, full local gates and
+fresh Stage 1; Task 12 separately authorized Stage 2 (5/7/0, >=500 successes,
+complete telemetry), exact candidate acceptance, distinct hardening version and
+secret teardown. Future release-guard tests/implementation belong to those
+tasks, not this documentation assertion. Do not claim Stage 1/2 PASS or close
+Issue #121 based on this change.
+
 ### Production Worker
 
 `.github/workflows/deploy-production.yml` runs on changes to `master` and validates the repository before deploying the production Worker. The workflow includes type checking, tests, contract checks, D1 migration handling, and versioned Worker deployment.

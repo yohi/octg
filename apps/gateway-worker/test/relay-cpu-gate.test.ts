@@ -5,9 +5,11 @@ import type { QuotaController } from "@octg/quota-controller";
 import { ulid } from "ulid";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { invalidateConfigCaches } from "../src/policy";
+import { handleRelayCpuGate } from "../src/relay-cpu-gate";
 
 const URL = "https://worker.example/internal/relay/v1/cpu-gate";
 const CONTROL_TOKEN = "c".repeat(43);
+let previousControlToken: string | undefined;
 
 beforeAll(async () => {
   Object.assign(env, {
@@ -33,6 +35,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  previousControlToken = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+  Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
   await runInDurableObject(slot(), async (_instance, state) => {
     await state.storage.delete("cpu-gate-slot:v1:state");
     await state.storage.delete("cpu-gate-slot:v1:generation");
@@ -41,6 +45,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (previousControlToken === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+  else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previousControlToken });
   invalidateConfigCaches();
 });
 
@@ -65,6 +71,24 @@ function controlRequest(path: string, body?: unknown, token = CONTROL_TOKEN): Re
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+}
+
+function instrumentedPost(): { readonly request: Request; readonly reads: { count: number }; readonly cancels: { count: number } } {
+  const reads = { count: 0 };
+  const cancels = { count: 0 };
+  const body = new ReadableStream<Uint8Array>({
+    pull() { reads.count += 1; },
+    cancel() { cancels.count += 1; },
+  }, { highWaterMark: 0 });
+  return {
+    request: new Request(`${URL}/setup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${"wrong".repeat(8)}` },
+      body,
+    }),
+    reads,
+    cancels,
+  };
 }
 
 function fixtureContext(id: string, clientId: string): RelayContextV1 {
@@ -127,20 +151,22 @@ async function closeSlot(ownerId: string, pool: PoolName, generation: number): P
 }
 
 describe("relay CPU-gate routes", () => {
-  it("disables missing or service-equal control credentials before reading the body", async () => {
+  it("returns 404 for missing control credentials without a DO lookup", async () => {
     const request = new Request(`${URL}/setup`, { method: "POST", body: "not-json" });
     const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
     Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
     try {
       const response = await SELF.fetch(request);
       expect(response.status).toBe(404);
+      expect(idFromName).not.toHaveBeenCalled();
     } finally {
       if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
       else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
     }
   });
 
-  it("requires the dedicated bearer before a route can parse a request", async () => {
+  it("returns 401 for a wrong control bearer without a DO lookup", async () => {
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
     const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
     const response = await SELF.fetch(new Request(`${URL}/setup`, {
@@ -150,6 +176,43 @@ describe("relay CPU-gate routes", () => {
     }));
     expect(response.status).toBe(401);
     expect(idFromName).not.toHaveBeenCalled();
+  });
+
+  it("does not read or cancel a direct-handler body for disabled control credentials", async () => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    try {
+      for (const token of [undefined, "invalid-control-token", env.OCTG_RELAY_SERVICE_AUTH_TOKEN, env.OCTG_RELAY_INGRESS_AUTH_TOKEN]) {
+        if (token === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+        else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token });
+        const { request, reads, cancels } = instrumentedPost();
+        const response = await handleRelayCpuGate(request, env);
+        expect(response.status).toBe(404);
+        expect(reads.count).toBe(0);
+        expect(cancels.count).toBe(0);
+      }
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
+  });
+
+  it("does not read or cancel a direct-handler body for a wrong control bearer", async () => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+    try {
+      const { request, reads, cancels } = instrumentedPost();
+      const response = await handleRelayCpuGate(request, env);
+      expect(response.status).toBe(401);
+      expect(reads.count).toBe(0);
+      expect(cancels.count).toBe(0);
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
   });
 
   it("rejects a missing control bearer before a Durable Object lookup", async () => {
@@ -179,6 +242,50 @@ describe("relay CPU-gate routes", () => {
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
   });
 
+  it.each([
+    ["invalid", "not-a-valid-control-token"],
+    ["ingress-equal", "i".repeat(32)],
+  ])("disables %s control credentials before a DO lookup", async (_label, token) => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: token });
+    try {
+      const response = await SELF.fetch(controlRequest("slot"));
+      expect(response.status).toBe(404);
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
+  });
+
+  it.each([
+    ["quota", "POST", "GET"],
+    ["slot", "POST", "GET"],
+    ["setup", "GET", "POST"],
+    ["setup-fence", "GET", "POST"],
+    ["decision-context", "GET", "POST"],
+    ["operation-inspection", "GET", "POST"],
+    ["reconcile-unused", "GET", "POST"],
+    ["close-operation", "GET", "POST"],
+  ] as const)("rejects %s with the required %s-only method", async (route, method, allowed) => {
+    const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+    Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
+    const idFromName = vi.spyOn(env.QUOTA_CONTROLLER, "idFromName");
+    try {
+      const response = await SELF.fetch(new Request(`${URL}/${route}`, {
+        method,
+        headers: { Authorization: `Bearer ${CONTROL_TOKEN}` },
+      }));
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe(allowed);
+      expect(idFromName).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(env, "OCTG_RELAY_CPU_GATE_AUTH_TOKEN");
+      else Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: previous });
+    }
+  });
+
   it("returns the exact compensated setup envelope only after reconciliation proof", async () => {
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
     const id = requestId();
@@ -186,6 +293,8 @@ describe("relay CPU-gate routes", () => {
     const response = await SELF.fetch(controlRequest("setup", setupBody(id)));
     expect(sign).toHaveBeenCalledOnce();
     expect(response.status).toBe(500);
+    expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
+    expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
     expect(await response.json()).toEqual({ version: 1, kind: "setup_failed_compensated" });
     const day = relayRequestUtcDayOf(id);
     if (day === undefined) throw new Error("generated request ID must have a UTC day");
@@ -479,6 +588,9 @@ describe("relay CPU-gate routes", () => {
       // Then: it fails closed before namespace identity resolution.
       expect(response.status).toBe(503);
       expect(close.status).toBe(503);
+      expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
+      expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
+      expect(await response.json()).toEqual({ version: 1, error: "cpu_gate_slot_unavailable" });
       expect(idFromName).not.toHaveBeenCalled();
     } finally {
       if (previous !== undefined) Object.assign(env, { OCTG_RELAY_ENVIRONMENT: previous });

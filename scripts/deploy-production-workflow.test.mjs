@@ -85,10 +85,18 @@ function extractWorkflowJobs(workflow) {
     const block = jobsWorkflow.slice(match.index, jobEnd);
     return {
       id: match[1],
+      if: block.match(/^    if:\s*(.*)$/m)?.[1]?.trim() ?? null,
       needs: extractJobNeeds(block),
       steps: extractWorkflowSteps(block),
     };
   });
+}
+
+function extractWorkflowTriggers(workflow) {
+  const onIndex = workflow.search(/^on:\s*$/m);
+  const jobsIndex = workflow.search(/^jobs:\s*$/m);
+  assert.ok(onIndex >= 0 && jobsIndex > onIndex, "workflow must have an on: block before jobs:");
+  return workflow.slice(onIndex, jobsIndex);
 }
 
 function extractJobNeeds(jobBlock) {
@@ -161,6 +169,36 @@ test("deploy-production workflow preserves remote environment variables using --
     "'Deploy Worker' step must invoke 'wrangler deploy' with '--keep-vars' to prevent erasing remote variables like Deno settings",
   );
   assert.match(runCommand, /--var "OCTG_RELAY_ENVIRONMENT:production"/);
+});
+
+test("deploy-production fails closed before any release validation or mutation while Issue 121 is on HOLD", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/deploy-production.yml"), "utf8");
+  const jobs = extractWorkflowJobs(workflow);
+  const job = jobs.find(({ id }) => id === "test-and-deploy");
+  assert.ok(job, "reusable production deployment job must exist");
+
+  const checkoutIndex = job.steps.findIndex(({ name }) => name === "Checkout");
+  const holdIndex = job.steps.findIndex(({ name }) => name === "Enforce Issue 121 release HOLD");
+  const migrationIndex = job.steps.findIndex(({ name }) => name === "Apply D1 migrations");
+  const deployIndex = job.steps.findIndex(({ name }) => name === "Deploy Worker");
+  assert.equal(holdIndex, checkoutIndex + 1, "HOLD must be the first executable step after checkout");
+  assert.ok(holdIndex < migrationIndex, "HOLD must precede Apply D1 migrations");
+  assert.ok(holdIndex < deployIndex, "HOLD must precede Deploy Worker");
+
+  const holdMarker = "- name: Enforce Issue 121 release HOLD";
+  const holdStart = workflow.indexOf(holdMarker);
+  const holdEnd = workflow.indexOf("\n      - name:", holdStart + holdMarker.length);
+  const holdStep = workflow.slice(holdStart, holdEnd < 0 ? undefined : holdEnd);
+  const holdRun = extractStepRun(workflow, "Enforce Issue 121 release HOLD");
+  assert.ok(holdRun, "HOLD must have a run command");
+  assert.match(holdRun, /exit\s+1/, "HOLD must unconditionally exit nonzero");
+  assert.doesNotMatch(holdStep, /^\s+(?:if|env|with):/m, "HOLD must not have conditional or env-driven bypasses");
+  assert.doesNotMatch(holdRun, /\$\{|\$[A-Za-z_][A-Za-z0-9_]*/, "HOLD must not depend on arguments or environment variables");
+  assert.doesNotMatch(
+    workflow.slice(workflow.indexOf("      - name: Checkout"), holdStart),
+    /secrets\.|git\s+ls-remote|wrangler|curl\s|\bnpx\b|\bnpm\s+ci\b/i,
+    "no secret read or remote command may run before HOLD",
+  );
 });
 
 test("deploy-production workflow sources all non-secret settings from GitHub Variables", () => {
@@ -292,16 +330,35 @@ test("deploy-production is a reusable workflow with a trusted checkout", () => {
   );
 });
 
-test("deploy-deno-tokenizer calls production deployment after a successful master deploy", () => {
+test("deploy-deno-tokenizer keeps validation but holds both deployment jobs for every trigger", () => {
   const denoWorkflow = readFileSync(
     join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
     "utf8",
   );
 
-  assert.match(
-    denoWorkflow,
-    /deploy-production:\n\s+name: Deploy Production\n\s+needs: deploy\n\s+if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && needs\.deploy\.result == 'success'/,
-  );
+  const jobs = extractWorkflowJobs(denoWorkflow);
+  const triggers = extractWorkflowTriggers(denoWorkflow);
+  assert.match(triggers, /^  push:/m, "push trigger must remain configured");
+  assert.match(triggers, /^  workflow_dispatch:\s*$/m, "workflow_dispatch trigger must remain configured");
+  const pullRequestTrigger = triggers.match(/^  pull_request:\n((?:^    .*\n|^\n)*)/m);
+  assert.ok(pullRequestTrigger, "pull_request trigger must remain configured");
+  assert.match(pullRequestTrigger[1], /^    types:.*\blabeled\b/m, "pull_request must include labeled activity");
+
+  const deniedTriggerEvents = ["push", "pull_request.labeled", "workflow_dispatch"];
+  for (const jobName of ["deploy", "deploy-production"]) {
+    const job = jobs.find(({ id }) => id === jobName);
+    assert.ok(job, `${jobName} job must remain present`);
+    assert.equal(job.if, "false", `${jobName} must be unconditionally denied during HOLD`);
+    for (const eventName of deniedTriggerEvents) {
+      const configured = eventName === "pull_request.labeled"
+        ? /^  pull_request:\n[\s\S]*?^    types:.*\blabeled\b/m.test(triggers)
+        : new RegExp(`^  ${eventName}:\\s*$`, "m").test(triggers);
+      assert.ok(configured, `${eventName} must be a configured workflow trigger`);
+      assert.equal(job.if, "false", `${jobName} is denied for configured ${eventName}`);
+    }
+  }
+  assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Typecheck"));
+  assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Unit tests"));
   assert.match(denoWorkflow, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
   assert.match(denoWorkflow, /secrets: inherit/);
 });
@@ -355,7 +412,7 @@ test("deploy-production probes Deno before D1 mutation", () => {
   );
 });
 
-test("deploy-deno-tokenizer deploys every master commit and probes its contract", () => {
+test("deploy-deno-tokenizer retains master validation scope and deployment recipes during HOLD", () => {
   const denoWorkflow = readFileSync(
     join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
     "utf8",
@@ -379,7 +436,7 @@ test("deploy-deno-tokenizer deploys every master commit and probes its contract"
   const deployIndex = denoWorkflow.indexOf("- name: Deploy\n");
   const probeName = "Verify Deno prepare contract";
   const probeIndex = denoWorkflow.indexOf(`- name: ${probeName}`);
-  assert.ok(probeIndex > deployIndex, "the contract probe must run after deployment");
+  assert.ok(probeIndex > deployIndex, "the contract probe remains in the preserved deployment recipe");
   assert.match(
     extractStepRun(denoWorkflow, probeName) ?? "",
     /node scripts\/verify-deno-prepare-contract\.mjs/,
@@ -473,7 +530,7 @@ test("deploy-deno-tokenizer deploys Deno before the Production Worker for the sa
   const productionJob = denoWorkflow.slice(productionStart);
 
   assert.match(productionJob, /needs: deploy\n/);
-  assert.match(productionJob, /needs\.deploy\.result == 'success'/);
+  assert.match(productionJob, /if: false/);
   assert.match(productionJob, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
   assert.match(productionJob, /secrets: inherit/);
 
