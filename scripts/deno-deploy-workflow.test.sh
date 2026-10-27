@@ -13,7 +13,7 @@ if ! ruby -ryaml -e '' >/dev/null 2>&1; then
   exit 2
 fi
 
-if rg -n '^(import|export) .* from "\./[^"./]+";' packages/shared/src; then
+if grep -RnE -- '^(import|export) .* from "\./[^"./]+";' packages/shared/src; then
   printf 'Deno Deploy contract violation: shared relative imports must include .ts extensions\n' >&2
   exit 1
 fi
@@ -821,7 +821,7 @@ RUBY
   if [[ "$fixture" == exec\ * ]]; then
     expected_reason='unsupported shell wrapper in validate run step: exec'
   fi
-  if ! rg -Fq "$expected_reason" "$temporary_output"; then
+  if ! grep -Fq -- "$expected_reason" "$temporary_output"; then
     rm -f "$temporary_workflow" "$temporary_output"
     printf 'workflow contract rejected wrapper fixture for an unexpected reason: %s\n' "$fixture" >&2
     exit 1
