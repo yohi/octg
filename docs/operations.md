@@ -179,6 +179,8 @@ See [deno-tokenizer.md](./deno-tokenizer.md) for Deno-specific deployment and ac
 
 ## Preview Relay CPU Stage 1 Gate
 
+The normative CPU-gate control-route contract is [SPEC.md §19.7](../SPEC.md#197-internal-cpu-gate-control-plane-extension). Deploying the Worker routes does not activate the gate: activation requires the distinct `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Stage 1 measurement PASS and the Stage 2 bridge are separate required evidence; neither is implied by deployment or local tests. Keep issue [#121](https://github.com/yohi/octg/issues/121) open until both stages are proven and the issue's closure criteria are met. Follow Tasks 6 and 9–12 in the [CPU headroom plan](./superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md) for the existing runbook and acceptance procedure.
+
 Stage 1 measures the relay path against the isolated Preview Worker. It is a
 remote deployment and traffic operation; run it only after the Preview account,
 Worker, D1 database, Durable Object classes, Deno service, model registry, and
