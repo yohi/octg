@@ -57,7 +57,29 @@ def run_steps(steps)
   steps.filter_map { |step| step["run"] if step.is_a?(Hash) && step["run"].is_a?(String) }
 end
 
-def command_tokens(run)
+def parenthesized_content(text, opening)
+  nesting = 1
+  cursor = opening + 1
+  quote = nil
+  while cursor < text.length && nesting.positive?
+    char = text[cursor]
+    if quote
+      quote = nil if char == quote && text[cursor - 1] != "\\"
+    elsif ["'", '"'].include?(char)
+      quote = char
+    elsif char == "("
+      nesting += 1
+    elsif char == ")"
+      nesting -= 1
+    end
+    cursor += 1
+  end
+  nesting.zero? ? [text[(opening + 1)...(cursor - 1)], cursor] : [nil, opening + 1]
+end
+
+def command_tokens(run, depth = 0)
+  return [] if depth > 12
+
   logical_lines = []
   pending = +""
   run.each_line do |line|
@@ -73,8 +95,71 @@ def command_tokens(run)
 
   logical_lines.flat_map do |line|
     begin
-      Shellwords.shellsplit(line).slice_after { |token| %w[&& || ; |].include?(token) }
-        .map { |segment| segment.reject { |token| %w[&& || ; |].include?(token) } }
+      nested_commands = []
+      flattened = +""
+      quote = nil
+      escaped = false
+      index = 0
+      while index < line.length
+        char = line[index]
+        if escaped
+          flattened << char
+          escaped = false
+        elsif char == "\\" && quote != "'"
+          flattened << char
+          escaped = true
+        elsif quote == '"' && char == "$" && line[index + 1] == "("
+          content, cursor = parenthesized_content(line, index + 1)
+          if content
+            nested_commands.concat(command_tokens(content, depth + 1))
+            flattened << " "
+            index = cursor - 1
+          else
+            flattened << char
+          end
+        elsif quote
+          flattened << char
+          quote = nil if char == quote
+        elsif ["'", '"'].include?(char)
+          quote = char
+          flattened << char
+        elsif char == "(" || (char == "$" && line[index + 1] == "(")
+          opening = char == "$" ? index + 1 : index
+          content, cursor = parenthesized_content(line, opening)
+          if content
+            nested_commands.concat(command_tokens(content, depth + 1))
+            flattened << " "
+            index = cursor - 1
+          else
+            flattened << char
+          end
+        elsif [";", "|"].include?(char) || (char == "&" && line[index + 1] == "&") || (char == "|" && line[index + 1] == "|")
+          operator = line[index, 2] == "&&" || line[index, 2] == "||" ? line[index, 2] : char
+          flattened << " #{operator} "
+          index += operator.length - 1
+        elsif (word = line[index..].match(/\A(?:if|then|elif|else|fi|while|do|done|for|in)\b/))
+          flattened << " #{word[0]} "
+          index += word[0].length - 1
+        else
+          flattened << char
+        end
+        index += 1
+      end
+
+      tokens = Shellwords.shellsplit(flattened)
+      separators = %w[&& || ; | if then elif else fi while do done for in]
+      segments = []
+      current = []
+      tokens.each do |token|
+        if separators.include?(token)
+          segments << current unless current.empty?
+          current = []
+        else
+          current << token
+        end
+      end
+      segments << current unless current.empty?
+      nested_commands + segments
     rescue ArgumentError
       []
     end
@@ -627,6 +712,7 @@ jobs.each do |job_name, raw_job|
 end
 RUBY
 
+if [[ "${OCTG_SKIP_MUTATION_FIXTURES:-false}" != "true" ]]; then
 forbidden_fixtures=(
   'deno deploy'
   'deno run -A jsr:@deno/deploy@0.0.9904 deploy'
@@ -637,6 +723,10 @@ forbidden_fixtures=(
   'wrangler versions secret delete NAME'
   'wrangler d1 migrations apply DB --remote'
   'deno run -A jsr:@deno/deploy@0.0.9904 env load file.env'
+  'if true; then wrangler deploy; fi'
+  'while true; do wrangler d1 migrations apply DB --remote; done'
+  'printf "%s" "$(wrangler secret put NAME)"'
+  'printf ok && wrangler versions deploy'
 )
 for fixture in "${forbidden_fixtures[@]}"; do
   temporary_workflow="$(mktemp)"
@@ -647,12 +737,34 @@ workflow["on"] ||= workflow.delete(true)
 workflow.fetch("jobs").fetch("validate").fetch("steps") << { "name" => "injected fixture", "run" => command }
 File.write(destination, workflow.to_yaml)
 RUBY
-  if bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
+  if OCTG_SKIP_MUTATION_FIXTURES=true bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
     rm -f "$temporary_workflow"
     printf 'workflow contract accepted forbidden fixture: %s\n' "$fixture" >&2
     exit 1
   fi
   rm -f "$temporary_workflow"
 done
+
+safe_fixtures=(
+  '# wrangler deploy is intentionally not executed here'
+  "printf '%s\\n' 'wrangler deploy'"
+)
+for fixture in "${safe_fixtures[@]}"; do
+  temporary_workflow="$(mktemp)"
+  ruby -ryaml - "$workflow" "$temporary_workflow" "$fixture" <<'RUBY'
+source, destination, command = ARGV
+workflow = YAML.safe_load(File.read(source), aliases: true)
+workflow["on"] ||= workflow.delete(true)
+workflow.fetch("jobs").fetch("validate").fetch("steps") << { "name" => "safe parser fixture", "run" => command }
+File.write(destination, workflow.to_yaml)
+RUBY
+  if ! OCTG_SKIP_MUTATION_FIXTURES=true bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
+    rm -f "$temporary_workflow"
+    printf 'workflow contract rejected safe command fixture: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  rm -f "$temporary_workflow"
+done
+fi
 
 printf 'Deno Deploy workflow contract: ok\n'

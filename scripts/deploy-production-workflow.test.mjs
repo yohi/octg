@@ -92,6 +92,13 @@ function extractWorkflowJobs(workflow) {
   });
 }
 
+function extractWorkflowTriggers(workflow) {
+  const onIndex = workflow.search(/^on:\s*$/m);
+  const jobsIndex = workflow.search(/^jobs:\s*$/m);
+  assert.ok(onIndex >= 0 && jobsIndex > onIndex, "workflow must have an on: block before jobs:");
+  return workflow.slice(onIndex, jobsIndex);
+}
+
 function extractJobNeeds(jobBlock) {
   const needsMatch = jobBlock.match(/^    needs:\s*(.*)$/m);
   if (!needsMatch) return [];
@@ -300,18 +307,28 @@ test("deploy-deno-tokenizer keeps validation but holds both deployment jobs for 
   );
 
   const jobs = extractWorkflowJobs(denoWorkflow);
+  const triggers = extractWorkflowTriggers(denoWorkflow);
+  assert.match(triggers, /^  push:/m, "push trigger must remain configured");
+  assert.match(triggers, /^  workflow_dispatch:\s*$/m, "workflow_dispatch trigger must remain configured");
+  const pullRequestTrigger = triggers.match(/^  pull_request:\n((?:^    .*\n|^\n)*)/m);
+  assert.ok(pullRequestTrigger, "pull_request trigger must remain configured");
+  assert.match(pullRequestTrigger[1], /^    types:.*\blabeled\b/m, "pull_request must include labeled activity");
+
+  const deniedTriggerEvents = ["push", "pull_request.labeled", "workflow_dispatch"];
   for (const jobName of ["deploy", "deploy-production"]) {
     const job = jobs.find(({ id }) => id === jobName);
     assert.ok(job, `${jobName} job must remain present`);
     assert.equal(job.if, "false", `${jobName} must be unconditionally denied during HOLD`);
+    for (const eventName of deniedTriggerEvents) {
+      const configured = eventName === "pull_request.labeled"
+        ? /^  pull_request:\n[\s\S]*?^    types:.*\blabeled\b/m.test(triggers)
+        : new RegExp(`^  ${eventName}:\\s*$`, "m").test(triggers);
+      assert.ok(configured, `${eventName} must be a configured workflow trigger`);
+      assert.equal(job.if, "false", `${jobName} is denied for configured ${eventName}`);
+    }
   }
   assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Typecheck"));
   assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Unit tests"));
-  for (const trigger of ["push", "pull_request label", "workflow_dispatch"]) {
-    for (const jobName of ["deploy", "deploy-production"]) {
-      assert.equal(jobs.find(({ id }) => id === jobName).if, "false", `${jobName} denied for ${trigger}`);
-    }
-  }
   assert.match(denoWorkflow, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
   assert.match(denoWorkflow, /secrets: inherit/);
 });
