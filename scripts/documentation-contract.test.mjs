@@ -262,6 +262,28 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
   assert.match(section197, /outer `index\.ts` catch[\s\S]*?without that wrapper[\s\S]*?not.*DO code version.*CPU PASS/i);
 });
 
+test("production runbook distinguishes current-ref HOLD, historical cutover and future release authorization", () => {
+  const operations = read("docs/operations.md");
+  const deployment = read("docs/deployment.md");
+  const runbook = `${operations}\n${deployment}`;
+
+  for (const restriction of [
+    "Deno Deploy",
+    "D1 migrations",
+    "Worker deploy",
+    "HOLD_CODE_PRESENT",
+    "HOLD_ACTIVE",
+    "HOLD_CUTOVER_BLOCKED",
+    "previously running traffic",
+    "old Workflow definitions",
+    "preapproved jobs",
+  ]) assert.ok(runbook.includes(restriction), `runbook must document ${restriction}`);
+  assert.match(runbook, /HOLD_ACTIVE[\s\S]*?(?:old.ref|old-ref)[\s\S]*?(?:in.flight|in-flight)[\s\S]*?Environment[\s\S]*?credential/i);
+  assert.match(runbook, /HOLD_CUTOVER_BLOCKED[\s\S]*?(?:missing|absent|incomplete)[\s\S]*?(?:proof|evidence)/i);
+  assert.match(runbook, /Issue #121[\s\S]*?Tasks 9.?12/i);
+  assert.match(runbook, /NOT VERIFIED/);
+});
+
 test("all Markdown documentation keeps relative links resolvable", () => {
   const documentationFiles = markdownFiles(root);
   const unresolved = [];

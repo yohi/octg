@@ -22,6 +22,67 @@ A pool snapshot reports its configured limit, used capacity, remaining capacity,
 
 Use the Access-protected Admin UI at `/admin/ui/` for operator views when configured.
 
+## Production CPU-Gate Release HOLD and Cutover
+
+The current-ref release restriction is unconditional: do not run Deno Deploy,
+apply Worker D1 migrations, or deploy the Worker from the current source ref while
+the interim HOLD is in force. `HOLD_CODE_PRESENT` means only that deny/control
+code exists in the checked-out source; it is not evidence that the running
+Production workflows or jobs are held. Report `HOLD_ACTIVE` only after positive
+evidence establishes that old-ref runs are blocked, in-flight runs are stopped
+or safely contained, the `deno-production` Environment branch and reviewer rules
+are effective, and trusted Production credentials are unavailable to unauthorized
+runs. If any proof is missing, ambiguous, or stale, report
+`HOLD_CUTOVER_BLOCKED` and preserve the HOLD; do not infer activation from the
+presence of new YAML. Do not roll back traffic that was already running before
+the cutover.
+
+### No-gap operator cutover inventory
+
+An authorized operator records this inventory before and after the historical
+cutover. Keep evidence in the approved protected location; never record secret
+values.
+
+| Evidence | Record and verify |
+| --- | --- |
+| Run identity | Workflow/run IDs and attempt numbers before and after the change; include queued, active, rerunnable, and Environment-waiting approvals. |
+| Approval state | Identify approvals still actionable, pending Environment reviewers, and jobs that can be rerun or resumed; verify their disposition rather than assuming cancellation. |
+| Ref selection | Record source ref and exact SHA for each run, and which ref/SHA the production workflow permits. |
+| Environment policy | Verify `deno-production` deployment branch restrictions and required reviewer rules against the actual Environment configuration. |
+| Credential scope | Verify trusted Production Deno management/runtime credentials and Worker deployment credentials are scoped only to intended trusted workflows; do not disclose values. |
+| Emergency / rollback | Name the authorized recovery operator, known-good immutable Deno and Worker revisions, and the reviewed recovery sequence. Never use an unverified `wrangler deploy` of newest master as an emergency workaround. |
+| Authority | Record the operator who performed and independently checked the cutover, with the authorization source. |
+| Timestamps | Capture UTC timestamps for every observation and action, including the before/after run inventory. Mark unavailable or uncorrelated facts `UNKNOWN`. |
+
+New YAML does not protect against old Workflow definitions already queued or
+running, preapproved jobs, or a rerun that selects an older ref. Inspect those
+jobs and approvals directly in the actual Production control plane. Do not roll
+back previously running traffic; stop or block only actions that have not yet
+safely started, using the approved control-plane procedure. If an emergency recovery is
+needed, use only the documented, exact known-good revision and authorized path.
+
+### Deferred release-unblocking handoff — Issue #121
+
+The release HOLD remains until the separately reviewed and authorized follow-up
+work is complete. This documentation-only change does not implement or verify
+that work (**NOT VERIFIED**):
+
+1. Task 6 Stage 1 must run at its locked SHA and produce authoritative evidence.
+2. Tasks 7/8 are conditional follow-up only if the lifecycle result is FAIL.
+3. Task 9 owns the exact Durable Object compatibility manifest.
+4. Task 10 owns generated bridge/candidate configs, mandatory bridge 100% and
+   candidate 0%, fenced fixture terminalization, and authoritative singleton idle.
+5. Task 11 owns the immutable SHA lock, full local gates, and fresh Stage 1.
+6. Task 12 is separately authorized Stage 2: 5/7/0, at least 500 successes,
+   complete telemetry, exact candidate acceptance, a distinct hardening version,
+   and secret teardown.
+
+The later RED/GREEN tests and acceptance ownership are tracked in Issue #121,
+Tasks 9–12, and the [CPU headroom plan](./superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md).
+They are **NOT VERIFIED** by this interim runbook contract test; do not claim
+Stage 1 or Stage 2 PASS or treat this test as release authorization. Keep Issue
+#121 open until its complete criteria are met.
+
 ## Observability
 
 The Worker has Cloudflare observability enabled.
