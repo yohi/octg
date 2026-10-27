@@ -41,7 +41,7 @@ export type RelayCpuGateControl =
 export function resolveRelayCpuGateControl(env: RelayEnvConfig): RelayCpuGateControl {
   const token = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
   if (token === undefined || !isRelayServiceToken(token)) return { kind: "disabled" };
-  if (env.OCTG_RELAY_SERVICE_AUTH_TOKEN !== undefined && token === env.OCTG_RELAY_SERVICE_AUTH_TOKEN) {
+  if (token === env.OCTG_RELAY_SERVICE_AUTH_TOKEN || token === env.OCTG_RELAY_INGRESS_AUTH_TOKEN) {
     return { kind: "disabled" };
   }
   return { kind: "enabled", token };

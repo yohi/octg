@@ -223,6 +223,20 @@ describe("resolveRelayCpuGateControl", () => {
     })).toEqual({ kind: "disabled" });
   });
 
+  it("disables a CPU-gate secret that equals the ingress secret", () => {
+    // Given: the CPU-gate and ingress credentials share one value.
+    const ingressToken = "i".repeat(32);
+
+    // When: the dedicated control configuration is resolved.
+    const config = resolveRelayCpuGateControl({
+      OCTG_RELAY_CPU_GATE_AUTH_TOKEN: ingressToken,
+      OCTG_RELAY_INGRESS_AUTH_TOKEN: ingressToken,
+    });
+
+    // Then: the control plane remains disabled.
+    expect(config).toEqual({ kind: "disabled" });
+  });
+
   it("accepts only the distinct configured CPU-gate bearer", () => {
     // Given: a valid CPU-gate secret distinct from the lifecycle service secret.
     const config = resolveRelayCpuGateControl({

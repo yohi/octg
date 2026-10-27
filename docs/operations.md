@@ -295,8 +295,8 @@ known operations. Only after closure is proven does it delete
 `OCTG_RELAY_CPU_GATE_AUTH_TOKEN` with the versioned secret-delete operation,
 deploy the deletion-produced version at 100%, and verify that the temporary
 binding is absent, the remaining bindings are unchanged, the deployed version
-is exact, and CPU-gate control routes return 404. This preserves the three
-persistent Preview Relay Secrets. The temporary secrets file is removed in a
+is exact, and CPU-gate control routes return 404. This preserves all six
+persistent Preview Worker Secrets. The temporary secrets file is removed in a
 `finally` block.
 
 After a successful or failed Stage 1 attempt, acquire authoritative telemetry
@@ -340,13 +340,26 @@ const ledger = JSON.parse(await readFile(process.argv[2], "utf8"));
 process.stdout.write(ledger.candidateScriptVersion);
 NODE
   )"
-  node --env-file="$PREVIEW_STAGE1_ENV_FILE" scripts/relay-cpu-telemetry.mjs \
+  if node --env-file="$PREVIEW_STAGE1_ENV_FILE" scripts/relay-cpu-telemetry.mjs \
     --script-name="$script_name" --script-version="$script_version" \
     --execution-model=stateless --windows-json="$windows_file" \
-    --out="$telemetry_file" --meta-out="$telemetry_meta"
-  node scripts/relay-cpu-evidence.mjs --ledger="$series_ledger" \
+    --out="$telemetry_file" --meta-out="$telemetry_meta"; then
+    telemetry_exit_code=0
+  else
+    telemetry_exit_code=$?
+    : >"$telemetry_file"
+    printf '{"queryComplete":false,"samplingVerified":false,"paginationComplete":false,"truncationObserved":true,"normalizedInvocationCount":0,"windows":[],"telemetryExitCode":%d}\n' \
+      "$telemetry_exit_code" >"$telemetry_meta"
+  fi
+  if node scripts/relay-cpu-evidence.mjs --ledger="$series_ledger" \
     --telemetry="$telemetry_file" --telemetry-meta="$telemetry_meta" \
-    --out="$summary_file"
+    --out="$summary_file"; then
+    evidence_exit_code=0
+  else
+    evidence_exit_code=$?
+  fi
+  printf '{"telemetryExitCode":%d,"evidenceExitCode":%d}\n' \
+    "$telemetry_exit_code" "$evidence_exit_code" >"${series_base}.status.json"
 done
 ```
 
