@@ -28,7 +28,7 @@ if ! ruby -rjson -e 'config = JSON.parse(File.read("apps/deno-tokenizer/package.
   exit 1
 fi
 
-ruby -ryaml -rjson - "$workflow" <<'RUBY'
+ruby -ryaml -rjson -rshellwords - "$workflow" <<'RUBY'
 path = ARGV.fetch(0)
 
 def fail_contract(message)
@@ -55,6 +55,57 @@ end
 
 def run_steps(steps)
   steps.filter_map { |step| step["run"] if step.is_a?(Hash) && step["run"].is_a?(String) }
+end
+
+def command_tokens(run)
+  logical_lines = []
+  pending = +""
+  run.each_line do |line|
+    stripped = line.sub(/\s+#.*$/, "").rstrip
+    if stripped.end_with?("\\")
+      pending << stripped.delete_suffix("\\") << " "
+    else
+      logical_lines << pending + stripped
+      pending = +""
+    end
+  end
+  logical_lines << pending unless pending.empty?
+
+  logical_lines.flat_map do |line|
+    begin
+      Shellwords.shellsplit(line).slice_after { |token| %w[&& || ; |].include?(token) }
+        .map { |segment| segment.reject { |token| %w[&& || ; |].include?(token) } }
+    rescue ArgumentError
+      []
+    end
+  end
+end
+
+def forbidden_production_command?(run)
+  tokens = command_tokens(run)
+  tokens.any? do |segment|
+    command_index = segment.index do |token|
+      !token.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/) && !%w[env sudo command].include?(File.basename(token))
+    end
+    next false unless command_index
+    command = File.basename(segment[command_index])
+    next false unless %w[deno wrangler].include?(command)
+
+    args = segment[(command_index + 1)..]
+    next true if command == "deno" && args[0] == "deploy"
+    next true if command == "wrangler" && args[0] == "deploy"
+    next true if command == "wrangler" && args[0] == "secret" && args[1] == "put"
+    next true if command == "wrangler" && args[0] == "versions" && %w[upload deploy].include?(args[1])
+    next true if command == "wrangler" && args[0] == "versions" && args[1] == "secret" && args[2] == "delete"
+    next true if command == "wrangler" && args[0] == "d1" && args[1] == "migrations" && args[2] == "apply"
+
+    if command == "deno" && args[0] == "run" && args[1] == "-A" && args[2].to_s.start_with?("jsr:@deno/deploy@")
+      subcommands = args.drop(3)
+      next true if subcommands[0] == "deploy"
+      next true if subcommands[0] == "env" && subcommands[1] == "load"
+    end
+    false
+  end
 end
 
 begin
@@ -109,6 +160,7 @@ end
 jobs = require_mapping(workflow["jobs"], "jobs")
 validate = require_mapping(jobs["validate"], "jobs.validate")
 deploy = require_mapping(jobs["deploy"], "jobs.deploy")
+require_mapping(jobs["deploy-production"], "jobs.deploy-production")
 
 [workflow["permissions"], *jobs.values.map { |job| job["permissions"] }].compact.each do |permissions|
   if permissions.is_a?(Hash) && permissions["id-token"] == "write"
@@ -129,6 +181,12 @@ unless validate_run_defaults["working-directory"] == "apps/deno-tokenizer"
 end
 
 validate_runs = run_steps(validate_steps)
+validate_steps.each_with_index do |step, index|
+  next unless step.is_a?(Hash) && step["run"].is_a?(String)
+  if forbidden_production_command?(step["run"])
+    fail_contract("jobs.validate.steps[#{index}] contains a direct Production mutation command")
+  end
+end
 unless validate_runs.any? { |run| run.include?("deno install") }
   fail_contract("jobs.validate must install Deno dependencies")
 end
@@ -181,12 +239,11 @@ unless needs.is_a?(Array) && needs.include?("validate")
   fail_contract('jobs.deploy.needs must include "validate" so deployment cannot bypass validation')
 end
 
-expected_if = "(github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'deploy-deno' && github.event.pull_request.head.repo.full_name == github.repository)"
-deploy_if = deploy["if"].to_s.strip
-deploy_if = deploy_if.sub(/\A\$\{\{\s*/, "").sub(/\s*\}\}\z/, "")
-deploy_if = deploy_if.gsub(/\s+/, " ")
-unless deploy_if == expected_if
-  fail_contract("jobs.deploy.if must restrict deployment to a master push")
+%w[deploy deploy-production].each do |job_name|
+  job = require_mapping(jobs[job_name], "jobs.#{job_name}")
+  unless job["if"] == false
+    fail_contract("jobs.#{job_name}.if must be the fixed unconditional deny false during HOLD")
+  end
 end
 
 unless deploy["environment"] == "deno-production"
@@ -569,5 +626,33 @@ jobs.each do |job_name, raw_job|
   end
 end
 RUBY
+
+forbidden_fixtures=(
+  'deno deploy'
+  'deno run -A jsr:@deno/deploy@0.0.9904 deploy'
+  'wrangler deploy'
+  'wrangler versions upload'
+  'wrangler versions deploy'
+  'wrangler secret put NAME'
+  'wrangler versions secret delete NAME'
+  'wrangler d1 migrations apply DB --remote'
+  'deno run -A jsr:@deno/deploy@0.0.9904 env load file.env'
+)
+for fixture in "${forbidden_fixtures[@]}"; do
+  temporary_workflow="$(mktemp)"
+  ruby -ryaml - "$workflow" "$temporary_workflow" "$fixture" <<'RUBY'
+source, destination, command = ARGV
+workflow = YAML.safe_load(File.read(source), aliases: true)
+workflow["on"] ||= workflow.delete(true)
+workflow.fetch("jobs").fetch("validate").fetch("steps") << { "name" => "injected fixture", "run" => command }
+File.write(destination, workflow.to_yaml)
+RUBY
+  if bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
+    rm -f "$temporary_workflow"
+    printf 'workflow contract accepted forbidden fixture: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  rm -f "$temporary_workflow"
+done
 
 printf 'Deno Deploy workflow contract: ok\n'
