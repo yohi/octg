@@ -904,16 +904,18 @@ Upstream non-2xx status/body remains the existing public upstream response contr
 
 These internal control routes are separate from the closed Deno Relay v1 callback routes in §19.2. They exist only for bounded CPU-gate control and do not add routes, headers, or fields to the Deno Relay v1 wire envelope.
 
-| Method | Exact route |
-| --- | --- |
-| `GET` | `/internal/relay/v1/cpu-gate/quota` |
-| `GET` | `/internal/relay/v1/cpu-gate/slot` |
-| `POST` | `/internal/relay/v1/cpu-gate/setup` |
-| `POST` | `/internal/relay/v1/cpu-gate/setup-fence` |
-| `POST` | `/internal/relay/v1/cpu-gate/decision-context` |
-| `POST` | `/internal/relay/v1/cpu-gate/operation-inspection` |
-| `POST` | `/internal/relay/v1/cpu-gate/reconcile-unused` |
-| `POST` | `/internal/relay/v1/cpu-gate/close-operation` |
+The bounded route inventory contains one method/path pair per non-empty line:
+
+```text
+GET /internal/relay/v1/cpu-gate/quota
+GET /internal/relay/v1/cpu-gate/slot
+POST /internal/relay/v1/cpu-gate/setup
+POST /internal/relay/v1/cpu-gate/setup-fence
+POST /internal/relay/v1/cpu-gate/decision-context
+POST /internal/relay/v1/cpu-gate/operation-inspection
+POST /internal/relay/v1/cpu-gate/reconcile-unused
+POST /internal/relay/v1/cpu-gate/close-operation
+```
 
 Control authentication uses the distinct bearer secret `OCTG_RELAY_CPU_GATE_AUTH_TOKEN`; it is not the Relay service or ingress bearer. If control is absent, malformed, equal to the service bearer, or equal to the ingress bearer, the control route is hidden with `404`. When control is enabled, a missing or incorrect control bearer returns `401`, before request-body reading or any Durable Object lookup. The 8,192-byte request body limit applies to all control requests. Invalid input, unavailable dependencies, and ambiguous state fail closed. This control plane performs no direct Durable Object storage mutation; handlers must use the authorized Durable Object operations.
 

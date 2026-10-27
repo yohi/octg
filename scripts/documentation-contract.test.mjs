@@ -215,12 +215,12 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
   const methodByRoute = new Map(EXPECTED_CPU_GATE_ROUTES.map(({ route, method }) => [route, method]));
   const sourceInventory = sourceNames.map((route) => ({ route, method: methodByRoute.get(route) ?? "UNKNOWN" }));
 
-  const routeTable = section197.match(/\| Method \| Exact route \|\n\| --- \| --- \|\n((?:\|[^\n]*\n)+)/);
-  assert.ok(routeTable, "§19.7 must contain its bounded method/route table");
-  const routeLines = routeTable[1].trimEnd().split("\n");
+  const routeBlock = section197.match(/The bounded route inventory contains one method\/path pair per non-empty line:\n\n```text\n([\s\S]*?)\n```/);
+  assert.ok(routeBlock, "§19.7 must contain its explicitly bounded route inventory");
+  const routeLines = routeBlock[1].split("\n").filter((line) => line.trim() !== "");
   const specInventory = routeLines.map((line) => {
-    const match = line.match(/^\|\s*`(GET|POST)`\s*\|\s*`([^`]+)`\s*\|$/);
-    assert.ok(match, `§19.7 route-table row must parse as exactly one GET/POST route: ${line}`);
+    const match = line.match(/^(GET|POST) (\/\S+)$/);
+    assert.ok(match, `§19.7 bounded route inventory line must parse as exactly one GET/POST method/path pair: ${line}`);
     const prefix = "/internal/relay/v1/cpu-gate/";
     assert.ok(match[2].startsWith(prefix), `§19.7 route must use ${prefix}`);
     const route = match[2].slice(prefix.length);
