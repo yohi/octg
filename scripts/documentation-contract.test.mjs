@@ -202,7 +202,9 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
   const specification = read("SPEC.md");
   const source = read("apps/gateway-worker/src/relay-cpu-gate.ts");
   const section19 = specification.match(/^## 19\. Responses Relay \(v1\)([\s\S]*)/m)?.[1];
-  const section197 = section19?.match(/^### 19\.7 Internal CPU-gate control-plane extension\s*\n([\s\S]*)/m)?.[1];
+  const section197Body = section19?.match(/^### 19\.7 Internal CPU-gate control-plane extension\s*\n([\s\S]*)/m)?.[1];
+  const nextSectionHeading = section197Body?.match(/^#{2,3} /m);
+  const section197 = section197Body?.slice(0, nextSectionHeading?.index ?? section197Body.length);
 
   assert.ok(section19, "SPEC §19 must exist");
   assert.ok(section197, "SPEC §19.7 CPU-gate route section must exist");
@@ -234,6 +236,12 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
   assert.equal(new Set(specInventory.map(({ route }) => route)).size, specInventory.length, "SPEC routes must not contain duplicates");
   assert.deepEqual(sourceInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal source ROUTES");
   assert.deepEqual(specInventory, EXPECTED_CPU_GATE_ROUTES, "frozen expected inventory must equal §19.7 routes and methods");
+  const sectionOutsideRouteBlock = section197.replace(routeBlock[0], "");
+  const strayRoutes = new Set(
+    [...sectionOutsideRouteBlock.matchAll(/\/internal\/relay\/v1\/cpu-gate\/([A-Za-z0-9_-]+)/g)]
+      .map((match) => match[1]),
+  );
+  assert.deepEqual([...strayRoutes], [], "explicit CPU-gate route paths must appear only inside the bounded inventory");
 
   assert.match(section19, /no unannounced HTTP headers, envelope fields, or routes may be added to the closed Relay v1 wire contract/i);
   assert.match(section19, /All relay ingress and callback routes accept \*\*POST only\*\*/);
