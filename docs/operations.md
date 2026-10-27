@@ -177,6 +177,208 @@ request must return HTTP 200. Both versions remain at 0% beside the captured
 
 See [deno-tokenizer.md](./deno-tokenizer.md) for Deno-specific deployment and acceptance.
 
+## Preview Relay CPU Stage 1 Gate
+
+Stage 1 measures the relay path against the isolated Preview Worker. It is a
+remote deployment and traffic operation; run it only after the Preview account,
+Worker, D1 database, Durable Object classes, Deno service, model registry, and
+credentials have been provisioned and verified as Preview-only.
+
+### Persistent Preview prerequisites
+
+- The deployed Preview base version must already contain the persistent Secret
+  bindings `OCTG_KEY_PEPPER`, `OCTG_UPSTREAM_API_TOKEN`,
+  `DENO_TOKENIZER_AUTH_TOKEN`, `OCTG_RELAY_SERVICE_AUTH_TOKEN`,
+  `OCTG_RELAY_INGRESS_AUTH_TOKEN`, and `OCTG_RELAY_CONTEXT_HMAC_KEY`. Wrangler
+  versions upload preserves omitted Secrets; the upload adapter verifies these
+  bindings by name before uploading a candidate.
+- Store these Secrets in the Preview Worker through the approved credential
+  provisioning path. The Stage 1 runner receives only the Preview service
+  bearer needed for callbacks; it must never receive the ingress bearer or the
+  HMAC key. The Deno service keeps its own ingress credential.
+- Use a dedicated Preview environment file outside the repository with mode
+  `0600`. It must contain `CLOUDFLARE_ACCOUNT_ID`, a Preview-scoped
+  `CLOUDFLARE_API_TOKEN`, `OCTG_CANARY_CLIENT_KEY`,
+  `OCTG_RELAY_SERVICE_AUTH_TOKEN`, and the non-secret `PREVIEW_*` config inputs
+  below. Do not put `OCTG_RELAY_INGRESS_AUTH_TOKEN` or
+  `OCTG_RELAY_CONTEXT_HMAC_KEY` in the runner environment file. Do not put
+  Production credentials in this file or print its contents.
+- The config inputs are `PREVIEW_DATABASE_ID`, `PREVIEW_DATABASE_NAME`,
+  `PREVIEW_WORKER_NAME`, `PREVIEW_UPSTREAM_BASE_URL`,
+  `PREVIEW_QUOTA_LIMIT_STANDARD`, `PREVIEW_QUOTA_LIMIT_MINI`,
+  `PREVIEW_MAX_INPUT_BYTES`, `PREVIEW_DENO_TOKENIZER_ENDPOINT`,
+  `PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES`,
+  `PREVIEW_DENO_TOKENIZER_TIMEOUT_MS`,
+  `PREVIEW_OCTG_RELAY_ENVIRONMENT=preview`,
+  `PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT` (HTTPS origin only), and the registered
+  `PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID` and
+  `PREVIEW_RELAY_CPU_GATE_MINI_MODEL=gpt-5-mini` fixture identifiers.
+- The Preview fixture client must be enabled and the model must resolve to the
+  `MINI` pool. The Worker config generator omits Production Deno/Relay values,
+  enables Relay only for the explicit Preview setting, and rejects any
+  Production endpoint or secret in the generated config.
+
+### Execute Stage 1
+
+Run from the repository root with Node.js 22 or later. Set
+`PREVIEW_STAGE1_ENV_FILE` to the protected Preview-only environment file and
+`OCTG_STAGE1_EVIDENCE_DIR` to a protected directory outside the repository for
+the journal and safe run ledger. The Node `--env-file` option reads assignments
+without evaluating them as shell code; process environment values take
+precedence over file values. Run `npm test` and `npm run typecheck` on the exact
+candidate revision before committing it; the command below refuses a dirty
+worktree and records that committed `HEAD` as the source revision.
+
+```bash
+set -euo pipefail
+umask 077
+: "${PREVIEW_STAGE1_ENV_FILE:?set the protected Preview-only env file path}"
+: "${OCTG_STAGE1_EVIDENCE_DIR:?set a protected evidence directory outside the repository}"
+test -f "$PREVIEW_STAGE1_ENV_FILE"
+test ! -e "$OCTG_STAGE1_EVIDENCE_DIR" || {
+  printf '%s\n' 'Use a new evidence directory for every Stage 1 run.' >&2
+  exit 2
+}
+mkdir -m 700 "$OCTG_STAGE1_EVIDENCE_DIR"
+test -z "$(git status --porcelain)" || {
+  printf '%s\n' 'Stage 1 requires a clean, committed candidate source tree.' >&2
+  exit 2
+}
+source_revision="$(git rev-parse HEAD)"
+case "$source_revision" in
+  *[!0-9a-f]*|'') printf '%s\n' 'Invalid source revision.' >&2; exit 2 ;;
+esac
+test "${#source_revision}" -eq 40
+temporary_dir="$(mktemp -d)"
+trap 'rm -rf "$temporary_dir"' EXIT
+
+node --env-file="$PREVIEW_STAGE1_ENV_FILE" \
+  scripts/preview-worker-config.mjs \
+  apps/gateway-worker/wrangler.jsonc \
+  "$temporary_dir/wrangler-preview.jsonc" deno
+
+node --env-file="$PREVIEW_STAGE1_ENV_FILE" \
+  scripts/run-relay-cpu-gate.mjs stage1 --execute \
+  --origin=https://octg-gateway-preview.yohi-consadole12.workers.dev \
+  --worker-name=octg-gateway-preview \
+  --pool=MINI --model=gpt-5-mini \
+  --journal="$OCTG_STAGE1_EVIDENCE_DIR/journal.json" \
+  --ledger="$OCTG_STAGE1_EVIDENCE_DIR/ledger.json" \
+  --source-revision="$source_revision" \
+  --preview-config="$temporary_dir/wrangler-preview.jsonc"
+```
+
+The runner uploads a candidate containing only the fresh
+`OCTG_RELAY_CPU_GATE_AUTH_TOKEN`. Wrangler versions preserve Secrets omitted
+from the upload, and the adapter verifies all six persistent Preview Worker
+Secret bindings exist first. See the [Wrangler Secrets
+documentation](https://developers.cloudflare.com/workers/configuration/secrets/)
+and [`versions secret delete` reference](https://developers.cloudflare.com/workers/wrangler/commands/workers/#versions-secret-delete).
+The runner performs authenticated Preview preflight before measurement;
+`--execute` explicitly enables the remote operations. Each measured HTTP attempt
+gets a fresh, non-secret `octg_cpu_gate_measurement_id` query value. Cloudflare
+Workers Observability must retain query strings in `$metadata.url`; the telemetry
+normalizer requires the value and the evidence reducer joins each ledger call to
+one exact platform event. Missing, redacted, duplicate, or mismatched IDs block
+the series. The ID is not an auth token and is never placed in request/response
+bodies or application logs.
+
+The runner JSON summary reports `cleanupVerified` separately from runner
+`status`: runner `PASS` means the planned workload completed, not that the CPU
+gate passed. Keep the journal and ledger protected for telemetry acquisition
+and evidence reduction; do not add raw telemetry or credentials to Git.
+
+### Automatic cleanup and recovery
+
+On success, failure, or handled cancellation, Stage 1 first closes and recovers
+known operations. Only after closure is proven does it delete
+`OCTG_RELAY_CPU_GATE_AUTH_TOKEN` with the versioned secret-delete operation,
+deploy the deletion-produced version at 100%, and verify that the temporary
+binding is absent, the remaining bindings are unchanged, the deployed version
+is exact, and CPU-gate control routes return 404. This preserves all six
+persistent Preview Worker Secrets. The temporary secrets file is removed in a
+`finally` block.
+
+After a successful or failed Stage 1 attempt, acquire authoritative telemetry
+and reduce each emitted series ledger separately. The following loop uses only
+the safe version/window identifiers from each protected series ledger; it does
+not print credential values or telemetry contents:
+
+```bash
+shopt -s nullglob
+series_ledgers=("$OCTG_STAGE1_EVIDENCE_DIR"/ledger.json.[0-9]*.json)
+test "${#series_ledgers[@]}" -gt 0
+for series_ledger in "${series_ledgers[@]}"; do
+  series_base="${series_ledger%.json}"
+  windows_file="${series_base}.windows.json"
+  telemetry_file="${series_base}.jsonl"
+  telemetry_meta="${series_base}.meta.json"
+  summary_file="${series_base}.summary.json"
+  node --input-type=module - "$series_ledger" "$windows_file" <<'NODE'
+import { readFile, writeFile } from "node:fs/promises";
+
+const [ledgerPath, windowsPath] = process.argv.slice(2);
+const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+if (!Array.isArray(ledger.windows) || ledger.windows.length === 0) {
+  throw new Error("Series ledger has no measured windows");
+}
+const windows = ledger.windows.map(({ windowStartMs, windowEndMs }) => [windowStartMs, windowEndMs]);
+if (windows.some(([start, end]) => !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start)) {
+  throw new Error("Series ledger contains an invalid measured window");
+}
+await writeFile(windowsPath, `${JSON.stringify(windows)}\n`, { mode: 0o600 });
+NODE
+  script_name="$(node --input-type=module - "$series_ledger" <<'NODE'
+import { readFile } from "node:fs/promises";
+const ledger = JSON.parse(await readFile(process.argv[2], "utf8"));
+process.stdout.write(ledger.scriptName);
+NODE
+  )"
+  script_version="$(node --input-type=module - "$series_ledger" <<'NODE'
+import { readFile } from "node:fs/promises";
+const ledger = JSON.parse(await readFile(process.argv[2], "utf8"));
+process.stdout.write(ledger.candidateScriptVersion);
+NODE
+  )"
+  if node --env-file="$PREVIEW_STAGE1_ENV_FILE" scripts/relay-cpu-telemetry.mjs \
+    --script-name="$script_name" --script-version="$script_version" \
+    --execution-model=stateless --windows-json="$windows_file" \
+    --out="$telemetry_file" --meta-out="$telemetry_meta"; then
+    telemetry_exit_code=0
+  else
+    telemetry_exit_code=$?
+    : >"$telemetry_file"
+    printf '{"queryComplete":false,"samplingVerified":false,"paginationComplete":false,"truncationObserved":true,"normalizedInvocationCount":0,"windows":[],"telemetryExitCode":%d}\n' \
+      "$telemetry_exit_code" >"$telemetry_meta"
+  fi
+  if node scripts/relay-cpu-evidence.mjs --ledger="$series_ledger" \
+    --telemetry="$telemetry_file" --telemetry-meta="$telemetry_meta" \
+    --out="$summary_file"; then
+    evidence_exit_code=0
+  else
+    evidence_exit_code=$?
+  fi
+  printf '{"telemetryExitCode":%d,"evidenceExitCode":%d}\n' \
+    "$telemetry_exit_code" "$evidence_exit_code" >"${series_base}.status.json"
+done
+```
+
+Every reducer summary must include p50/p90/p95/p99/max, `exceededCpu`, and the
+matched invocation count. Missing or incomplete telemetry, sampling metadata
+other than a verified interval of `1`, truncated records, or any
+source/version/window/correlation-ID mismatch is `BLOCKED / INCOMPLETE`. Use the Task 6
+acceptance thresholds and conditional branch rules in the [CPU headroom plan](./superpowers/plans/2026-10-05-worker-free-cpu-headroom-redesign.md); a local test pass is not Stage 1 evidence.
+
+If `cleanupVerified` is false, cleanup could not be proven. Keep the protected
+journal and ledger, stop further Preview runs, and use the approved Preview
+recovery path before retrying. Do not manually delete the gate Secret or point
+traffic at another version while a grant may still be live. If cleanup is
+verified but runner status is `BLOCKED`, retain the partial evidence and treat
+the affected series as incomplete. Any Stage 1 rerun requires a fresh per-run
+bearer and replaces earlier evidence. Stage 1 does not authorize Production
+changes or select the conditional Tasks 7/8 by itself; only the completed
+authoritative evidence reducer outcome selects that branch.
+
 ## Responses Prepare Rollout and Acceptance
 
 Before the normative sequence, document a separate **Preview artifact staging**
@@ -776,13 +978,13 @@ automated workflow variable.
 Record CPU as separate series and never pool them together:
 
 - each stateless Worker class (ingress buckets and the decision, activation,
-  renewal, and terminal callbacks): 10 ms Free limit, p99 at most 8 ms, max
-  below 10 ms;
+  renewal, and terminal callbacks): 10 ms Free limit, p99 at most 5 ms, max at
+  most 7 ms, and `exceededCpu = 0`;
 - `RelayDecisionController.decide` and every QuotaController RPC class
   (`admitRelay`, activation, renewal, terminal): the documented 30,000 ms DO
   default, p99 at most 24,000 ms, max below 30,000 ms;
-- record `exceededCpu`, sample counts, and tail margins per class; a DO pass
-  never excuses a stateless Worker failure.
+- record p50/p90/p95/p99/max, `exceededCpu`, sample counts, and tail margins per
+  class; a DO pass never excuses a stateless Worker failure.
 
 A rollout gate requires zero CPU failures in every required Worker and DO
 series, correct quota behavior for injected failures, and Gateway B matches,

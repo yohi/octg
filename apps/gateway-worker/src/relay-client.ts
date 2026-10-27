@@ -27,6 +27,7 @@ import {
   parseRelayInternalError,
   parseRelayResponseMeta,
   RELAY_CONTEXT_AUDIENCE,
+  RELAY_INGRESS_ROUTE,
   RELAY_MAX_CONTEXT_LIFETIME_MS,
   RELAY_MAX_RESPONSE_META_HEADER_BYTES,
   RELAY_MAX_RESPONSE_META_JSON_BYTES,
@@ -106,7 +107,7 @@ export async function callDenoRelay(
   if (idempotencyKey !== null && idempotencyKey.length > 0) {
     headers[IDEMPOTENCY_KEY_HEADER] = idempotencyKey;
   }
-  return fetch(config.ingressEndpoint, {
+  return fetch(new URL(RELAY_INGRESS_ROUTE, config.ingressEndpoint), {
     method: "POST",
     headers,
     body: request.body,

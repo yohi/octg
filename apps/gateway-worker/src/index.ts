@@ -10,8 +10,12 @@ import { ulid } from "ulid";
 import { handleAdmin } from "./admin";
 import { runScheduled } from "./scheduled";
 import { verifyAccessJwt } from "./access";
+import { handleRelayCpuGate } from "./relay-cpu-gate";
+import { workerVersionHeaders } from "./version-metadata";
+import { emitRelayInvocation } from "./relay-observation";
 
 export { QuotaController, TokenizerController, RelayDecisionController };
+export { handleRelayCpuGate };
 
 export interface Env {
   readonly QUOTA_CONTROLLER: DurableObjectNamespace<QuotaController>;
@@ -37,6 +41,11 @@ export interface Env {
   readonly OCTG_RELAY_INGRESS_ENDPOINT?: string;
   readonly OCTG_RELAY_INGRESS_AUTH_TOKEN?: string;
   readonly OCTG_RELAY_SERVICE_AUTH_TOKEN?: string;
+  readonly OCTG_RELAY_CPU_GATE_AUTH_TOKEN?: string;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_STANDARD_MODEL?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID?: string;
+  readonly OCTG_RELAY_CPU_GATE_MINI_MODEL?: string;
   readonly OCTG_RELAY_CONTEXT_HMAC_KEY?: string;
   readonly IN_FLIGHT_LEASE_TTL_MS?: string;
   readonly IN_FLIGHT_LEASE_RENEWAL_MS?: string;
@@ -58,7 +67,14 @@ export default {
       // Relay callbacks are routed before public routes to keep internal paths
       // isolated even if a future public route accidentally overlaps.
       if (url.pathname.startsWith("/internal/relay/v1/")) {
-        return await handleRelayCallback(request, env, ctx);
+        const response = url.pathname.startsWith("/internal/relay/v1/cpu-gate/")
+          ? await handleRelayCpuGate(request, env)
+          : await handleRelayCallback(request, env, ctx);
+        const attributed = new Response(response.body, response);
+        for (const [name, value] of Object.entries(workerVersionHeaders(env.CF_VERSION_METADATA))) {
+          attributed.headers.set(name, value);
+        }
+        return attributed;
       }
       if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
         requestId = `req_${ulid()}`;
@@ -66,7 +82,17 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/v1/responses") {
         requestId = `req_${ulid()}`;
-        return await handleProxy(request, env, ctx, "responses", requestId);
+        const revisionId = env.CF_VERSION_METADATA?.id ?? "local";
+        const start = { invocationClass: "ingress", revisionId, requestId, phase: "start" } as const;
+        emitRelayInvocation(start);
+        try {
+          const response = await handleProxy(request, env, ctx, "responses", requestId);
+          emitRelayInvocation({ ...start, phase: "finish", outcome: response.status < 400 ? "success" : "error" });
+          return response;
+        } catch (error) {
+          emitRelayInvocation({ ...start, phase: "finish", outcome: "exception" });
+          throw error;
+        }
       }
       if (request.method === "GET" && url.pathname === "/v1/models") {
         return await handleModels(request, env);

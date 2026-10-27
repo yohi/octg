@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RELAY_CONTEXT_PURPOSE,
   RELAY_GRANT_PURPOSE,
@@ -54,6 +54,10 @@ const GRANT: RelayGrantCredentialV1 = {
 
 const UTF8 = new TextEncoder();
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 function toBase64UrlNoPadding(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -92,6 +96,112 @@ function claimText(claims: object): string {
 }
 
 describe("signRelayContext and verifyRelayContext", () => {
+  it("reuses one imported CryptoKey for equal key bytes", async () => {
+    // Given: distinct key arrays containing the same bytes.
+    const key = new Uint8Array(32).fill(0x31);
+    const equalKey = new Uint8Array(key);
+    const importKey = vi.spyOn(crypto.subtle, "importKey");
+
+    // When: different contexts are signed with both arrays.
+    const first = await signRelayContext(CONTEXT, key);
+    const second = await signRelayContext({ ...CONTEXT, clientId: "client-2" }, equalKey);
+
+    // Then: the key import is reused, but each payload gets its own token.
+    expect(importKey).toHaveBeenCalledTimes(1);
+    expect(second).not.toBe(first);
+  });
+
+  it("collapses concurrent first use onto one import Promise", async () => {
+    // Given: two simultaneous first uses of equivalent key bytes.
+    const key = new Uint8Array(32).fill(0x32);
+    const equalKey = new Uint8Array(key);
+    const importKey = vi.spyOn(crypto.subtle, "importKey");
+
+    // When: both contexts are signed concurrently.
+    const tokens = await Promise.all([
+      signRelayContext(CONTEXT, key),
+      signRelayContext({ ...CONTEXT, clientId: "client-2" }, equalKey),
+    ]);
+
+    // Then: only one import occurs and each distinct payload is signed.
+    expect(importKey).toHaveBeenCalledTimes(1);
+    expect(tokens[0]).not.toBe(tokens[1]);
+  });
+
+  it("imports a new CryptoKey after key rotation", async () => {
+    // Given: two distinct keys used in succession.
+    const firstKey = new Uint8Array(32).fill(0x33);
+    const rotatedKey = new Uint8Array(32).fill(0x34);
+    const importKey = vi.spyOn(crypto.subtle, "importKey");
+
+    // When: the first key is reused before rotation to a second key.
+    await signRelayContext(CONTEXT, firstKey);
+    await signRelayContext(CONTEXT, new Uint8Array(firstKey));
+    await signRelayContext(CONTEXT, rotatedKey);
+
+    // Then: rotation replaces the single cached CryptoKey.
+    expect(importKey).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries import after the current import rejects", async () => {
+    // Given: the first key import rejects for all concurrent callers.
+    const key = new Uint8Array(32).fill(0x35);
+    const importKey = vi.spyOn(crypto.subtle, "importKey").mockRejectedValueOnce(new Error("import failed"));
+
+    // When: concurrent callers share the failure and then retry.
+    const firstAttempts = await Promise.allSettled([
+      signRelayContext(CONTEXT, key),
+      signRelayContext(CONTEXT, new Uint8Array(key)),
+    ]);
+    const retry = signRelayContext(CONTEXT, new Uint8Array(key));
+    await expect(retry).resolves.toBeTypeOf("string");
+
+    // Then: both initial callers rejected, then the failed import was retried.
+    expect(firstAttempts.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+    expect(importKey).toHaveBeenCalledTimes(2);
+  });
+
+  it("an older rejected import cannot clear a newer rotated-key cache entry", async () => {
+    // Given: an old import pending while a new key is imported.
+    let rejectOldImport: ((reason: Error) => void) | undefined;
+    const oldImport = new Promise<CryptoKey>((_resolve, reject) => {
+      rejectOldImport = reject;
+    });
+    const oldKey = new Uint8Array(32).fill(0x36);
+    const rotatedKey = new Uint8Array(32).fill(0x37);
+    const importKey = vi.spyOn(crypto.subtle, "importKey").mockImplementationOnce(() => oldImport);
+
+    // When: the rotated key import succeeds before the old import rejects.
+    const oldSign = signRelayContext(CONTEXT, oldKey);
+    await signRelayContext(CONTEXT, rotatedKey);
+    if (rejectOldImport === undefined) throw new Error("old import rejection callback must be set");
+    rejectOldImport(new Error("old import failed"));
+    await expect(oldSign).rejects.toThrow("old import failed");
+    await signRelayContext(CONTEXT, new Uint8Array(rotatedKey));
+
+    // Then: the cached rotated-key import remains available after the stale rejection.
+    expect(importKey).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves existing context/grant token bytes after caching", async () => {
+    // Given: the established fixture claims, purposes, and key.
+    const key = new Uint8Array(32).fill(0x38);
+    const contextPayload = UTF8.encode(claimText(CONTEXT));
+    const grantPayload = UTF8.encode(claimText(GRANT));
+    const expectedContext = `${toBase64UrlNoPadding(contextPayload)}.${toBase64UrlNoPadding(await hmacForTest(key, RELAY_CONTEXT_PURPOSE, contextPayload))}`;
+    const expectedGrant = `${toBase64UrlNoPadding(grantPayload)}.${toBase64UrlNoPadding(await hmacForTest(key, RELAY_GRANT_PURPOSE, grantPayload))}`;
+    const importKey = vi.spyOn(crypto.subtle, "importKey");
+
+    // When: context and grant credentials are signed using the same key.
+    const contextToken = await signRelayContext(CONTEXT, key);
+    const grantToken = await signRelayGrantCredential(GRANT, key);
+
+    // Then: their bytes match the independent canonical-HMAC reference format.
+    expect(contextToken).toBe(expectedContext);
+    expect(grantToken).toBe(expectedGrant);
+    expect(importKey).toHaveBeenCalledTimes(1);
+  });
+
   it("round-trips context claims through sign and verify", async () => {
     // Given: a valid preview context and its environment key.
     const token = await signRelayContext(CONTEXT, KEY);

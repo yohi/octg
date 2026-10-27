@@ -8,6 +8,7 @@ import type {
   RenewInFlightResult,
   RequestEntry,
 } from "@octg/shared";
+import type { RelayCpuGateFixtureEnv } from "./relay-config";
 
 export const POOL_KEY = "pool";
 export const ENTRY_PREFIX = "req:";
@@ -51,7 +52,7 @@ export interface QuotaStorage {
   list<T>(options?: { readonly prefix?: string }): Promise<Map<string, T>>;
 }
 
-export interface QuotaEnvLike {
+export interface QuotaEnvLike extends RelayCpuGateFixtureEnv {
   readonly QUOTA_LIMIT_STANDARD?: string;
   readonly QUOTA_LIMIT_MINI?: string;
   readonly MAX_IN_FLIGHT_REQUESTS?: string;

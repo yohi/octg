@@ -8,6 +8,7 @@ export * from "./idempotency.ts";
 export * from "./tokenization.ts";
 export * from "./prepare.ts";
 export * from "./relay.ts";
+export * from "./relay-routing.ts";
 export * from "./relay-json.ts";
 export * from "./relay-parse.ts";
 export * from "./relay-claims.ts";

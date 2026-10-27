@@ -30,7 +30,21 @@ export interface RelayEnvConfig {
   readonly OCTG_RELAY_INGRESS_ENDPOINT?: string;
   readonly OCTG_RELAY_INGRESS_AUTH_TOKEN?: string;
   readonly OCTG_RELAY_SERVICE_AUTH_TOKEN?: string;
+  readonly OCTG_RELAY_CPU_GATE_AUTH_TOKEN?: string;
   readonly OCTG_RELAY_CONTEXT_HMAC_KEY?: string;
+}
+
+export type RelayCpuGateControl =
+  | { readonly kind: "disabled" }
+  | { readonly kind: "enabled"; readonly token: string };
+
+export function resolveRelayCpuGateControl(env: RelayEnvConfig): RelayCpuGateControl {
+  const token = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
+  if (token === undefined || !isRelayServiceToken(token)) return { kind: "disabled" };
+  if (token === env.OCTG_RELAY_SERVICE_AUTH_TOKEN || token === env.OCTG_RELAY_INGRESS_AUTH_TOKEN) {
+    return { kind: "disabled" };
+  }
+  return { kind: "enabled", token };
 }
 
 export type RelayConfig =
@@ -132,6 +146,15 @@ export function verifyRelayServiceAuth(
   const presented = parseRelayBearerAuthorization(headerValue);
   if (presented === undefined) return false;
   return compareRelayBearerConstantTime(config.serviceAuthToken, presented);
+}
+
+export function verifyRelayCpuGateAuth(
+  headerValue: string | null | undefined,
+  token: string,
+): boolean {
+  const presented = parseRelayBearerAuthorization(headerValue);
+  if (presented === undefined) return false;
+  return compareRelayBearerConstantTime(token, presented);
 }
 
 /** Verifies the `X-OCTG-Relay-Context` header of a decision callback. */

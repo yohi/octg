@@ -28,6 +28,14 @@ const RELAY_CONFIG_NAMES = Object.freeze([
   "OCTG_RELAY_INGRESS_ENDPOINT",
 ]);
 
+const CPU_GATE_FIXTURE_NAMES = Object.freeze([
+  "OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID",
+  "OCTG_RELAY_CPU_GATE_STANDARD_MODEL",
+  "OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID",
+  "OCTG_RELAY_CPU_GATE_MINI_MODEL",
+]);
+const CPU_GATE_SECRET_NAME = "OCTG_RELAY_CPU_GATE_AUTH_TOKEN";
+
 export function buildPreviewWorkerConfig(baseConfig, options) {
   if (baseConfig === null || typeof baseConfig !== "object") {
     throw new TypeError("Preview Worker configuration must be an object");
@@ -71,6 +79,11 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
 
   const productionEndpoint = config.vars?.DENO_TOKENIZER_ENDPOINT;
   const productionRelayEndpoint = config.vars?.OCTG_RELAY_INGRESS_ENDPOINT;
+  for (const name of [CPU_GATE_SECRET_NAME, "OCTG_RELAY_SERVICE_AUTH_TOKEN", "OCTG_RELAY_CONTEXT_HMAC_KEY"]) {
+    if (config.vars?.[name] !== undefined) {
+      throw new Error(`Preview configuration must not contain secret value ${name} in vars`);
+    }
+  }
   const normalizedProductionPrepareEndpoint = typeof config.vars?.DENO_PREPARE_ENDPOINT === "string"
     ? normalizeEndpoint(config.vars.DENO_PREPARE_ENDPOINT)
     : undefined;
@@ -106,6 +119,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   for (const name of RELAY_CONFIG_NAMES) {
     delete config.vars[name];
   }
+  for (const name of CPU_GATE_FIXTURE_NAMES) delete config.vars[name];
   delete config.triggers;
   config.d1_databases = [{
     ...productionDatabase,
@@ -131,8 +145,23 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
 
   if (relay !== undefined) {
     validatePreviewRelayConfig(relay, productionRelayEndpoint);
+    config.vars.OCTG_RELAY_ENABLED = "true";
     config.vars.OCTG_RELAY_ENVIRONMENT = relay.environment.trim();
     config.vars.OCTG_RELAY_INGRESS_ENDPOINT = relay.ingressEndpoint.trim();
+    if (relay.cpuGateFixtures !== undefined) {
+      for (const [key, name] of Object.entries({
+        standardClientId: CPU_GATE_FIXTURE_NAMES[0],
+        standardModel: CPU_GATE_FIXTURE_NAMES[1],
+        miniClientId: CPU_GATE_FIXTURE_NAMES[2],
+        miniModel: CPU_GATE_FIXTURE_NAMES[3],
+      })) {
+        const value = relay.cpuGateFixtures[key];
+        if (value === undefined) continue;
+        requireNonEmpty(`Preview ${key}`, value);
+        if (/secret|bearer|token|key/i.test(value)) throw new TypeError(`Preview ${key} must be a non-secret identifier`);
+        config.vars[name] = value.trim();
+      }
+    }
   }
 
   return config;
@@ -201,11 +230,14 @@ function validatePreviewRelayConfig(relay, productionRelayEndpoint) {
     throw new TypeError("Preview relay environment must be preview");
   }
   requireHttpsEndpoint("Preview relay ingress endpoint", ingressEndpoint);
-  if (ingressEndpoint.trim().endsWith("/")) {
-    throw new TypeError("Preview relay ingress endpoint must not have a trailing slash");
+  const ingressUrl = new URL(ingressEndpoint.trim());
+  if (ingressUrl.pathname !== "/" || ingressUrl.search !== "" || ingressUrl.hash !== "") {
+    throw new TypeError("Preview relay ingress endpoint must be an HTTPS origin");
   }
-  if (typeof productionRelayEndpoint === "string" &&
-      normalizeEndpoint(ingressEndpoint) === normalizeEndpoint(productionRelayEndpoint)) {
+  const productionRelay = typeof productionRelayEndpoint === "string"
+    ? normalizeEndpoint(productionRelayEndpoint)
+    : undefined;
+  if (productionRelay !== undefined && ingressUrl.origin === new URL(productionRelay).origin) {
     throw new Error("Production relay ingress endpoint must not be used in Preview configuration");
   }
 }
@@ -306,11 +338,21 @@ if (isMainModule()) {
         : undefined,
       relay: mode === "deno" && (
         process.env.PREVIEW_OCTG_RELAY_ENVIRONMENT !== undefined ||
-        process.env.PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT !== undefined
+        process.env.PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT !== undefined ||
+        process.env.PREVIEW_RELAY_CPU_GATE_STANDARD_CLIENT_ID !== undefined ||
+        process.env.PREVIEW_RELAY_CPU_GATE_STANDARD_MODEL !== undefined ||
+        process.env.PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID !== undefined ||
+        process.env.PREVIEW_RELAY_CPU_GATE_MINI_MODEL !== undefined
       )
         ? {
             environment: process.env.PREVIEW_OCTG_RELAY_ENVIRONMENT,
             ingressEndpoint: process.env.PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT,
+            cpuGateFixtures: {
+              standardClientId: process.env.PREVIEW_RELAY_CPU_GATE_STANDARD_CLIENT_ID,
+              standardModel: process.env.PREVIEW_RELAY_CPU_GATE_STANDARD_MODEL,
+              miniClientId: process.env.PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID,
+              miniModel: process.env.PREVIEW_RELAY_CPU_GATE_MINI_MODEL,
+            },
           }
         : undefined,
     });

@@ -3,6 +3,7 @@ import {
   RELAY_CONTEXT_AUDIENCE,
   RELAY_MAX_CONTEXT_LIFETIME_MS,
   RELAY_NONCE_PATTERN,
+  RELAY_INGRESS_ROUTE,
   signRelayContext,
   verifyRelayContext,
 } from "@octg/shared";
@@ -16,6 +17,7 @@ import type { EnabledRelayConfig } from "../src/relay-auth";
 import { seedClient, TEST_CLIENT_ID, TEST_CLIENT_KEY } from "./seed";
 
 const INGRESS_ENDPOINT = "https://deno-relay.test/";
+const RELAY_INGRESS_URL = new URL(RELAY_INGRESS_ROUTE, INGRESS_ENDPOINT).href;
 const INGRESS_TOKEN = "ingress-token-0123456789abcdef0123456789ab";
 const SERVICE_TOKEN = "service-token-0123456789abcdef0123456789ab";
 // 43 base64url characters decoding to exactly 32 zero bytes (test-only key).
@@ -98,7 +100,7 @@ function stubDenoIngress(
   const upstreamUrls: string[] = [];
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
-    if (url !== INGRESS_ENDPOINT) {
+    if (url !== RELAY_INGRESS_URL) {
       upstreamUrls.push(url);
       return new Response(JSON.stringify({ error: { message: "unexpected upstream call" } }), { status: 500 });
     }
@@ -232,7 +234,7 @@ describe("callDenoRelay ingress forwarding", () => {
     expect(relayed.status).toBe(200);
     expect(observed.length).toBe(1);
     const call = observed[0];
-    expect(call?.url).toBe(INGRESS_ENDPOINT);
+    expect(call?.url).toBe(RELAY_INGRESS_URL);
     expect(call?.init.body).toBe(request.body);
     const headers = new Headers(call?.init.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${INGRESS_TOKEN}`);
@@ -380,7 +382,7 @@ describe("public responses relay", () => {
     expect(headers.get("x-octg-quota-reset")).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
     const versionId = env.CF_VERSION_METADATA?.id;
     expect(headers.get("x-octg-worker-version")).toBe(typeof versionId === "string" && versionId.length > 0 ? versionId : "local");
-    const context = contextOf(call ?? { url: INGRESS_ENDPOINT, init: {}, bodyBytes: 0, bodyText: "" });
+    const context = contextOf(call ?? { url: RELAY_INGRESS_URL, init: {}, bodyBytes: 0, bodyText: "" });
     expect(context.requestId).toBe(headers.get("x-octg-request-id"));
     expect(context.clientId).toBe(TEST_CLIENT_ID);
     expect(context.idempotencyKeyHash).toBeNull();
@@ -398,7 +400,7 @@ describe("public responses relay", () => {
     expect(response.status).toBe(200);
     const call = stub.ingressCalls[0];
     expect(new Headers(call?.init.headers).get("idempotency-key")).toBe("idem-42");
-    const context = contextOf(call ?? { url: INGRESS_ENDPOINT, init: {}, bodyBytes: 0, bodyText: "" });
+    const context = contextOf(call ?? { url: RELAY_INGRESS_URL, init: {}, bodyBytes: 0, bodyText: "" });
     expect(context.idempotencyKeyHash).toBe(await relayIdempotencyKeyHash(String(context.clientId), "idem-42"));
   });
 
@@ -627,7 +629,7 @@ describe("public responses relay", () => {
     const upstreamUrls: string[] = [];
     let ingressAttempts = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
-      if (String(input) === INGRESS_ENDPOINT) {
+    if (String(input) === RELAY_INGRESS_URL) {
         ingressAttempts += 1;
         throw new TypeError("deno ingress timed out");
       }
@@ -664,7 +666,7 @@ describe("public responses relay", () => {
           headers: { "content-type": "application/json" },
         });
       }
-      if (url === INGRESS_ENDPOINT) calls.push("deno-relay");
+    if (url === RELAY_INGRESS_URL) calls.push("deno-relay");
       calls.push("upstream");
       return new Response(JSON.stringify({ usage: { total_tokens: 9 } }), {
         status: 200,

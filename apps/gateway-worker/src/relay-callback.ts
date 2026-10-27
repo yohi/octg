@@ -29,6 +29,7 @@ import type { Env } from "./index";
 import { resolveRelayConfig, verifyRelayGrantHeader, verifyRelayServiceAuth } from "./relay-auth";
 import type { EnabledRelayConfig } from "./relay-auth";
 import { relayDecisionShardName, relayTerminalFingerprint } from "./relay-decision-controller";
+import { emitRelayInvocation, type RelayInvocationClass } from "./relay-observation";
 
 type CallbackAction = "decision" | "activation" | "renewal" | "terminal";
 
@@ -253,7 +254,7 @@ async function handleGrantCallback(
   }
 }
 
-export async function handleRelayCallback(
+async function handleRelayCallbackRequest(
   request: Request,
   env: Env,
   _ctx: ExecutionContext,
@@ -279,5 +280,26 @@ export async function handleRelayCallback(
     // DO RPC or dispatch failure: fail closed as an internal callback error.
     if (!(error instanceof Error)) throw error;
     return errorEnvelope("internal_error", 500);
+  }
+}
+
+export async function handleRelayCallback(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const action = callbackAction(new URL(request.url).pathname);
+  if (action === undefined) return handleRelayCallbackRequest(request, env, ctx);
+  const invocationClass: RelayInvocationClass = action === "decision" ? "decision" : action;
+  const revisionId = env.CF_VERSION_METADATA?.id ?? "local";
+  const start = { invocationClass, revisionId, phase: "start" } as const;
+  emitRelayInvocation(start);
+  try {
+    const response = await handleRelayCallbackRequest(request, env, ctx);
+    emitRelayInvocation({ ...start, phase: "finish", outcome: response.status < 400 ? "success" : "error" });
+    return response;
+  } catch (error) {
+    emitRelayInvocation({ ...start, phase: "finish", outcome: "exception" });
+    throw error;
   }
 }

@@ -17,9 +17,10 @@ import {
   parseRelayDecisionRequest,
   parseRelayJsonBody,
   quotaIdOf,
-  RELAY_GRANT_AUDIENCE,
   RELAY_MAX_CALLBACK_BODY_BYTES,
   relayErrorCodeStatus,
+  relayShardIndex,
+  relayDecisionShardName,
   signRelayGrantCredential,
   utcDayOf,
   verifyRelayContext,
@@ -32,33 +33,17 @@ import type {
   RelayDecisionV1,
   RelayErrorCode,
   RelayEnvironment,
-  RelayGrantCredentialV1,
   RelayTerminalV1,
 } from "@octg/shared";
 import { RelayProtocolError } from "@octg/shared";
-import type { RelayGrant } from "../../../durable-objects/quota-controller/src/relay-grant";
 import type { Env } from "./index";
 import { assertNever } from "./exhaustiveness";
 import { loadPolicy, loadRegistry } from "./policy";
 import { resolveRelayConfig } from "./relay-auth";
 import { resolveTokenBudget } from "./token-budget";
+import { relayGrantClaimsOf } from "./relay-grant-claims";
 
-const SHARD_MASK = 63;
-const FNV_OFFSET_BASIS = 2166136261;
-const FNV_PRIME = 16777619;
-
-function shardIndex(requestId: string): string {
-  let hash = FNV_OFFSET_BASIS;
-  for (let index = 0; index < requestId.length; index += 1) {
-    hash = Math.imul(hash ^ requestId.charCodeAt(index), FNV_PRIME) >>> 0;
-  }
-  return String(hash & SHARD_MASK).padStart(2, "0");
-}
-
-/** The exact DO name for a decision shard (design routing contract). */
-export function relayDecisionShardName(environment: RelayEnvironment, requestId: string): string {
-  return `relay-decision:v1:${environment}:${shardIndex(requestId)}`;
-}
+export { relayDecisionShardName };
 
 /** Stable terminal-report fingerprint shared by Worker-side terminal callbacks. */
 export function relayTerminalFingerprint(report: RelayTerminalV1): string {
@@ -83,7 +68,7 @@ function checkShardIdentity(
     return "invalid_name";
   }
   if (environmentPart !== environment) return "environment_mismatch";
-  return shardPart === shardIndex(requestId) ? "ok" : "shard_mismatch";
+  return shardPart === relayShardIndex(requestId) ? "ok" : "shard_mismatch";
 }
 
 /** SHA-256(clientId || NUL || rawKey) binding rule for the exact raw key. */
@@ -113,26 +98,6 @@ function rejectDecision(code: RelayErrorCode): Extract<RelayDecisionDispatchResu
     status: relayErrorCodeStatus(code),
   };
   return { kind: "reject", decision };
-}
-
-function grantClaimsOf(grant: RelayGrant): RelayGrantCredentialV1 {
-  return {
-    version: 1,
-    audience: RELAY_GRANT_AUDIENCE,
-    environment: grant.environment,
-    route: "responses",
-    requestId: grant.requestId,
-    grantId: grant.grantId,
-    nonce: grant.nonce,
-    clientId: grant.clientId,
-    idempotencyKeyHash: grant.idempotencyKeyHash,
-    model: grant.model,
-    pool: grant.pool,
-    admissionUtcDay: grant.admissionUtcDay,
-    leaseGeneration: grant.leaseGeneration,
-    issuedAtMs: grant.issuedAtMs,
-    expiresAtMs: grant.credentialExpiresAtMs,
-  };
 }
 
 export class RelayDecisionController extends DurableObject<Env> {
@@ -227,7 +192,7 @@ export class RelayDecisionController extends DurableObject<Env> {
     });
     if (admission.kind === "denied") return rejectDecision(admission.code);
 
-    const claims = grantClaimsOf(admission.grant);
+    const claims = relayGrantClaimsOf(admission.grant);
     let grantCredential: string;
     try {
       grantCredential = await signRelayGrantCredential(claims, config.contextHmacKey);

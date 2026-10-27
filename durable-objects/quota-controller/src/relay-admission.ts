@@ -44,6 +44,8 @@ import {
   relayLeaseExpiry,
 } from "./relay-grant";
 import type { RelayGrant } from "./relay-grant";
+import { resolveMaxInFlightRequests } from "./relay-config";
+import { CPU_GATE_FENCE_PREFIX } from "./relay-cpu-gate";
 
 /**
  * Transaction-scoped relay admission (SPEC.md section 19.5). The single
@@ -66,13 +68,6 @@ export interface RelayAdmissionInput {
 export type RelayAdmissionResult =
   | { readonly kind: "admitted"; readonly grant: RelayGrant; readonly quota: RelayQuotaSnapshotV1 }
   | { readonly kind: "denied"; readonly code: RelayErrorCode };
-
-const DEFAULT_MAX_IN_FLIGHT_REQUESTS = 2;
-
-function resolveMaxInFlightRequests(configured: string | undefined): number {
-  const parsed = Number(configured);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_IN_FLIGHT_REQUESTS;
-}
 
 function resolveRelayEnvironment(configured: string | undefined): RelayEnvironment | undefined {
   return configured === "preview" || configured === "production" ? configured : undefined;
@@ -103,6 +98,9 @@ export async function admitRelayInTransaction(
   const metadata = parseRelayRequestMeta(input.metadata);
   if (context === undefined || metadata === undefined) {
     return { kind: "denied", code: "invalid_request" };
+  }
+  if (await storage.get<boolean>(`${CPU_GATE_FENCE_PREFIX}${context.requestId}`)) {
+    return { kind: "denied", code: "invalid_context" };
   }
   if (
     !isNonNegativeSafeInteger(input.reservedTokens) ||

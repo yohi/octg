@@ -1164,6 +1164,7 @@
     ],
     "packageJson": {
       "dependencies": [
+        "npm:tiktoken@1.0.22",
         "npm:typescript@^5.6.0"
       ]
     },

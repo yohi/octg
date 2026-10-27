@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import type { PrepareMetadata } from "@octg/shared";
+import { RELAY_INGRESS_ROUTE, type PrepareMetadata } from "@octg/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseDeclaredContentLength } from "../src/proxy";
 import { seedClient, TEST_CLIENT_KEY } from "./seed";
@@ -165,6 +165,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   restorePrepare();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -560,6 +561,7 @@ describe("prepare routing", () => {
   it.each(["1e2", "0x10"] as const)(
     "routes non-decimal Content-Length %j through prepare",
     async (contentLength) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       // Given: the prepare threshold is above every numeric coercion of the malformed values.
       Object.defineProperty(env, "DENO_PREPARE_THRESHOLD_BYTES", { value: "1000", configurable: true });
       const { calls } = stubPreparedResponses(JSON.stringify({
@@ -630,7 +632,8 @@ const RELAY_BINDINGS = [
   "OCTG_RELAY_CONTEXT_HMAC_KEY",
 ] as const;
 
-const RELAY_INGRESS_ENDPOINT = "https://deno-relay.test/";
+const RELAY_INGRESS_ORIGIN = "https://deno-relay.test";
+const RELAY_INGRESS_ENDPOINT = `${RELAY_INGRESS_ORIGIN}${RELAY_INGRESS_ROUTE}`;
 const RELAY_HMAC_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 function encodeRelayBase64Url(input: string): string {
@@ -653,7 +656,7 @@ function configureRelay(enabled: string): void {
   Object.defineProperties(env, {
     OCTG_RELAY_ENABLED: { value: enabled, configurable: true },
     OCTG_RELAY_ENVIRONMENT: { value: "preview", configurable: true },
-    OCTG_RELAY_INGRESS_ENDPOINT: { value: RELAY_INGRESS_ENDPOINT, configurable: true },
+    OCTG_RELAY_INGRESS_ENDPOINT: { value: `${RELAY_INGRESS_ORIGIN}/`, configurable: true },
     OCTG_RELAY_INGRESS_AUTH_TOKEN: { value: "ingress-token-0123456789abcdef0123456789ab", configurable: true },
     OCTG_RELAY_SERVICE_AUTH_TOKEN: { value: "service-token-0123456789abcdef0123456789ab", configurable: true },
     OCTG_RELAY_CONTEXT_HMAC_KEY: { value: RELAY_HMAC_KEY, configurable: true },
