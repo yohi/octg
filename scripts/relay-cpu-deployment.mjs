@@ -90,12 +90,12 @@ export async function createPreviewDeploymentAdapters(options) {
       if (!Array.isArray(deployments[0].versions)) throw new Error("Preview deployment metadata unavailable");
       return deployments[0].versions;
     }
-    const latest = deployments.reduce((newest, deployment) => {
+    const latest = deployments.slice(1).reduce((newest, deployment) => {
       const createdOn = Date.parse(deployment?.created_on);
       const newestCreatedOn = Date.parse(newest?.created_on);
       if (!Number.isFinite(createdOn) || !Number.isFinite(newestCreatedOn)) throw new Error("Preview deployment metadata unavailable");
       return createdOn > newestCreatedOn ? deployment : newest;
-    });
+    }, deployments[0]);
     if (!Array.isArray(latest.versions)) throw new Error("Preview deployment metadata unavailable");
     return latest.versions;
   }
