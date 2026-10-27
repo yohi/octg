@@ -263,6 +263,11 @@ describe("relay CPU-gate routes", () => {
     ["quota", "POST", "GET"],
     ["slot", "POST", "GET"],
     ["setup", "GET", "POST"],
+    ["setup-fence", "GET", "POST"],
+    ["decision-context", "GET", "POST"],
+    ["operation-inspection", "GET", "POST"],
+    ["reconcile-unused", "GET", "POST"],
+    ["close-operation", "GET", "POST"],
   ] as const)("rejects %s with the required %s-only method", async (route, method, allowed) => {
     const previous = env.OCTG_RELAY_CPU_GATE_AUTH_TOKEN;
     Object.assign(env, { OCTG_RELAY_CPU_GATE_AUTH_TOKEN: CONTROL_TOKEN });
@@ -288,6 +293,8 @@ describe("relay CPU-gate routes", () => {
     const response = await SELF.fetch(controlRequest("setup", setupBody(id)));
     expect(sign).toHaveBeenCalledOnce();
     expect(response.status).toBe(500);
+    expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
+    expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
     expect(await response.json()).toEqual({ version: 1, kind: "setup_failed_compensated" });
     const day = relayRequestUtcDayOf(id);
     if (day === undefined) throw new Error("generated request ID must have a UTC day");
@@ -581,6 +588,9 @@ describe("relay CPU-gate routes", () => {
       // Then: it fails closed before namespace identity resolution.
       expect(response.status).toBe(503);
       expect(close.status).toBe(503);
+      expect(response.headers.get("X-OCTG-Worker-Version")).toEqual(expect.any(String));
+      expect(response.headers.get("X-OCTG-Worker-Version")).not.toBe("");
+      expect(await response.json()).toEqual({ version: 1, error: "cpu_gate_slot_unavailable" });
       expect(idFromName).not.toHaveBeenCalled();
     } finally {
       if (previous !== undefined) Object.assign(env, { OCTG_RELAY_ENVIRONMENT: previous });
