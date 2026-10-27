@@ -182,24 +182,46 @@ def forbidden_production_command?(run)
     end
     next false unless command_index
     command = File.basename(segment[command_index])
-    if %w[env sudo command exec sh bash dash zsh eval source . xargs].include?(command)
+    if %w[env sudo command exec sh bash dash zsh eval source . xargs npx].include?(command)
       fail_contract("unsupported shell wrapper in validate run step: #{command}")
     end
     next false unless %w[deno wrangler].include?(command)
 
     args = segment[(command_index + 1)..]
     next true if command == "deno" && args[0] == "deploy"
-    next true if command == "wrangler" && args[0] == "deploy"
-    next true if command == "wrangler" && args[0] == "secret" && args[1] == "put"
-    next true if command == "wrangler" && args[0] == "versions" && %w[upload deploy].include?(args[1])
-    next true if command == "wrangler" && args[0] == "versions" && args[1] == "secret" && args[2] == "delete"
-    next true if command == "wrangler" && args[0] == "d1" && args[1] == "migrations" && args[2] == "apply"
-
     if command == "deno" && args[0] == "run" && args[1] == "-A" && args[2].to_s.start_with?("jsr:@deno/deploy@")
       subcommands = args.drop(3)
       next true if subcommands[0] == "deploy"
       next true if subcommands[0] == "env" && subcommands[1] == "load"
     end
+    next false unless command == "wrangler"
+
+    global_options_with_values = %w[--config -c --cwd --env --log-level]
+    global_boolean_options = %w[--help -h --version -v --experimental-json-config]
+    wrangler_args = []
+    index = 0
+    while index < args.length
+      argument = args[index]
+      if global_options_with_values.include?(argument)
+        index += 2
+      elsif global_options_with_values.any? { |option| argument.start_with?("#{option}=") }
+        index += 1
+      elsif global_boolean_options.include?(argument)
+        index += 1
+      elsif argument.start_with?("-")
+        break
+      else
+        wrangler_args = args[index..]
+        break
+      end
+    end
+
+    next true if wrangler_args[0] == "deploy"
+    next true if wrangler_args[0] == "secret" && wrangler_args[1] == "put"
+    next true if wrangler_args[0] == "versions" && %w[upload deploy].include?(wrangler_args[1])
+    next true if wrangler_args[0] == "versions" && wrangler_args[1] == "secret" && wrangler_args[2] == "delete"
+    next true if wrangler_args[0] == "d1" && wrangler_args[1] == "migrations" && wrangler_args[2] == "apply"
+
     false
   end
 end
@@ -740,6 +762,8 @@ forbidden_fixtures=(
   'deno deploy'
   'deno run -A jsr:@deno/deploy@0.0.9904 deploy'
   'wrangler deploy'
+  'wrangler --config x deploy'
+  'npx wrangler deploy'
   'wrangler versions upload'
   'wrangler versions deploy'
   'wrangler secret put NAME'
