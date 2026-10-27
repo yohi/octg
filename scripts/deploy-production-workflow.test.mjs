@@ -171,6 +171,36 @@ test("deploy-production workflow preserves remote environment variables using --
   assert.match(runCommand, /--var "OCTG_RELAY_ENVIRONMENT:production"/);
 });
 
+test("deploy-production fails closed before any release validation or mutation while Issue 121 is on HOLD", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/deploy-production.yml"), "utf8");
+  const jobs = extractWorkflowJobs(workflow);
+  const job = jobs.find(({ id }) => id === "test-and-deploy");
+  assert.ok(job, "reusable production deployment job must exist");
+
+  const checkoutIndex = job.steps.findIndex(({ name }) => name === "Checkout");
+  const holdIndex = job.steps.findIndex(({ name }) => name === "Enforce Issue 121 release HOLD");
+  const migrationIndex = job.steps.findIndex(({ name }) => name === "Apply D1 migrations");
+  const deployIndex = job.steps.findIndex(({ name }) => name === "Deploy Worker");
+  assert.equal(holdIndex, checkoutIndex + 1, "HOLD must be the first executable step after checkout");
+  assert.ok(holdIndex < migrationIndex, "HOLD must precede Apply D1 migrations");
+  assert.ok(holdIndex < deployIndex, "HOLD must precede Deploy Worker");
+
+  const holdMarker = "- name: Enforce Issue 121 release HOLD";
+  const holdStart = workflow.indexOf(holdMarker);
+  const holdEnd = workflow.indexOf("\n      - name:", holdStart + holdMarker.length);
+  const holdStep = workflow.slice(holdStart, holdEnd < 0 ? undefined : holdEnd);
+  const holdRun = extractStepRun(workflow, "Enforce Issue 121 release HOLD");
+  assert.ok(holdRun, "HOLD must have a run command");
+  assert.match(holdRun, /exit\s+1/, "HOLD must unconditionally exit nonzero");
+  assert.doesNotMatch(holdStep, /^\s+(?:if|env|with):/m, "HOLD must not have conditional or env-driven bypasses");
+  assert.doesNotMatch(holdRun, /\$\{|\$[A-Za-z_][A-Za-z0-9_]*/, "HOLD must not depend on arguments or environment variables");
+  assert.doesNotMatch(
+    workflow.slice(workflow.indexOf("      - name: Checkout"), holdStart),
+    /secrets\.|git\s+ls-remote|wrangler|curl\s|\bnpx\b|\bnpm\s+ci\b/i,
+    "no secret read or remote command may run before HOLD",
+  );
+});
+
 test("deploy-production workflow sources all non-secret settings from GitHub Variables", () => {
   const workflowPath = join(root, ".github/workflows/deploy-production.yml");
   const workflow = readFileSync(workflowPath, "utf8");
