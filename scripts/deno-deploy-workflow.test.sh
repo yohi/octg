@@ -78,12 +78,12 @@ def parenthesized_content(text, opening)
 end
 
 def command_tokens(run, depth = 0)
-  return [] if depth > 12
+  raise ArgumentError, "shell nesting limit exceeded" if depth > 12
 
   logical_lines = []
   pending = +""
   run.each_line do |line|
-    stripped = line.sub(/\s+#.*$/, "").rstrip
+    stripped = line.rstrip
     if stripped.end_with?("\\")
       pending << stripped.delete_suffix("\\") << " "
     else
@@ -115,14 +115,20 @@ def command_tokens(run, depth = 0)
             flattened << " "
             index = cursor - 1
           else
-            flattened << char
+            raise ArgumentError, "unbalanced command substitution"
           end
+        elsif char == '`' && quote != "'"
+          raise ArgumentError, "unsupported command substitution"
+        elsif char == "$" && quote == '"'
+          raise ArgumentError, "unsupported shell expansion"
         elsif quote
           flattened << char
           quote = nil if char == quote
         elsif ["'", '"'].include?(char)
           quote = char
           flattened << char
+        elsif char == "#" && (index.zero? || line[index - 1].match?(/[\s;|&]/))
+          break
         elsif char == "(" || (char == "$" && line[index + 1] == "(")
           opening = char == "$" ? index + 1 : index
           content, cursor = parenthesized_content(line, opening)
@@ -131,12 +137,14 @@ def command_tokens(run, depth = 0)
             flattened << " "
             index = cursor - 1
           else
-            flattened << char
+            raise ArgumentError, "unbalanced parentheses"
           end
         elsif [";", "|"].include?(char) || (char == "&" && line[index + 1] == "&") || (char == "|" && line[index + 1] == "|")
           operator = line[index, 2] == "&&" || line[index, 2] == "||" ? line[index, 2] : char
           flattened << " #{operator} "
           index += operator.length - 1
+        elsif char == "$" || ["<", ">", "{", "}", "&", ")"].include?(char)
+          raise ArgumentError, "unsupported shell syntax"
         elsif (word = line[index..].match(/\A(?:if|then|elif|else|fi|while|do|done|for|in)\b/))
           flattened << " #{word[0]} "
           index += word[0].length - 1
@@ -160,8 +168,8 @@ def command_tokens(run, depth = 0)
       end
       segments << current unless current.empty?
       nested_commands + segments
-    rescue ArgumentError
-      []
+    rescue ArgumentError => error
+      fail_contract("cannot parse validate run step: #{error.message}")
     end
   end
 end
@@ -170,10 +178,13 @@ def forbidden_production_command?(run)
   tokens = command_tokens(run)
   tokens.any? do |segment|
     command_index = segment.index do |token|
-      !token.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/) && !%w[env sudo command].include?(File.basename(token))
+      !token.match?(/\A[A-Za-z_][A-Za-z0-9_]*=/)
     end
     next false unless command_index
     command = File.basename(segment[command_index])
+    if %w[env sudo command exec sh bash dash zsh eval source . xargs].include?(command)
+      fail_contract("unsupported shell wrapper in validate run step: #{command}")
+    end
     next false unless %w[deno wrangler].include?(command)
 
     args = segment[(command_index + 1)..]
@@ -266,9 +277,21 @@ unless validate_run_defaults["working-directory"] == "apps/deno-tokenizer"
 end
 
 validate_runs = run_steps(validate_steps)
+allowed_validate_actions = [
+  "actions/checkout@v4",
+  "denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed",
+  "actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af",
+]
+fail_contract("jobs.validate must not call a reusable workflow") if validate.key?("uses")
 validate_steps.each_with_index do |step, index|
-  next unless step.is_a?(Hash) && step["run"].is_a?(String)
-  if forbidden_production_command?(step["run"])
+  require_mapping(step, "jobs.validate.steps[#{index}]")
+  if step.key?("uses") && !allowed_validate_actions.include?(step["uses"])
+    fail_contract("jobs.validate.steps[#{index}] uses an unapproved action")
+  end
+  if step.key?("run") && !step["run"].is_a?(String)
+    fail_contract("jobs.validate.steps[#{index}].run must be a string")
+  end
+  if step["run"].is_a?(String) && forbidden_production_command?(step["run"])
     fail_contract("jobs.validate.steps[#{index}] contains a direct Production mutation command")
   end
 end
@@ -727,6 +750,9 @@ forbidden_fixtures=(
   'while true; do wrangler d1 migrations apply DB --remote; done'
   'printf "%s" "$(wrangler secret put NAME)"'
   'printf ok && wrangler versions deploy'
+  'echo "annotation # literal text"; ./node_modules/.bin/wrangler deploy --config apps/gateway-worker/wrangler.jsonc'
+  'echo "annotation # literal text"; wrangler d1 migrations apply DB --remote'
+  'echo "unterminated'
 )
 for fixture in "${forbidden_fixtures[@]}"; do
   temporary_workflow="$(mktemp)"
@@ -748,6 +774,11 @@ done
 safe_fixtures=(
   '# wrangler deploy is intentionally not executed here'
   "printf '%s\\n' 'wrangler deploy'"
+  'echo "annotation # literal text"'
+  'echo env'
+  'echo sudo'
+  'echo command'
+  'echo exec'
 )
 for fixture in "${safe_fixtures[@]}"; do
   temporary_workflow="$(mktemp)"
@@ -761,6 +792,57 @@ RUBY
   if ! OCTG_SKIP_MUTATION_FIXTURES=true bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
     rm -f "$temporary_workflow"
     printf 'workflow contract rejected safe command fixture: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  rm -f "$temporary_workflow"
+done
+
+for fixture in \
+  'exec wrangler deploy' \
+  'exec ../../node_modules/.bin/wrangler deploy --config ../../apps/gateway-worker/wrangler.jsonc' \
+  'env -- ../../node_modules/.bin/wrangler deploy --config ../../apps/gateway-worker/wrangler.jsonc' \
+  'env -S "../../node_modules/.bin/wrangler deploy --config ../../apps/gateway-worker/wrangler.jsonc"' \
+  'env --invalid ../../node_modules/.bin/wrangler deploy'; do
+  temporary_workflow="$(mktemp)"
+  temporary_output="$(mktemp)"
+  ruby -ryaml - "$workflow" "$temporary_workflow" "$fixture" <<'RUBY'
+source, destination, command = ARGV
+workflow = YAML.safe_load(File.read(source), aliases: true)
+workflow["on"] ||= workflow.delete(true)
+workflow.fetch("jobs").fetch("validate").fetch("steps") << { "name" => "wrapper fixture", "run" => command }
+File.write(destination, workflow.to_yaml)
+RUBY
+  if OCTG_SKIP_MUTATION_FIXTURES=true bash "$0" "$temporary_workflow" >"$temporary_output" 2>&1; then
+    rm -f "$temporary_workflow" "$temporary_output"
+    printf 'workflow contract accepted unsafe wrapper fixture: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  expected_reason='unsupported shell wrapper in validate run step: env'
+  if [[ "$fixture" == exec\ * ]]; then
+    expected_reason='unsupported shell wrapper in validate run step: exec'
+  fi
+  if ! rg -Fq "$expected_reason" "$temporary_output"; then
+    rm -f "$temporary_workflow" "$temporary_output"
+    printf 'workflow contract rejected wrapper fixture for an unexpected reason: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  rm -f "$temporary_workflow" "$temporary_output"
+done
+
+for fixture in 'vendor/unknown@v1' 'cloudflare/wrangler-action@v3' 'vendor/command@v1' './.github/actions/local'; do
+  temporary_workflow="$(mktemp)"
+  ruby -ryaml - "$workflow" "$temporary_workflow" "$fixture" <<'RUBY'
+source, destination, action = ARGV
+workflow = YAML.safe_load(File.read(source), aliases: true)
+workflow["on"] ||= workflow.delete(true)
+step = { "uses" => action }
+step["with"] = { "command" => "wrangler deploy" } if action == "vendor/command@v1"
+workflow.fetch("jobs").fetch("validate").fetch("steps") << step
+File.write(destination, workflow.to_yaml)
+RUBY
+  if OCTG_SKIP_MUTATION_FIXTURES=true bash "$0" "$temporary_workflow" >/dev/null 2>&1; then
+    rm -f "$temporary_workflow"
+    printf 'workflow contract accepted unapproved action: %s\n' "$fixture" >&2
     exit 1
   fi
   rm -f "$temporary_workflow"
