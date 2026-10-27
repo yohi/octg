@@ -6,6 +6,7 @@ const { get_encoding } = createRequire(import.meta.url)("tiktoken");
 
 const PREFIX = "/internal/relay/v1/cpu-gate/";
 const MEASUREMENT_ID_QUERY = "octg_cpu_gate_measurement_id";
+const MEASUREMENT_SCOPE_QUERY = "octg_cpu_gate_measurement_scope";
 const ACTIONS = new Set(["decision", "activation", "renewal", "terminal"]);
 let encoding;
 
@@ -64,10 +65,13 @@ export function createRelayCpuHttpAdapters(options) {
   const override = `${workerName}="${candidateVersionId}"`;
   const grants = new Map(); // Credentials and references remain in process memory only.
   let uncertainCallback = false;
-  async function request(path, { token, body, headers = {}, discardBody = false, measurementId } = {}) {
+  async function request(path, { token, body, headers = {}, discardBody = false, measurementId, measurementScope } = {}) {
     try {
       const url = new URL(path, origin);
-      if (measurementId !== undefined) url.searchParams.set(MEASUREMENT_ID_QUERY, measurementId);
+      const correlationId = measurementId ?? randomUUID();
+      const correlationScope = measurementScope ?? "control";
+      url.searchParams.set(MEASUREMENT_ID_QUERY, correlationId);
+      url.searchParams.set(MEASUREMENT_SCOPE_QUERY, correlationScope);
       const response = await fetchImpl(url, {
         method: body === undefined ? "GET" : "POST", redirect: "error", signal: AbortSignal.timeout(120_000),
         headers: { ...headers, ...(token ? { Authorization: `Bearer ${token}` } : {}), "Cloudflare-Workers-Version-Overrides": override,
@@ -77,12 +81,12 @@ export function createRelayCpuHttpAdapters(options) {
       if (discardBody) {
         if (response.body) for await (const chunk of response.body) { void chunk; }
         return { status: response.status, scriptVersionId: response.headers.get("X-OCTG-Worker-Version"), outcome: "completed",
-          ...(measurementId === undefined ? {} : { measurementId }) };
+          measurementId: correlationId };
       }
       const value = await boundedJson(response);
       return { status: response.status, scriptVersionId: response.headers.get("X-OCTG-Worker-Version"),
         grantCredential: response.headers.get("X-OCTG-Relay-Grant"), body: value,
-        ...(measurementId === undefined ? {} : { measurementId }) };
+        measurementId: correlationId };
     } catch { throw new Error("CPU-gate HTTP request failed"); }
   }
   function remember(token, reference) {
@@ -91,7 +95,7 @@ export function createRelayCpuHttpAdapters(options) {
   async function control(action, input) {
     const body = action === "slot" ? undefined : { version: 1, pool: input?.pool ?? pool, requestId: input?.requestId,
       ...(action === "close-operation" ? { generation: input?.generation } : {}) };
-    const response = await request(PREFIX + action, { token: controlToken, body });
+    const response = await request(PREFIX + action, { token: controlToken, body, measurementId: randomUUID(), measurementScope: "control" });
     if (response.status === 200 && action === "setup") remember(response.body.grantToken, response.body);
     if (response.status !== 200 && !response.body?.error && !["absent", "pending_ambiguous", "setup_failed_compensated"].includes(response.body?.kind)) {
       throw new Error("Unexpected CPU-gate control response");
@@ -100,10 +104,11 @@ export function createRelayCpuHttpAdapters(options) {
   }
   async function callbackRequest(input) {
     const measurementId = randomUUID();
+    const measurementScope = input.measurementScope ?? "auxiliary";
     if (input.invocationClass === "ingress") {
       if (!clientKey) throw new Error("Client credential unavailable");
       const rejectOnly = input.model === "octg-cpu-gate-reject-v1";
-      const response = await request("/v1/responses", { token: clientKey, body: { ...input.workload, model: input.model }, discardBody: !rejectOnly, measurementId });
+      const response = await request("/v1/responses", { token: clientKey, body: { ...input.workload, model: input.model }, discardBody: !rejectOnly, measurementId, measurementScope });
       return rejectOnly
         ? { status: response.status, scriptVersionId: response.scriptVersionId, outcome: response.body?.error?.code ?? "unknown", measurementId }
         : response;
@@ -118,7 +123,7 @@ export function createRelayCpuHttpAdapters(options) {
         ...(input.invocationClass === "terminal" ? { outcome: reference.activated ? "settle" : "release", totalTokens: reference.activated ? 0 : null } : {}) };
     }
     const response = await request(`/internal/relay/v1/${input.invocationClass}`, { token: serviceToken, body,
-      headers: { ...input.headers, ...(input.grantCredential ? { "X-OCTG-Relay-Grant": input.grantCredential } : {}) }, measurementId });
+      headers: { ...input.headers, ...(input.grantCredential ? { "X-OCTG-Relay-Grant": input.grantCredential } : {}) }, measurementId, measurementScope });
     remember(response.grantCredential, response.body);
     if (input.invocationClass === "activation" && response.status === 200 && response.body?.activated === true) {
       grants.get(input.grantCredential).activated = true;

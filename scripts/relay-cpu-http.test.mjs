@@ -19,6 +19,7 @@ test("control adapters send exact Worker bodies with independent control authori
   assert.ok(calls.every(({ init }) => init.headers.Authorization === "Bearer control-token"));
   assert.ok(calls.every(({ init }) => init.headers["Cloudflare-Workers-Version-Overrides"] === 'preview="candidate"'));
   assert.ok(calls.every(({ init }) => init.redirect === "error"));
+  assert.ok(calls.every(({ url }) => new URL(url).searchParams.get("octg_cpu_gate_measurement_scope") === "control"));
 });
 
 test("decision grant references remain in memory for authenticated terminal cleanup", async () => {
@@ -64,8 +65,8 @@ test("measured HTTP attempts carry a unique non-secret telemetry correlation ID"
     assert.equal(String(init.body).includes(urls.at(-1).searchParams.get("octg_cpu_gate_measurement_id")), false);
     return new Response("synthetic body", { headers: { "X-OCTG-Worker-Version": "candidate" } });
   } });
-  const first = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-1", workload: { input: "synthetic" } });
-  const second = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-2", workload: { input: "synthetic" } });
+  const first = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-1", measurementScope: "measurement", workload: { input: "synthetic" } });
+  const second = await adapters.callback({ invocationClass: "ingress", model: "gpt-test", requestId: "measurement-2", measurementScope: "measurement", workload: { input: "synthetic" } });
   const firstId = urls[0].searchParams.get("octg_cpu_gate_measurement_id");
   const secondId = urls[1].searchParams.get("octg_cpu_gate_measurement_id");
 
@@ -74,6 +75,7 @@ test("measured HTTP attempts carry a unique non-secret telemetry correlation ID"
   assert.notEqual(firstId, secondId);
   assert.equal(first.measurementId, firstId);
   assert.equal(second.measurementId, secondId);
+  assert.ok(urls.every((url) => url.searchParams.get("octg_cpu_gate_measurement_scope") === "measurement"));
 });
 
 test("unsafe origins, reused credentials and upstream errors fail without credential details", async () => {
@@ -92,7 +94,7 @@ test("recover-operation CLI uses real HTTP adapters and emits only safe summary 
   });
   assert.equal(code, 0);
   assert.equal(calls.length, 1);
-  assert.ok(calls[0].endsWith("/cpu-gate/slot"));
+  assert.equal(new URL(calls[0]).pathname.endsWith("/cpu-gate/slot"), true);
   assert.equal(JSON.parse(summaries[0]).status, "PASS");
   assert.equal(summaries[0].includes("control-token"), false);
 });
@@ -109,7 +111,7 @@ test("Stage 2 preflight uses Cloudflare-signed context and a reject-only callbac
   const calls = [];
   const adapters = createRelayCpuHttpAdapters({ ...options, env, fetchImpl: async (url, init) => {
     calls.push({ path: new URL(url).pathname, body: JSON.parse(init.body), headers: init.headers });
-    return String(url).endsWith("decision-context")
+    return new URL(url).pathname.endsWith("decision-context")
       ? Response.json({ version: 1, requestId: JSON.parse(init.body).requestId, contextToken: "opaque-context" })
       : Response.json({ version: 1, kind: "reject", code: "model_requires_paid", status: 403 }, { headers: { "X-OCTG-Worker-Version": "candidate" } });
   } });

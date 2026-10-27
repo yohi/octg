@@ -124,7 +124,8 @@ export function evaluateCpuSeries(records, metadata, expected) {
     || new Set(records.map((record) => record.eventId)).size !== records.length) {
     return { status: "BLOCKED", reason: "invalid normalized platform records" };
   }
-  const targetRecords = records.filter((record) => routes?.includes(record.routeDiscriminator));
+  const targetRecords = records.filter((record) => routes?.includes(record.routeDiscriminator)
+    && (record.measurementScope === "measurement" || record.measurementScope === undefined));
   if (targetRecords.some((record) => !isMeasurementId(record.measurementId))
     || new Set(targetRecords.map((record) => record.measurementId)).size !== targetRecords.length) {
     return { status: "BLOCKED", reason: "invalid normalized platform records" };
@@ -144,7 +145,7 @@ export function evaluateCpuSeries(records, metadata, expected) {
     && record.scriptName === expected.scriptName
     && record.executionModel === "stateless"
     && windows.some((window) => withinWindow(record, window));
-  const unknownRoute = records.some((record) => !routes.includes(record.routeDiscriminator)
+  const unknownRoute = records.some((record) => record.measurementScope === "measurement" && !routes.includes(record.routeDiscriminator)
     && !siblingRoutes.has(record.routeDiscriminator));
   if (unknownRoute || records.some((record) => !expectedScope(record))) {
     return { status: "BLOCKED", reason: "telemetry record outside the expected series scope" };
@@ -154,6 +155,7 @@ export function evaluateCpuSeries(records, metadata, expected) {
     && record.scriptName === expected.scriptName
     && record.executionModel === "stateless"
     && routes.includes(record.routeDiscriminator)
+    && (record.measurementScope === "measurement" || record.measurementScope === undefined)
     && windows.some((window) => withinWindow(record, window)));
   const distribution = cpuDistribution(inScope);
   const cpuViolation = inScope.some((record) => record.outcome === "exceededCpu")

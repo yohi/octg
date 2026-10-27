@@ -7,6 +7,7 @@ export const COMPLETENESS_QUERY_ID = "octg-relay-cpu-completeness-v1";
 const ENDPOINT = "https://api.cloudflare.com/client/v4/accounts";
 const MAX_PAGES_PER_WINDOW = 1000;
 const MEASUREMENT_ID_QUERY = "octg_cpu_gate_measurement_id";
+const MEASUREMENT_SCOPE_QUERY = "octg_cpu_gate_measurement_scope";
 const MEASUREMENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function makeQuery(options, window, view, offset) {
@@ -59,6 +60,26 @@ function measurementIdOf(event, routeDiscriminator) {
     throw new Error("Measurement correlation ID unavailable or contradictory");
   }
   return measurementId;
+}
+
+function measurementScopeOf(event) {
+  const metadata = event?.$metadata;
+  const scopes = [metadata?.url, metadata?.trigger]
+    .filter((value) => typeof value === "string")
+    .flatMap((value) => {
+      try {
+        const scope = new URL(value, "https://local.invalid").searchParams.get(MEASUREMENT_SCOPE_QUERY);
+        return scope === null ? [] : [scope];
+      } catch {
+        return [];
+      }
+    });
+  const uniqueScopes = new Set(scopes);
+  if (uniqueScopes.size === 0) return "measurement";
+  if (uniqueScopes.size !== 1 || !["measurement", "auxiliary", "control"].includes(scopes[0])) {
+    throw new Error("Measurement scope unavailable or contradictory");
+  }
+  return scopes[0];
 }
 
 function eventFingerprint(event) {
@@ -131,6 +152,7 @@ function parseGroup(groupRequestId, rawEvents, scope) {
     scope.groupCpuIds.set(groupRequestId, eventId);
     const routeDiscriminator = normalizedRouteOf(event);
     const measurementId = measurementIdOf(event, routeDiscriminator);
+    const measurementScope = measurementScopeOf(event);
     const requestIds = [meta?.requestId, workers.requestId].filter((value) => typeof value === "string");
     if (requestIds.some((value) => value !== groupRequestId)) throw new Error("Invocation request identity contradiction");
     if (groupSeenIds.size > 1) throw new Error("Invocation group must have exactly one CPU event");
@@ -140,6 +162,7 @@ function parseGroup(groupRequestId, rawEvents, scope) {
       ...(eventId === undefined ? {} : { eventId }),
       requestId: groupRequestId,
       measurementId,
+      measurementScope,
       eventTimestampMs: timestamp,
       scriptName: workers.scriptName,
       scriptVersionId: workers.scriptVersion.id,

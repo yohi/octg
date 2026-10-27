@@ -259,6 +259,27 @@ test("matches concurrent callbacks with nearby timestamps by exact measurement I
   assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
 });
 
+test("matches callback timestamps at both negative and positive clock-skew limits", () => {
+  const boundary = { windowStartMs: -1000, windowEndMs: 1000 };
+  const calls = Array.from({ length: 500 }, (_, index) => ledgerCall({
+    callOrdinal: index + 1,
+    measurementId: `skew-${index + 1}`,
+    timestampMs: 0,
+  }));
+  const records = calls.map((call, index) => callRecord({
+    eventId: `skew-event-${index}`,
+    measurementId: call.measurementId,
+    eventTimestampMs: index % 2 === 0 ? -999 : 999,
+  }));
+  const expected = baseExpected({ expectedSuccessfulInvocations: 500, calls, windows: [boundary] });
+  const metadata = baseMetadata({ normalizedInvocationCount: 500, windows: [windowMeta({
+    ...boundary,
+    platformInvocationCount: 500,
+  })] });
+
+  assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
+});
+
 function completeSeries() {
   const records = Array.from({ length: 500 }, (_, index) => callRecord({
     measurementId: `measurement-${index + 1}`,
@@ -275,6 +296,20 @@ function completeSeries() {
 
 test("passes 500 successes across disjoint windows with exact measurement IDs", () => {
   const { records, metadata, expected } = completeSeries();
+  assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
+});
+
+test("excludes same-route preparation telemetry from measured assignment while counting it for completeness", () => {
+  const { records, metadata, expected } = completeSeries();
+  records.push(callRecord({
+    eventId: "preparation-event",
+    measurementId: "preparation-id",
+    measurementScope: "auxiliary",
+    eventTimestampMs: 150,
+  }));
+  metadata.normalizedInvocationCount += 1;
+  metadata.windows[0].platformInvocationCount += 1;
+
   assert.equal(evaluateCpuSeries(records, metadata, expected).status, "PASS");
 });
 

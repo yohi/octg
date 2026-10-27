@@ -14,6 +14,7 @@ export { runFixtureLifecycle, recoverSharedOperation } from "./relay-cpu-operati
 const CPU_GATE_PATH = "/internal/relay/v1/cpu-gate";
 const CALLBACK_PATHS = Object.freeze(["/internal/relay/v1/decision", "/internal/relay/v1/activation", "/internal/relay/v1/renewal", "/internal/relay/v1/terminal"]);
 const SUCCESS_SAMPLE_TARGET = 500;
+const CLOCK_SKEW_TOLERANCE_MS = 1000;
 const now = () => Date.now();
 
 function safeOperation(operation) {
@@ -156,14 +157,19 @@ async function runSeries(identity, adapters, ledger, options) {
     // Drain every in-flight callback before recovery can fence or reconcile it.
     const clock = adapters.clock ?? now;
     const windowStartMs = clock();
-    const outcomes = await Promise.allSettled(inputs.map((input) => invoke(adapters.callback, input, ledger, identity, route, adapters.clock ?? now, isSuccessfulSample)));
+    const outcomes = await Promise.allSettled(inputs.map((input) => invoke(adapters.callback, { ...input, measurementScope: "measurement" }, ledger, identity, route, adapters.clock ?? now, isSuccessfulSample)));
     let windowEndMs = clock();
     for (let attempt = 0; windowEndMs <= windowStartMs && attempt < 10; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2));
       windowEndMs = clock();
     }
     const clockValid = windowEndMs > windowStartMs;
-    if (clockValid) identity.windows.push({ windowStartMs, windowEndMs });
+    if (clockValid) {
+      const padded = { windowStartMs: windowStartMs - CLOCK_SKEW_TOLERANCE_MS, windowEndMs: windowEndMs + CLOCK_SKEW_TOLERANCE_MS };
+      const previous = identity.windows.at(-1);
+      if (previous && padded.windowStartMs < previous.windowEndMs) previous.windowEndMs = Math.max(previous.windowEndMs, padded.windowEndMs);
+      else identity.windows.push(padded);
+    }
     const responses = outcomes.filter((outcome) => outcome.status === "fulfilled").map((outcome) => outcome.value);
     const batchFailed = signal?.aborted || !clockValid || outcomes.some((outcome) => outcome.status === "rejected")
       || responses.some((response) => response.scriptVersionId !== adapters.candidateVersionId || !isSuccessfulSample(response));
@@ -256,7 +262,7 @@ export async function runRelayCpuGate({ mode = "stage1", adapters = {}, journalP
   };
   const executeSeries = async () => {
     for (const identity of series) {
-      const seriesLedger = { ...identity, stage: mode, scriptName: adapters.workerName,
+      const seriesLedger = { ...identity, stage: mode, timestampToleranceMs: CLOCK_SKEW_TOLERANCE_MS, scriptName: adapters.workerName,
         candidateScriptVersion: adapters.candidateVersionId, candidateSourceRevision: sourceRevision,
         windows: [] };
       const offset = ledger.calls.length;

@@ -565,7 +565,7 @@ test("semantic sample success counts an expected Stage 2 403 without rewriting i
   assert.equal(result.ledger.calls[0].success, true);
 });
 
-test("writes source-bound per-series ledgers with measurement windows excluding preparation and cleanup", async () => {
+test("writes source-bound ledgers with skew-tolerant measurement windows", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cpu-series-ledger-"));
   const ledgerPath = join(directory, "run.json");
   let tick = 100;
@@ -590,7 +590,8 @@ test("writes source-bound per-series ledgers with measurement windows excluding 
     const window = series.windows[0];
     assert.ok(window.windowStartMs <= series.calls[0].timestampMs);
     assert.ok(series.calls[0].timestampMs < window.windowEndMs);
-    assert.ok(window.windowEndMs < tick);
+    assert.ok(window.windowStartMs <= series.calls[0].timestampMs - 999);
+    assert.ok(window.windowEndMs >= series.calls[0].timestampMs + 1000);
     assert.equal((await stat(`${ledgerPath}.1.json`)).mode & 0o777, 0o600);
     assert.equal(JSON.stringify(run).includes('"grant"'), false);
   } finally { await rm(directory, { recursive: true, force: true }); }

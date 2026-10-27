@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fetchRelayCpuTelemetry, INVOCATIONS_QUERY_ID, COMPLETENESS_QUERY_ID } from "./relay-cpu-telemetry.mjs";
 
 function telemetryUrl(measurementId) {
-  return `https://host/v1/responses?octg_cpu_gate_measurement_id=${measurementId}`;
+  return `https://host/v1/responses?octg_cpu_gate_measurement_id=${measurementId}&octg_cpu_gate_measurement_scope=measurement`;
 }
 
 function cpuEvent(overrides = {}) {
@@ -137,6 +137,21 @@ test("keeps a callback event without a measurement ID so its series is blocked b
   assert.equal(result.records.length, 1);
   assert.equal(result.records[0].routeDiscriminator, "/internal/relay/v1/activation");
   assert.equal(result.records[0].measurementId, undefined);
+});
+
+test("retains a CPU-gate decision-context event as a classified control invocation", async () => {
+  const controlEvent = cpuEvent({ $metadata: {
+    id: "control-event",
+    eventTimestampMs: 120,
+    url: "https://host/internal/relay/v1/cpu-gate/decision-context?octg_cpu_gate_measurement_id=control-1&octg_cpu_gate_measurement_scope=control",
+  } });
+  const result = await fetchRelayCpuTelemetry(baseOptions({
+    fetchImpl: async (_url, init) => Response.json(JSON.parse(init.body).view === "invocations"
+      ? invocationsResult([[controlEvent]]) : calculationsResult(1)),
+  }));
+
+  assert.equal(result.records[0].measurementId, "control-1");
+  assert.equal(result.records[0].measurementScope, "control");
 });
 
 test("a repeated pagination page with zero new event IDs proves completion", async () => {
