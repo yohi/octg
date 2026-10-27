@@ -68,12 +68,13 @@ Exit status: 0
 - The focused test command reports 3 passing test files, although only the two requested paths were supplied (the Vitest setup also included its configured setup file as a test file).
 - Version-header assertion covers a returned 400; the existing `relay-version-headers.test.ts` checks that outer-routed internal unauthorized errors carry a version header. The outer `index.ts` catch-generated 500 is intentionally not asserted.
 - Public `/v1/responses` version-header regression was confirmed by the existing integration assertion in `relay-client.test.ts` (24 tests rerun and passed).
-- No assertions rely on Workerd stream pull/cancel transport behavior; denial is established via status and zero `idFromName` calls. No credential/body logging assertions were added because there is no relevant observable log contract in these tests.
+- Direct-handler stream evidence and the application boundary distinction are documented in the review follow-up below. No credential/body logging assertions were added because there is no relevant observable log contract in these tests.
 
 ## Review follow-up
 
-- **Important — body read/cancel attribution:** Chose the documented limitation path instead of instrumented stream assertions. A note in `relay-cpu-gate.test.ts` explains that `SELF.fetch` traverses Workerd's stream transport, where transport-driven `pull()`/`cancel()` cannot reliably be attributed to handler calls. Existing SELF.fetch denial tests remain, with 404/401 status and zero `idFromName` assertions. No stream transport behavior is treated as proof of handler behavior.
-- **Minor — shared environment cleanup:** The newly added invalid/ingress-equal control, wrong-method, and internal returned-4xx version-header tests now restore the original control token in `finally`. The preexisting missing-token case likewise restores its original value in `finally`.
+- **Important — body read/cancel attribution:** The limitation-only approach was superseded. `relay-cpu-gate.test.ts` now calls the exported `handleRelayCpuGate` directly with instrumented `ReadableStream` bodies (high-water mark zero) for disabled credentials (missing, invalid, service-equal, ingress-equal) and a wrong presented bearer. The underlying `pull()` counter is used to detect body reads, and the underlying `cancel()` counter detects cancellation; both remain zero after handler return. The two tests assert 404/401 and zero `idFromName` calls. SELF.fetch coverage remains for real Worker entrypoint status/DO behavior.
+- **Minor — shared environment cleanup:** CPU-gate tests now snapshot the shared CPU-gate control token before each case and restore it in `afterEach`; tests that temporarily mutate it also restore it in `finally`. The version-header test restores its token in `finally`.
+- Renamed the SELF.fetch missing-control test to remove its unsupported “before reading the body” claim, and renamed the wrong-bearer test to describe only its status and no-DO assertion.
 - Re-ran the required focused test command and `npm run typecheck`; results are recorded in the follow-up below.
 
 ### Follow-up verification
@@ -82,7 +83,8 @@ Exit status: 0
 
 ```text
 Test Files  3 passed (3)
-Tests       38 passed (38)
+Tests       40 passed (40)
+Duration    3.10s
 Exit status: 0
 ```
 
