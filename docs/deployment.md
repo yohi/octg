@@ -163,12 +163,17 @@ The current-ref restriction is unconditional while the interim release HOLD is
 in force: do not run Deno Deploy, apply Worker D1 migrations, or deploy the Worker
 from the current source ref. `HOLD_CODE_PRESENT` means deny/control code is
 present in this source tree only. It does not prove a Production cutover.
-`HOLD_ACTIVE` requires positive, timestamped evidence that old-ref jobs are
-blocked, in-flight jobs are contained, `deno-production` branch/reviewer rules
-are effective, and trusted Production credential scopes cannot be reached by
-unauthorized runs. If any proof is missing, report `HOLD_CUTOVER_BLOCKED`;
-missing proof never authorizes deployment. Do not claim `HOLD_ACTIVE` without
-that operator evidence.
+`HOLD_ACTIVE` requires positive, timestamped evidence for **all** of the
+following necessary conditions: an approved operator cutover decision; all
+running, queued, pending, and approval-waiting Production-capable jobs stopped
+or safely contained; historical `workflow_dispatch` and old-SHA reusable
+workflow dispatch/reuse routes blocked or safely contained; effective
+`deno-production` Environment deployment-branch restrictions and required
+reviewers; and Production deployment credential reachability verified and
+bounded to approved trusted routes. If any condition cannot be controlled or
+observed, the status must remain
+`HOLD_CUTOVER_BLOCKED / HOLD_ACTIVE_NOT_PROVEN`. Do not claim `HOLD_ACTIVE`
+without that operator evidence; missing proof never authorizes deployment.
 
 The cutover operator must inventory before/after run IDs and attempt numbers,
 queued/active/rerunnable/Environment-waiting jobs and approval states, selected

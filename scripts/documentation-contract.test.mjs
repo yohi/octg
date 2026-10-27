@@ -265,7 +265,7 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
 test("production runbook distinguishes current-ref HOLD, historical cutover and future release authorization", () => {
   const operations = read("docs/operations.md");
   const deployment = read("docs/deployment.md");
-  const runbook = `${operations}\n${deployment}`;
+  const runbook = `${operations}\n${deployment}`.replace(/\s+/g, " ");
 
   for (const restriction of [
     "Deno Deploy",
@@ -278,7 +278,20 @@ test("production runbook distinguishes current-ref HOLD, historical cutover and 
     "old Workflow definitions",
     "preapproved jobs",
   ]) assert.ok(runbook.includes(restriction), `runbook must document ${restriction}`);
-  assert.match(runbook, /HOLD_ACTIVE[\s\S]*?(?:old.ref|old-ref)[\s\S]*?(?:in.flight|in-flight)[\s\S]*?Environment[\s\S]*?credential/i);
+  for (const requiredCondition of [
+    "approved operator cutover decision",
+    "all running, queued, pending, and approval-waiting Production-capable jobs",
+    "historical `workflow_dispatch`",
+    "old-SHA reusable",
+    "deployment-branch restrictions and required",
+    "Production deployment credential reachability",
+    "verified and",
+    "bounded",
+  ]) {
+    assert.ok(runbook.includes(requiredCondition), `HOLD_ACTIVE requires evidence of ${requiredCondition}`);
+  }
+  assert.match(runbook, /HOLD_CUTOVER_BLOCKED \/ HOLD_ACTIVE_NOT_PROVEN/);
+  assert.match(runbook, /HOLD_ACTIVE[\s\S]*?approved operator cutover decision[\s\S]*?Production-capable jobs[\s\S]*?workflow_dispatch[\s\S]*?old-SHA reusable[\s\S]*?deployment-branch restrictions[\s\S]*?credential reachability/i);
   assert.match(runbook, /HOLD_CUTOVER_BLOCKED[\s\S]*?(?:missing|absent|incomplete)[\s\S]*?(?:proof|evidence)/i);
   assert.match(runbook, /Issue #121[\s\S]*?Tasks 9.?12/i);
   assert.match(runbook, /NOT VERIFIED/);

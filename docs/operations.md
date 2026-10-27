@@ -28,14 +28,24 @@ The current-ref release restriction is unconditional: do not run Deno Deploy,
 apply Worker D1 migrations, or deploy the Worker from the current source ref while
 the interim HOLD is in force. `HOLD_CODE_PRESENT` means only that deny/control
 code exists in the checked-out source; it is not evidence that the running
-Production workflows or jobs are held. Report `HOLD_ACTIVE` only after positive
-evidence establishes that old-ref runs are blocked, in-flight runs are stopped
-or safely contained, the `deno-production` Environment branch and reviewer rules
-are effective, and trusted Production credentials are unavailable to unauthorized
-runs. If any proof is missing, ambiguous, or stale, report
-`HOLD_CUTOVER_BLOCKED` and preserve the HOLD; do not infer activation from the
-presence of new YAML. Do not roll back traffic that was already running before
-the cutover.
+Production workflows or jobs are held. Report `HOLD_ACTIVE` only when positive
+evidence proves **all** of these necessary conditions:
+
+1. An approved operator cutover decision exists.
+2. All running, queued, pending, and approval-waiting Production-capable jobs are
+   stopped or safely contained.
+3. Historical `workflow_dispatch` and old-SHA reusable-workflow dispatch/reuse
+   routes are blocked or safely contained.
+4. `deno-production` Environment deployment-branch restrictions and required
+   reviewers are effective.
+5. Production deployment credential reachability has been verified and is
+   bounded to the approved trusted routes.
+
+If any item cannot be controlled or observed, or its evidence is missing,
+ambiguous, or stale, the status must remain
+`HOLD_CUTOVER_BLOCKED / HOLD_ACTIVE_NOT_PROVEN`; preserve the HOLD and do not
+infer activation from the presence of new YAML. Do not roll back traffic that
+was already running before the cutover.
 
 ### No-gap operator cutover inventory
 
