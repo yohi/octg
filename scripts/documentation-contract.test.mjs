@@ -202,7 +202,13 @@ test("SPEC distinguishes closed relay v1 callbacks from CPU-gate control routes"
   const specification = read("SPEC.md");
   const source = read("apps/gateway-worker/src/relay-cpu-gate.ts");
   const section19 = specification.match(/^## 19\. Responses Relay \(v1\)([\s\S]*)/m)?.[1];
-  const section197Body = section19?.match(/^### 19\.7 Internal CPU-gate control-plane extension\s*\n([\s\S]*)/m)?.[1];
+  const section197Headings = section19
+    ? [...section19.matchAll(/^### 19\.7 Internal CPU-gate control-plane extension[ \t]*$/gm)]
+    : [];
+  assert.equal(section197Headings.length, 1, "SPEC §19.7 heading must occur exactly once");
+  const section197Heading = section197Headings[0];
+  const section197Start = section197Heading.index + section197Heading[0].length + 1;
+  const section197Body = section19.slice(section197Start);
   const nextSectionHeading = section197Body?.match(/^#{2,3} /m);
   const section197 = section197Body?.slice(0, nextSectionHeading?.index ?? section197Body.length);
 
