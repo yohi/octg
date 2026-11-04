@@ -297,6 +297,68 @@ Stage 1、Stage 2（PreflightおよびSeries）、条件付き再測定を開始
 
 どちらかのCloudflare account、Deno Organization/account、Environment、Worker名、Source Revision、Stage、Usage Period、Free資格が相違、15分を超える使用量鮮度、明示的な満了、検証参照の不備、Source SHAが未固定、Operator確認が成立しない場合は`PREFLIGHT_HOLD`。`--execute`等の既存認可だけでこの照合を迂回できない。`stage2-preflight`と`stage2-series`は共通のStage 2 Targetを使いつつ、それぞれ開始前に照合し直す。
 
+### 8.6 Operator Trust Record — 信頼起点・生成・保護・検証・消費（Review Gate R1 F-002/F-003）
+
+#### 8.6.1 信頼モデルと保証範囲
+
+本Cost Gateの信頼起点は、既存のHuman Ownerが認めた**Operatorによる独立証拠確認と、Operator管理のローカル実行セッション**である。`CapacityEvidenceV1`、`ExecutionTargetV1`、任意の`operatorVerificationRef`は、どれも単独では信頼起点にならない。新規署名サービス、外部クラウド、Host Runnerは追加しない。
+
+Operatorは、候補ファイルの外から、①固定Git commit、②CLI引数と実際のPreview/Production構成、③認証されたCloudflare Accountの画面/API・Free契約、④Deno Organizationの画面/API・Free契約、⑤各メーターのProvider使用量・期間を確認する。Provider画面を人手で照合する場合はその事実を明記し、暗号学的なProvider認証を行ったと主張しない。アカウント・Git・Free資格を同一の自己申告JSONからコピーして「独立照合済み」としない。
+
+Operatorを**信頼主体**とすることは、同じOSユーザー権限を完全に奪取した攻撃者への耐性を主張するものではない。Operatorセッションまたは証拠保存先の制御が立証できないときは`PREFLIGHT_HOLD / TRUST_ROOT_NOT_PROVEN`。
+
+#### 8.6.2 `OperatorTrustRecordV1`（正規スキーマ）
+
+実行承認済みOperatorが保護領域で生成する記録は、次の必須フィールドを持つ。`ExecutionTargetV1`と`CapacityEvidenceV1`は既存§8.5/Plan Task 2の型を維持する。
+
+```ts
+interface OperatorTrustRecordV1 {
+  schemaVersion: 1;
+  recordId: string; // locally generated UUID; never a user-selected proof of authority
+  operatorId: string; // authorized Operator identity in the controlled session
+  reviewedAtUTC: string; expiresAtUTC: string; // ISO UTC, expiry <= 15 minutes
+  targetSha256: string; capacityEvidenceSha256: string; // 64 lowercase hex
+  target: {
+    cloudflareAccountId: string; denoOrganizationId: string;
+    environment: 'preview' | 'production'; workerName: string;
+    stage: 'stage1' | 'stage2'; sourceRevision: string;
+    usagePeriodsSha256: string; freePlans: { cloudflare: 'free'; deno: 'free' };
+  };
+  proofEntries: Array<{
+    kind: 'git_commit' | 'worker_config' | 'cloudflare_account' |
+          'cloudflare_free_plan' | 'cloudflare_usage' |
+          'deno_organization' | 'deno_free_plan' | 'deno_usage';
+    sourceKind: 'authenticated_provider_read' | 'operator_verified_console' |
+                'local_git' | 'local_config';
+    sourceRef: string; snapshotSha256: string; observedAtUTC: string;
+    checkedIdentity: string; verificationMethod: string;
+  }>;
+  operatorDecision: 'VERIFIED_FOR_CAPACITY_PREFLIGHT';
+}
+```
+
+`proofEntries`は上記8種類すべてを最低1件ずつ必要とし、実際の固定Source/Worker/Account/Organization/期間を各証拠と一致させる。参照IDだけを用意しても足りない。`sourceRef`の保護された実体を読めること、各実体のSHA-256が記録と一致すること、取得元・認証スコープ・確認方法・観測時刻が記録されたことを要する。存在しない証拠、未取得のProvider値、失効した証拠、自己申告の`verified: true`だけでは成立しない。Providerが提供しない機械可読の真正性保証を仮定しない。
+
+#### 8.6.3 Operatorによる生成と保護
+
+1. **独立証拠取得（将来の別承認作業）:** Operatorは正規Git/Preview構成と、ログイン済みのCloudflare/Deno Consoleまたは認証付き読み取りAPIから上記証拠を取得・照合する。証拠は秘密情報・Request/Response Bodyを除いた保護スナップショットとして扱い、`sourceRef`・観測時刻・内容SHA-256を残す。対象が`stage1`ならPreview、`stage2`ならProductionの実対象で確認する。
+2. **容量証拠作成:** `CapacityEvidenceV1`はProvider/使用期間のメーター実績から作成し、実行対象から独立の証拠としてSHA-256を算出する。F-001の全14メーターと追加の適用メーターが欠けたら停止する。
+3. **TargetとTrust Record作成:** Operatorは証拠の事実から独立して`ExecutionTargetV1`を確定し、`targetSha256`、`capacityEvidenceSha256`、8種類のproofと確認日時を固定した`OperatorTrustRecordV1`を作成する。`recordId`を使って任意のJSONを承認済みと扱わない。
+4. **保存先:** Operatorが信頼するローカル作業領域の専用ディレクトリ（所有者Operator、permission `0700`）に、Target/Cost Evidence/Proof/Trust Recordを個別の通常ファイル`0600`で保護する。Symlink、想定外の所有者・ACL・他者書込み、world/group writableな親ディレクトリ、同名ファイルの上書きは拒否する。作成は排他的・原子的に行う。Secretsや生のPromptは保存しない。Git/CI artifactへアップロードしない。
+5. **Operator承認:** 証拠のアカウント名・Free適格性・Revision・Stage・期間・内容ダイジェストをOperator自身が**実際のProvider/Git証拠と照合して確認**する。専用承認手続きはTrust RecordのSHA-256を、`--execution-target`の入力とは独立したOperator管理セッションに固定する。**具体的な入力方式は、本番entryで`process.stdin.isTTY && process.stdout.isTTY`を確認し、`node:readline/promises`の対話入力でOperatorがTrust RecordのSHA-256（64桁）を再入力する方式とする。** 文字列は入力ファイル・CLI引数・環境変数から補完しない。証拠保護rootは`node:os.homedir()`から導出する`~/.local/state/octg/cpu-gate/approved/`（Operator-owned `0700`）に固定し、Callerの任意指定で変更しない。実行Callerは承認ダイジェストを任意のコマンド引数/CapacityEvidenceで上書きできない。非対話/承認主体不明/承認記録不備はHOLD。承認確認はCPU Gate実行承認・HOLD解除を意味しない。
+
+#### 8.6.4 受理時の判定とFail-Closed
+
+`resolveVerifiedExecutionTarget(...)`はローカル保護領域とOperatorの**独立した承認ダイジェスト**を信頼起点にし、①Recordの存在・所有権/保護/通常ファイル確認、②承認ダイジェスト照合、③Recordの必須8証拠の保護実体・SHA-256・確認元・期限検証、④Target/EvidenceのSHA-256固定、⑤Git checkoutの実HEAD・CLI引数・実Worker構成・認証済みCloudflare account・独立にOperator検証されたDeno OrganizationとFree資格の一致、⑥Stage/Usage period/15分鮮度、⑦既存§8.3の全メーター残容量、の順で判定する。
+
+**戻り値:** 正常時のみ`ExecutionTargetV1`を返す。入力/保護/認証元/対象/期間/Hash/Operator承認のいずれかが不明・不一致・失効・照合不能なら`undefined`を返し、上位CLIは`PREFLIGHT_HOLD`かつ終了コード`2`で**Upload/Deploy/Secret変更/Fixture/測定の全てを開始しない**。例外を捕捉してPASSにしない。ログには`TRUST_RECORD_MISSING`、`UNTRUSTED_RECORD_PATH`、`PROOF_UNVERIFIED`、`HASH_MISMATCH`、`OPERATOR_NOT_CONFIRMED`、`TARGET_MISMATCH`、`EXPIRED_EVIDENCE`等の非秘密reason codeだけを出す。
+
+このモデルは**Operatorに対する偽装耐性を暗号学的に証明するものではない**。Operatorとその保護領域が信頼できない場合は`NOT_VERIFIED/HOLD`。有効なTrust Recordがあっても`PREFLIGHT_PASS`は容量照合のみであり、別途OwnerによるRemote実行承認、CPU Gate 5/7/0、Quota/Streaming/Idempotency/Fail-Closed、Production HOLDの条件を変更しない。
+
+#### 8.6.5 CLI境界
+
+本番CLI経路は`runCpuGateCli()`（`scripts/run-relay-cpu-gate.mjs`）→本番`createOperatorVerifiedTargetResolver()`→`executeCpuGateCli()`（`scripts/relay-cpu-cli.mjs`）→`resolveVerifiedExecutionTarget()`→`evaluateCapacityPreflight(evidence,target,nowUTC)`とする。Fake resolverは**テスト限定**であり、本番入口から任意に差し替えられない。Task 2/3でこの接続・失敗テストを定義する。`recover-operation`は既存の認可と安全な終端処理を維持し、新Cost GateだけのHOLDによって妨げない。
+
 ## 9. Security / Safety Invariants
 
 以下は変更不可の設計条件とする。

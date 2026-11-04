@@ -183,6 +183,77 @@ Required IDs, canonical units, Free reference limits, Scope/reset semantics and 
 
 **Task stop:** If any required meter, including DO/D1 Rows Read/Write, lacks authoritative account usage; if the verified actual execution target is unavailable; or if full nonpausing run capacity/safe cleanup cannot be shown, return `PREFLIGHT_HOLD / NOT_VERIFIED`, not fake zeros, truncated 68-series tests or unsafe day splitting.
 
+#### F-002 — Operator Trust Record and resolver contract (normative addition)
+
+##### 変更ファイルの固定
+
+既存Task 2のファイルに加え、将来の**別承認されたローカル実装**として以下を明示する。
+
+- **新規:** `scripts/relay-cpu-operator-trust.mjs` — `OperatorTrustRecordV1`、`createOperatorVerifiedTargetResolver`の本体、保護ファイル・Operator証拠検証、Fail-Closed。必要な外部API呼出しを開始する責務は持たず、**事前に別承認で取得した**Provider/Gitの証拠を消費する。
+- **新規:** `scripts/relay-cpu-operator-trust.test.mjs` — Hash・Provider証拠・Owner/Operator・保護権限・同一内容の未承認JSONに対する拒否試験。
+- **新規:** `scripts/relay-cpu-operator-approve.mjs` — Operatorの明示操作に限って、独立収集済み証拠を確認・固定するローカル準備CLI。自動承認は禁止。非対話モードは`HOLD`。
+- **既存予定:** `scripts/relay-cpu-capacity.mjs` — `evaluateCapacityPreflight(evidence,target,nowUTC)`は**信頼解決が先に成立したTargetのみ**受ける。構造照合と容量計算は純粋関数のままとする。
+- **既存予定:** `scripts/relay-cpu-capacity-cli.mjs` — `--evidence`と`--target`の単なるJSON一致では`PASS`とせず、Operator Trust Recordの受理が必要。独立のOperator承認入力がないと`HOLD`。
+
+##### 追加の具体的な型と責務
+
+設計書R0.1.2限定訂正§8.6の`OperatorTrustRecordV1`が唯一の正規型である。Planに別版のSchemaを作らない。関数契約は次で確定する。
+
+```ts
+// scripts/relay-cpu-operator-trust.mjs (future; no code is implemented in this Task)
+export function createOperatorVerifiedTargetResolver(deps: {
+  readProtectedFile: (path: string) => Promise<Uint8Array>;
+  protectedFileStat: (path: string) => Promise<{
+    isFile: boolean; isSymlink: boolean; uid: number; mode: number;
+  }>;
+  trustedOperatorSession: {
+    operatorUid: number;
+    approvedTrustRecordSha256: string; // approved out-of-band, NOT CLI or CapacityEvidence
+    trustRootPath: string;             // Operator-owned, not taken from untrusted JSON
+    interactiveApprovalVerified: boolean;
+  };
+  gitHead: () => Promise<string>;
+  actualWorkerConfig: () => Promise<{ workerName: string; environment: 'preview'|'production'; cloudflareAccountId: string }>;
+  nowUTC: () => string;
+}): (args: {
+  mode: 'stage1' | 'stage2-preflight' | 'stage2-series';
+  sourceRevision: string; workerName: string; scriptVersionId?: string;
+  environment: 'preview' | 'production'; targetPath: string;
+}) => Promise<ExecutionTargetV1 | undefined>;
+```
+
+`ExecutionTargetV1`・`CapacityEvidenceV1`は既存Task 2のSchemaのまま。`OperatorTrustRecordV1`が固定する`targetSha256`/`capacityEvidenceSha256`および8種類のproofEntriesについて、Record作成時とRunner使用時の両方で、**保護された実ファイルを読み直しSHA-256を照合**する。UUID/参照IDだけで確認成立としない。
+
+**信頼できる入力と禁止入力**：`trustedOperatorSession`はOperator本人が管理するローカル実行コンテキストから供給する。`resolveTrustedOperatorRuntimeDependencies`は`node:os.homedir()`から固定root `~/.local/state/octg/cpu-gate/approved/`を導出し、`process.stdin.isTTY && process.stdout.isTTY`が真の場合だけ`node:readline/promises`でOperatorに正規Trust RecordのSHA-256（64桁）を対話入力させる。CLIフラグ、環境変数、Target/Evidence JSONから承認ダイジェストを得るFallbackはない。非対話・入力中断・未承認rootは`undefined`/HOLD。`approvedTrustRecordSha256`、`trustRootPath`、`interactiveApprovalVerified`を、任意の`--execution-target`、`--capacity-evidence`、そのJSON、一般ユーザーが編集可能なCLI引数から作ってはならない。Provider認証対象、Git HEAD、Worker名・Stage・Accountは別系統で検証する。Operatorによる人手確認が証拠の真正性の最終根拠であり、暗号学的Provider署名の存在を仮定しない。承認セッションを保護できなければHOLD。
+
+##### Operator準備フロー（将来のローカル実装・独立承認が必要）
+
+1. **事前Evidence Check:** 実アカウントのCloudflare/Deno Provider設定・Free資格・Meter実績、固定Git commit、Worker構成を別承認の読み取り工程で照合する。UsageとTargetは異なる資料から導出する。少なくとも`git_commit`、`worker_config`、`cloudflare_account`、`cloudflare_free_plan`、`cloudflare_usage`、`deno_organization`、`deno_free_plan`、`deno_usage`の8種類を揃える。
+2. **Operator事実確認:** Operatorが8種類の元資料（実ファイル、取得方法、SHA-256、取得日時、実ID）を確認し、Free有効期限・アカウント一致を照合する。Snapshotの存在だけでは確認成立しない。確認できないProvider証拠を「Operator確認済み」にしない。
+3. **保護作成:** `relay-cpu-operator-approve.mjs`が保護領域（Operator-owned dir `0700`; regular files `0600`）内に`ExecutionTargetV1`、Capacity Evidence、Provider/Git proof、Operator Trust Recordを排他的に作る。Symlink・所有者/権限不一致・既存ファイル上書きは拒否する。秘密値は永続記録に載せない。
+4. **独立承認固定:** OperatorがTrust RecordのSHA-256を明示確認し、値をCaller非制御のOperator sessionに固定する。任意の2つのJSONと自己申告参照だけでは承認状態を作れない。
+5. **実行直前消費:** Resolverが上記8種類の保護実体・内容Hash・Operator承認・実Git HEAD・実Worker/Account/Stage・Deno Organization・Free適格性・Usage期間・15分鮮度・revision一致を再検証。1項目でも不明なら`undefined`、上位CLIは`PREFLIGHT_HOLD`終了コード`2`。新規Remote操作は0件。
+
+**Fail-Closed reason codes（ログはコードのみ）：** `TRUST_RECORD_MISSING`、`UNTRUSTED_RECORD_PATH`、`OPERATOR_NOT_CONFIRMED`、`PROOF_UNVERIFIED`、`HASH_MISMATCH`、`CROSS_ACCOUNT`、`CROSS_ENVIRONMENT`、`WRONG_REVISION`、`EXPIRED_EVIDENCE`、`FREE_PLAN_NOT_PROVEN`、`TARGET_NOT_VERIFIED`。`undefined`以外の成功値は全チェックを満たした正規Targetだけに限る。例外は`PASS`へ変換しない。
+
+##### Task 2に追加するRED→GREENテスト名
+
+- `two_matching_unapproved_jsons_hold`
+- `operator_ref_string_without_resolvable_proof_holds`
+- `unreadable_protected_provider_snapshot_holds`
+- `provider_snapshot_hash_mismatch_holds`
+- `operator_session_digest_missing_holds`
+- `operator_session_digest_mismatch_holds`
+- `trust_root_symlink_or_writable_parent_holds`
+- `record_wrong_uid_or_file_mode_holds`
+- `untrusted_target_not_derived_from_approved_record_holds`
+- `cloudflare_account_and_deno_org_proof_disagree_holds`
+- `git_commit_does_not_match_checkout_holds`
+- `unverifiable_free_plan_or_expired_usage_holds`
+- `verified_trust_record_and_independent_evidence_accepts_target`
+
+既存F-001の必須Rows Read/Written/Storage・上限境界テストは**維持**。これらの新テストは実装承認後に初めて実行し、文書訂正中には実行しない。
+
 ### Task 3: Enforce Cost Gate before any Stage 1/2 remote action (future LOCAL implementation; separate Owner authorization)
 
 **Files:**
@@ -205,6 +276,82 @@ Required IDs, canonical units, Free reference limits, Scope/reset semantics and 
 - [ ] **Step 6: Stop at scoped commit boundary only if Owner separately approves it.** No GitHub push, remote CPU measurement, Production changes or automatic next review.
 
 **Task stop:** Independent actual account/environment/Source Revision binding or free eligibility cannot be proven ⇒ `PREFLIGHT_HOLD`. If Runner cannot support bounded single-run consumption and retains no proven reset-safe pause/resume, do not split the run; Owner selects HOLD or a later separately scoped design. Preserve old Issue #121 Task 6/12 authority and 5/7/0 acceptance.
+
+#### F-003 — Production CLI resolver wiring (normative addition)
+
+##### 変更ファイル・責務を一意にする
+
+| ファイル | 将来の変更責務 |
+| --- | --- |
+| `scripts/relay-cpu-cli.mjs` | Stage 1/2の`--capacity-evidence`/`--execution-target`受理、実行前Cost Gate呼出し、HOLD時remote 0回。`recover-operation`は除外。`--execute`の既存要求を維持 |
+| **`scripts/run-relay-cpu-gate.mjs`** | **本番CLI入口の修正必須**：`runCpuGateCli()`がTrusted Operator Sessionから**本番用Resolver Factoryを生成**し、`executeCpuGateCli()`へ`io.resolveVerifiedExecutionTarget`として注入。既存`runGate: runRelayCpuGate`も維持 |
+| `scripts/relay-cpu-operator-trust.mjs` | Resolver Factory本体。既存のTask 2で作る実装を再利用し、Fakeを本番に持ち込まない |
+| `scripts/relay-cpu-operator-approve.mjs` | 独立Operator確認とRecord作成。Stage 1/2開始時に自動実行・自動承認しない |
+| `scripts/run-relay-cpu-gate.test.mjs` | **本番entry `runCpuGateCli()`を経由した統合回帰試験**。Fakeは依存I/Oにのみ注入し、認証済みのTrusted SessionなしにResolverを偽装しない |
+| `scripts/relay-cpu-stage1.test.mjs` | Preview upload/secret/createFixtureに到達する前のHOLD、Cleanup経路維持 |
+| `scripts/relay-cpu-operator-trust.test.mjs` | 実Factoryによる保護Record/証拠真正性検証、Fail-Closed |
+
+##### 本番注入契約
+
+```ts
+// scripts/run-relay-cpu-gate.mjs — planned, not current implementation
+import { createOperatorVerifiedTargetResolver } from './relay-cpu-operator-trust.mjs';
+
+export async function runCpuGateCli(argv = process.argv.slice(2), env = process.env, io = {}) {
+  const mode = argv[0] ?? 'stage1';
+  if (mode === 'recover-operation') {
+    // Existing authorization and recovery path — do NOT impose the new Cost Gate.
+    return executeCpuGateCli(argv, env, { ...io, runGate: runRelayCpuGate });
+  }
+  // Construct only from trusted Operator-session controls and verified local/protected I/O,
+  // not from CapacityEvidence, untrusted argv or a caller-supplied resolver.
+  // resolveTrustedOperatorRuntimeDependencies verifies TTY and Operator-controlled root,
+  // then asks the Operator to re-enter the approved Trust Record SHA-256. No JSON/env fallback.
+  const resolver = createOperatorVerifiedTargetResolver(
+    await resolveTrustedOperatorRuntimeDependencies({ env, io })
+  );
+  return executeCpuGateCli(argv, env, {
+    ...io,
+    runGate: runRelayCpuGate,
+    resolveVerifiedExecutionTarget: resolver // after ...io, so caller cannot replace it
+  });
+}
+```
+
+`resolveTrustedOperatorRuntimeDependencies`は**本番入口で新規実装する内部関数**であり、未実装の擬似コードである。Trusted SessionはOperator専用の保護されたローカルRuntime入力と実在するGit/config/Provider証拠へバインドする。上記FactoryはテストFakeに入れ替えられないよう、**Production pathで呼ぶFactoryを固定**する。Unit test用に`executeCpuGateCli`を直接呼ぶ場合のみFake Resolverを許す。`io.resolveVerifiedExecutionTarget`の任意差替えを本番の成功要件にしない。
+
+**入口引数と先行チェック:** `stage1`、`stage2-preflight`、`stage2-series`では`--execute`、`--capacity-evidence=<protected-path>`、`--execution-target=<protected-path>`、`--source-revision=<exact 40-hex>`を要求。原Task 6/12で必要な`--origin`、`--worker-name`、`--pool`、`--journal`、`--ledger`、`--preview-config`/`--script-version`等は残す。新しい引数を未実装の現行CLIで動くと主張しない。現在の`runCpuGateCli()`にResolverがない場合、将来の実装完了まで新Cost Gate経由の実行は`PREFLIGHT_HOLD`。Stage 1は`preview`、Stage 2は`production`に独立バインドする。
+
+**進行順序:** 引数検査 → `--execute`検査 → 本番Resolver生成（Trusted Sessionがない場合`undefined`/HOLD）→ 完全なOperator Trust Record検証 → `evaluateCapacityPreflight(evidence,verifiedTarget,nowUTC)` → `PREFLIGHT_PASS`の場合のみ**既存**`runStage1Provisioned`/`createRelayCpuHttpAdapters`/`runRelayCpuGate`へ接続。HOLD/例外では`Upload=Deploy=Secret=Fixture=MeasuredRequest=0`、機微情報はログなし。CPU 5/7/0・Quota/Grant/Streaming/Idempotency/Fail-ClosedとProduction HOLDは不変。
+
+**Cleanup:** `recover-operation`は従来通りの`--execute`、認証Bearer、Slot/Fence/Grant終端証明を必要とし、**新しい**Cost Gateと2つの新引数を要求しない。Cost Gateの失効後も活動中Operationの安全なCloseとSecret後始末は妨げない。回復経路が新規MeasurementやFixtureを開始する抜け道になることは禁止。
+
+##### Task 3に追加するRED→GREENテスト名
+
+- `production_entry_initializes_real_resolver`
+- `production_entry_without_trusted_operator_session_holds_before_remote`
+- `production_entry_non_tty_or_digest_from_env_only_holds`
+- `production_entry_interactive_digest_mismatch_holds`
+- `production_entry_does_not_accept_injected_fake_resolver`
+- `production_entry_rejects_matching_two_fake_jsons`
+- `production_entry_rejects_unapproved_trust_record`
+- `production_entry_detects_tampered_protected_snapshot`
+- `production_entry_wrong_cloudflare_account_or_deno_org_holds`
+- `production_entry_stage1_wrong_sha_or_env_holds`
+- `production_entry_stage2_preflight_and_series_bind_actual_target`
+- `production_entry_valid_operator_record_reaches_existing_gate_without_bypass`
+- `production_entry_recover_operation_retains_existing_authorization`
+- `production_entry_recovery_after_cost_expiry_allows_cleanup_only`
+
+**検証入口:** 将来の実装者は`npm run gate:relay-cpu`に結び付く`runCpuGateCli()`を直接テストし、実Factoryを介したHOLDと正常経路双方を確認する。単体テストで`executeCpuGateCli()`へFakeを直接渡すだけではこのTaskをPASSにしない。将来のローカル試験実行・GitHub push・Remote CPU Gateは**別承認**。
+
+##### 相互整合・停止条件
+
+- Design訂正§8.6の`OperatorTrustRecordV1`が唯一のSchema。Plan Task 2の`ExecutionTargetV1`/`CapacityEvidenceV1`と`evaluateCapacityPreflight(evidence,target,nowUTC)`を変更しない。
+- `resolveVerifiedExecutionTarget`の正常戻り値は検証済み`ExecutionTargetV1`、失敗は`undefined`、上位は`PREFLIGHT_HOLD`終了コード`2`。例外・失効・証拠欠損をPASSにしない。
+- F-001はRESOLVEDとして維持。68系列・各500成功・p99<=5ms/max<=7ms/exceededCpu=0・Platform Telemetry完全・無料枠成立を緩めない。
+- 既存Issue #121 Tasks 1–5再実装禁止。Stage 1 CPU Gate RUNTIME_NOT_VERIFIED、Stage 2 NOT_AUTHORIZED、Production HOLDを維持。
+- 本限定訂正は文書候補であり、Owner採択と将来の実装承認は別の判断。完了後に自動的な独立再レビュー・GitHub書込み・次Taskを作らない。
 
 ### Task 4: Prepare actual Stage 1 evidence and operator checkpoint (READ_ONLY preparation; remote steps require separate Owner approval)
 
