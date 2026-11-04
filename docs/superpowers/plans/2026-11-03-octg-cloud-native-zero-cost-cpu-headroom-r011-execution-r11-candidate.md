@@ -202,10 +202,7 @@ Required IDs, canonical units, Free reference limits, Scope/reset semantics and 
 ```ts
 // scripts/relay-cpu-operator-trust.mjs (future; no code is implemented in this Task)
 export function createOperatorVerifiedTargetResolver(deps: {
-  readProtectedFile: (path: string) => Promise<Uint8Array>;
-  protectedFileStat: (path: string) => Promise<{
-    isFile: boolean; isSymlink: boolean; uid: number; mode: number;
-  }>;
+  readAndVerifyProtectedFile: (path: string) => Promise<ProtectedFileSnapshotV1 | undefined>;
   trustedOperatorSession: {
     operatorUid: number;
     approvedTrustRecordSha256: string; // approved out-of-band, NOT CLI or CapacityEvidence
@@ -220,6 +217,13 @@ export function createOperatorVerifiedTargetResolver(deps: {
   sourceRevision: string; workerName: string; scriptVersionId?: string;
   environment: 'preview' | 'production'; targetPath: string; capacityEvidencePath: string;
 }) => Promise<VerifiedCapacityInputV1 | undefined>;
+
+interface ProtectedFileSnapshotV1 {
+  bytes: Uint8Array;
+  fileIdentity: { device: string; inode: string };
+  beforeRead: { isFile: boolean; isSymlink: boolean; uid: number; mode: number; device: string; inode: string; size: number; mtimeNs: string; ctimeNs: string };
+  afterRead: { isFile: boolean; isSymlink: boolean; uid: number; mode: number; device: string; inode: string; size: number; mtimeNs: string; ctimeNs: string };
+}
 ```
 
 
@@ -234,6 +238,8 @@ interface VerifiedCapacityInputV1 {
 ```
 
 `ExecutionTargetV1`・`CapacityEvidenceV1`は既存Task 2のSchemaのまま。`OperatorTrustRecordV1`が固定する`targetSha256`/`capacityEvidenceSha256`と8種類のproofEntriesについて、Record承認時・Runner使用時に**実ファイルのバイト列**とSHA-256を照合する。とりわけ`capacityEvidencePath`から保護Readerが一度だけ取得したUTF-8生バイトをSHA-256化して承認済み`capacityEvidenceSha256`と完全一致させ、**その同じバイト列だけ**をJSON parseして`VerifiedCapacityInputV1.capacityEvidence`へ入れる。`target`と`capacityEvidence`は一つの承認`recordId`に結び付ける。UUID/参照ID・JSON相互一致だけでは受理しない。
+
+`readAndVerifyProtectedFile`の契約は、依存側がpathnameを一度だけ`O_NOFOLLOW`相当で開き、**同一FD**の読み取り前後に`fstat`し、そのFDから得た実バイト・前後stat・`device/inode`識別情報を単一の`ProtectedFileSnapshotV1`として返すことである。読取前後で識別情報または保護属性が変化した場合、通常ファイルでない場合、Symlinkの場合は`undefined`を返す。Resolverは返却された`bytes`のみをHash/parseに使用し、pathnameを別のstat/read操作で再検証しない。各proof/targetにも同じ保護読取契約を適用する。
 
 **信頼できる入力と禁止入力**：`trustedOperatorSession`はOperator本人が管理するローカル実行コンテキストから供給する。`resolveTrustedOperatorRuntimeDependencies`は`node:os.homedir()`から固定root `~/.local/state/octg/cpu-gate/approved/`を導出し、`process.stdin.isTTY && process.stdout.isTTY`が真の場合だけ`node:readline/promises`でOperatorに正規Trust RecordのSHA-256（64桁）を対話入力させる。CLIフラグ、環境変数、Target/Evidence JSONから承認ダイジェストを得るFallbackはない。非対話・入力中断・未承認rootは`undefined`/HOLD。`approvedTrustRecordSha256`、`trustRootPath`、`interactiveApprovalVerified`を、任意の`--execution-target`、`--capacity-evidence`、そのJSON、一般ユーザーが編集可能なCLI引数から作ってはならない。Provider認証対象、Git HEAD、Worker名・Stage・Accountは別系統で検証する。Operatorによる人手確認が証拠の真正性の最終根拠であり、暗号学的Provider署名の存在を仮定しない。承認セッションを保護できなければHOLD。
 
@@ -275,7 +281,7 @@ interface VerifiedCapacityInputV1 {
 ### Task 3: Enforce Cost Gate before any Stage 1/2 remote action (future LOCAL implementation; separate Owner authorization)
 
 **Files:**
-- Modify: `scripts/relay-cpu-cli.mjs`.
+- Modify: `scripts/relay-cpu-cli.mjs`, `scripts/run-relay-cpu-gate.mjs`.
 - Test: `scripts/run-relay-cpu-gate.test.mjs`, `scripts/relay-cpu-stage1.test.mjs`, `scripts/relay-cpu-capacity.test.mjs`.
 - Reuse unchanged: `scripts/relay-cpu-capacity.mjs`, `scripts/relay-cpu-stage1.mjs` (unless an independently demonstrated adapter necessity is later authorized).
 
@@ -286,7 +292,7 @@ interface VerifiedCapacityInputV1 {
 - **Stage mapping**: `stage1` ⇒ `{stage:'stage1',environment:'preview'}`; `stage2-preflight` and `stage2-series` ⇒ `{stage:'stage2',environment:'production'}`. Target's Cloudflare account ID must come from actual authenticated deploy/account configuration; Deno Organization ID must be operator-verified independently from Deno Console; bind worker name/source SHA to actual checkout/target build metadata, not to Cost JSON. Stage 1 candidate ScriptVersion is verified again by the existing Preview preflight after upload; Stage 2 Version Override/DO version verification remains governed by old Task 12.
 - `recover-operation` remains accessible when Cost Gate is `PREFLIGHT_HOLD`, **only** under existing `--execute`, service bearer, `runRelayCpuGate` recovery preflight, authoritative slot/operation fences and terminal proof. Do not add a Cost Gate bypass for fresh setup or another mutating path.
 
-- [ ] **Step 1: Write RED CLI regression tests:** `stage1_missing_capacity_evidence_no_remote_calls`, `stage1_missing_independent_target_no_remote_calls`, `stage1_two_matching_unverified_jsons_hold`, `stage1_cross_cloudflare_account_holds`, `stage1_wrong_revision_or_preview_env_holds`, `stage1_expired_usage_holds`, `stage2_preflight_cross_environment_holds`, `stage2_series_other_deno_org_holds`, `stage2_wrong_source_sha_holds`, `stage2_no_actual_candidate_version_holds`, `missing_do_rows_written_blocks_stage1`, `missing_d1_rows_read_blocks_stage2`, `execute_flag_still_required`, `valid_capacity_reaches_existing_stage1_adapter`, `recover_operation_with_capacity_hold_preserves_existing_auth`, `cost_hold_does_not_block_terminal_cleanup_of_existing_operation`. Supply spy `fetchImpl`/`commandImpl`/`runGate` and independent operator target resolution. On every HOLD assert **zero calls** to upload/deploy/createFixture/callback/telemetry before existing cleanup.
+- [ ] **Step 1: Write RED CLI regression tests:** `production_entry_initializes_trusted_resolver`, `production_entry_rejects_caller_fake_resolver`, `capacity_evidence_path_reaches_production_resolver`, `stage1_missing_capacity_evidence_no_remote_calls`, `stage1_missing_independent_target_no_remote_calls`, `stage1_two_matching_unverified_jsons_hold`, `stage1_cross_cloudflare_account_holds`, `stage1_wrong_revision_or_preview_env_holds`, `stage1_expired_usage_holds`, `stage2_preflight_cross_environment_holds`, `stage2_series_other_deno_org_holds`, `stage2_wrong_source_sha_holds`, `stage2_no_actual_candidate_version_holds`, `missing_do_rows_written_blocks_stage1`, `missing_d1_rows_read_blocks_stage2`, `execute_flag_still_required`, `valid_capacity_reaches_existing_stage1_adapter`, `recover_operation_with_capacity_hold_preserves_existing_auth`, `cost_hold_does_not_block_terminal_cleanup_of_existing_operation`. Run through `npm run gate:relay-cpu` and production `runCpuGateCli()`; inject fakes only at filesystem/provider/Trusted Session dependencies, not in place of the production resolver. Supply spy `fetchImpl`/`commandImpl`/`runGate` and independent operator target resolution. On every HOLD assert **zero calls** to upload/deploy/createFixture/callback/telemetry before existing cleanup.
 - [ ] **Step 2: Run RED:** `node --test scripts/run-relay-cpu-gate.test.mjs scripts/relay-cpu-stage1.test.mjs`; expected new tests fail against unchanged CLI.
 - [ ] **Step 3: Extend argument validation in `executeCpuGateCli(argv,env,io)`** for both new flags, then pass `targetPath` **and `capacityEvidencePath`** into `io.resolveVerifiedExecutionTarget(...)` **before** `runStage1Provisioned`, `createRelayCpuHttpAdapters`, any upload, Secret mutation or Stage 2 action. The resolver itself reads the approved Evidence bytes **once**, computes their SHA-256, compares `OperatorTrustRecordV1.capacityEvidenceSha256`, validates protection/session/expiry, parses the exact bytes and returns `VerifiedCapacityInputV1 | undefined`. CLI **must not re-read** `--capacity-evidence` for Evaluator. Only after a complete verified result exists call `evaluateCapacityPreflight(verified.capacityEvidence, verified.target, nowUTC)` synchronously using that same parsed snapshot. Never obtain Target from Evidence. On HOLD emit non-secret reason codes and exit `2` before remote calls; malformed CLI/IO retains `1` only where the existing error contract requires it, but untrusted/tampered Evidence specifically produces `PREFLIGHT_HOLD / 2`. Provider facts are acquired only in separately authorized preflight.
 - [ ] **Step 4: Preserve recovery and failure cleanup:** `recover-operation` bypasses only this **new** capacity requirement, not existing authorization / source / slot checks. A previously active Grant's terminalization or Preview Secret teardown remains callable after capacity evidence expires; do not block it because normal measurements are HOLD.
