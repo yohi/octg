@@ -349,15 +349,24 @@ interface OperatorTrustRecordV1 {
 
 #### 8.6.4 受理時の判定とFail-Closed
 
-`resolveVerifiedExecutionTarget(...)`はローカル保護領域とOperatorの**独立した承認ダイジェスト**を信頼起点にし、①Recordの存在・所有権/保護/通常ファイル確認、②承認ダイジェスト照合、③Recordの必須8証拠の保護実体・SHA-256・確認元・期限検証、④Target/EvidenceのSHA-256固定、⑤Git checkoutの実HEAD・CLI引数・実Worker構成・認証済みCloudflare account・独立にOperator検証されたDeno OrganizationとFree資格の一致、⑥Stage/Usage period/15分鮮度、⑦既存§8.3の全メーター残容量、の順で判定する。
+`resolveVerifiedExecutionTarget(...)`はローカル保護領域とOperatorの**独立した承認ダイジェスト**を信頼起点にし、①Recordの存在・所有権/保護/通常ファイル確認、②承認ダイジェスト照合、③Recordの必須8証拠の保護実体・SHA-256・確認元・期限検証、④**引数`capacityEvidencePath`から取得した容量証拠の実バイトのSHA-256と`OperatorTrustRecordV1.capacityEvidenceSha256`の一致・TargetのSHA-256一致**、⑤Git checkoutの実HEAD・CLI引数・実Worker構成・認証済みCloudflare account・独立にOperator検証されたDeno OrganizationとFree資格の一致、⑥Stage/Usage period/15分鮮度、⑦既存§8.3の全メーター残容量、の順で判定する。使用するEvidenceは**④で検証した同一バイト列から生成されたものだけ**とし、CLIで別途読み直さない。
 
-**戻り値:** 正常時のみ`ExecutionTargetV1`を返す。入力/保護/認証元/対象/期間/Hash/Operator承認のいずれかが不明・不一致・失効・照合不能なら`undefined`を返し、上位CLIは`PREFLIGHT_HOLD`かつ終了コード`2`で**Upload/Deploy/Secret変更/Fixture/測定の全てを開始しない**。例外を捕捉してPASSにしない。ログには`TRUST_RECORD_MISSING`、`UNTRUSTED_RECORD_PATH`、`PROOF_UNVERIFIED`、`HASH_MISMATCH`、`OPERATOR_NOT_CONFIRMED`、`TARGET_MISMATCH`、`EXPIRED_EVIDENCE`等の非秘密reason codeだけを出す。
+**戻り値:** 正常時のみ`VerifiedCapacityInputV1 { target: ExecutionTargetV1; capacityEvidence: CapacityEvidenceV1; capacityEvidenceSha256: string; trustRecordId: string }`を返す。これは承認済みの**同一バイト列から解析したEvidence**とTargetの組であり、Evidenceを別ファイルや別オブジェクトへ差し替えることはできない。入力/保護/認証元/対象/期間/Hash/Operator承認のいずれかが不明・不一致・失効・照合不能なら`undefined`を返し、上位CLIは`PREFLIGHT_HOLD`かつ終了コード`2`で**Upload/Deploy/Secret変更/Fixture/測定の全てを開始しない**。例外を捕捉してPASSにしない。ログには`TRUST_RECORD_MISSING`、`UNTRUSTED_RECORD_PATH`、`PROOF_UNVERIFIED`、`CAPACITY_EVIDENCE_HASH_MISMATCH`、`PROTECTED_FILE_CHANGED`、`APPROVAL_SESSION_MISMATCH`、`OPERATOR_NOT_CONFIRMED`、`TARGET_MISMATCH`、`EXPIRED_EVIDENCE`等の非秘密reason codeだけを出す。
 
 このモデルは**Operatorに対する偽装耐性を暗号学的に証明するものではない**。Operatorとその保護領域が信頼できない場合は`NOT_VERIFIED/HOLD`。有効なTrust Recordがあっても`PREFLIGHT_PASS`は容量照合のみであり、別途OwnerによるRemote実行承認、CPU Gate 5/7/0、Quota/Streaming/Idempotency/Fail-Closed、Production HOLDの条件を変更しない。
 
 #### 8.6.5 CLI境界
 
-本番CLI経路は`runCpuGateCli()`（`scripts/run-relay-cpu-gate.mjs`）→本番`createOperatorVerifiedTargetResolver()`→`executeCpuGateCli()`（`scripts/relay-cpu-cli.mjs`）→`resolveVerifiedExecutionTarget()`→`evaluateCapacityPreflight(evidence,target,nowUTC)`とする。Fake resolverは**テスト限定**であり、本番入口から任意に差し替えられない。Task 2/3でこの接続・失敗テストを定義する。`recover-operation`は既存の認可と安全な終端処理を維持し、新Cost GateだけのHOLDによって妨げない。
+本番CLI経路は`runCpuGateCli()`（`scripts/run-relay-cpu-gate.mjs`）→本番`createOperatorVerifiedTargetResolver()`→`executeCpuGateCli()`（`scripts/relay-cpu-cli.mjs`）→`resolveVerifiedExecutionTarget({ ..., targetPath, capacityEvidencePath })`→`VerifiedCapacityInputV1`→`evaluateCapacityPreflight(verified.capacityEvidence,verified.target,nowUTC)`とする。`capacityEvidencePath`は`--capacity-evidence`から必ず渡す。検証後に`--capacity-evidence`を再読込する経路を設けない。Fake resolverは**テスト限定**であり、本番入口から任意に差し替えられない。Task 2/3でこの接続・失敗テストを定義する。`recover-operation`は既存の認可と安全な終端処理を維持し、新Cost GateだけのHOLDによって妨げない。
+
+#### 8.6.6 Operator承認済みCapacityEvidenceの実バイト固定（Review Gate R1 F-002限定）
+
+- **承認セッション:** 既存`OperatorTrustRecordV1.recordId`を一つの承認セッションIDとする。Operatorが一回の確認で固定した`OperatorTrustRecordV1`、`ExecutionTargetV1`、`CapacityEvidenceV1`、8種類のProvider/Git proofは、固定Operator-owned root `~/.local/state/octg/cpu-gate/approved/<recordId>/`の同一保護セッション配下に格納し、正規化済み相対参照で関連付ける。外側のパス、`..`、Symlink、別セッションのproofを拒否する。RootおよびセッションdirectoryはOperator所有`0700`、各通常ファイルは`0600`。保存済みファイル・親ディレクトリの実Owner/権限を照合し、既存§8.6.3の排他作成・改変防止条件を維持する。
+- **バイト固定:** Operatorは`CapacityEvidenceV1`の**UTF-8ファイル実バイト**（改行・空白を含む）に対してSHA-256を計算し、既存`capacityEvidenceSha256`（64桁lowercase hex）へ記録する。JSON正規化後のHash、パス名、Evidence内の自己申告Digestは代用不可。Trust Recordと承認ダイジェストが固定された後、Target/Evidence/Proofを変更した場合は**同一承認で再利用せずHOLD**し、新しいOperator確認が必要。
+- **Resolverの入力:** 引数`capacityEvidencePath: string`は`--capacity-evidence`の保護ファイルパスで、`targetPath`と同じ`<recordId>`セッションに属することを確認する。既存の保護Readerで、Symlinkを追わず（`O_NOFOLLOW`相当）、一度だけOpened FDからファイル種別/UID/Mode/パスのSession内在を確認して実バイトを読み、同一FDの`fstat`再確認で差替え/変化を拒否する。**実バイトSHA-256と承認済み`capacityEvidenceSha256`が完全一致**した場合のみ、その取得バイトから`CapacityEvidenceV1`をパースする。検証後に証拠パスを再Openして別のEvidenceをEvaluatorに渡してはならない。
+- **同時性・有効性:** Recordの`reviewedAtUTC`/`expiresAtUTC`、Target `verifiedAtUTC`、Evidence `observedAtUTC`/`expiresAtUTC`、全proof `observedAtUTC`が同一承認時点の事実と一致する必要がある。いずれの観測時刻も`reviewedAtUTC`より未来でなく、開始時の`nowUTC`に対しRecord/Evidence/Provider利用量が既存15分鮮度要件を満たし、すべて未失効であること。時刻順序・同一Session内の証拠対応を証明できなければHOLD。
+- **Consumes/Produces:** `resolveVerifiedExecutionTarget({ ..., targetPath, capacityEvidencePath }) -> VerifiedCapacityInputV1 | undefined`。成功値の`capacityEvidence`は検証済み同一バイトから1回だけ生成したオブジェクトであり、`target`は既存8-proof照合済みTarget、`capacityEvidenceSha256`は計算値、`trustRecordId`は受理したRecordのID。`executeCpuGateCli`はこの成功値を変更・差替え・再読込せず、直後に`evaluateCapacityPreflight(verified.capacityEvidence,verified.target,nowUTC)`へ渡す。容量Evaluator自身は`OperatorTrustRecordV1`を暗黙に信頼したりファイルを読み直したりしない。
+- **Fail-Closed:** 未承認Evidence差替え、Hash不一致、改変、読み取り中の入替、パス外参照、Session不一致、時刻失効、証拠/Record欠損、取得・Parser例外は`undefined`から`PREFLIGHT_HOLD`（exit `2`）とし、`Upload=Deploy=Secret=Fixture=MeasuredRequest=0`。これは**新規Remote操作0件**を意味し、既存`recover-operation`の厳格な認可付き安全Cleanupを禁止しない。Operator承認はCPU Gate実行許可やProduction HOLD解除を意味しない。
 
 ## 9. Security / Safety Invariants
 

@@ -218,11 +218,22 @@ export function createOperatorVerifiedTargetResolver(deps: {
 }): (args: {
   mode: 'stage1' | 'stage2-preflight' | 'stage2-series';
   sourceRevision: string; workerName: string; scriptVersionId?: string;
-  environment: 'preview' | 'production'; targetPath: string;
-}) => Promise<ExecutionTargetV1 | undefined>;
+  environment: 'preview' | 'production'; targetPath: string; capacityEvidencePath: string;
+}) => Promise<VerifiedCapacityInputV1 | undefined>;
 ```
 
-`ExecutionTargetV1`・`CapacityEvidenceV1`は既存Task 2のSchemaのまま。`OperatorTrustRecordV1`が固定する`targetSha256`/`capacityEvidenceSha256`および8種類のproofEntriesについて、Record作成時とRunner使用時の両方で、**保護された実ファイルを読み直しSHA-256を照合**する。UUID/参照IDだけで確認成立としない。
+
+```ts
+// A resolver success carries the parsed Evidence derived from the EXACT approved bytes.
+interface VerifiedCapacityInputV1 {
+  target: ExecutionTargetV1;
+  capacityEvidence: CapacityEvidenceV1;
+  capacityEvidenceSha256: string; // SHA-256 of the same verified UTF-8 bytes
+  trustRecordId: string;           // OperatorTrustRecordV1.recordId
+}
+```
+
+`ExecutionTargetV1`・`CapacityEvidenceV1`は既存Task 2のSchemaのまま。`OperatorTrustRecordV1`が固定する`targetSha256`/`capacityEvidenceSha256`と8種類のproofEntriesについて、Record承認時・Runner使用時に**実ファイルのバイト列**とSHA-256を照合する。とりわけ`capacityEvidencePath`から保護Readerが一度だけ取得したUTF-8生バイトをSHA-256化して承認済み`capacityEvidenceSha256`と完全一致させ、**その同じバイト列だけ**をJSON parseして`VerifiedCapacityInputV1.capacityEvidence`へ入れる。`target`と`capacityEvidence`は一つの承認`recordId`に結び付ける。UUID/参照ID・JSON相互一致だけでは受理しない。
 
 **信頼できる入力と禁止入力**：`trustedOperatorSession`はOperator本人が管理するローカル実行コンテキストから供給する。`resolveTrustedOperatorRuntimeDependencies`は`node:os.homedir()`から固定root `~/.local/state/octg/cpu-gate/approved/`を導出し、`process.stdin.isTTY && process.stdout.isTTY`が真の場合だけ`node:readline/promises`でOperatorに正規Trust RecordのSHA-256（64桁）を対話入力させる。CLIフラグ、環境変数、Target/Evidence JSONから承認ダイジェストを得るFallbackはない。非対話・入力中断・未承認rootは`undefined`/HOLD。`approvedTrustRecordSha256`、`trustRootPath`、`interactiveApprovalVerified`を、任意の`--execution-target`、`--capacity-evidence`、そのJSON、一般ユーザーが編集可能なCLI引数から作ってはならない。Provider認証対象、Git HEAD、Worker名・Stage・Accountは別系統で検証する。Operatorによる人手確認が証拠の真正性の最終根拠であり、暗号学的Provider署名の存在を仮定しない。承認セッションを保護できなければHOLD。
 
@@ -232,7 +243,7 @@ export function createOperatorVerifiedTargetResolver(deps: {
 2. **Operator事実確認:** Operatorが8種類の元資料（実ファイル、取得方法、SHA-256、取得日時、実ID）を確認し、Free有効期限・アカウント一致を照合する。Snapshotの存在だけでは確認成立しない。確認できないProvider証拠を「Operator確認済み」にしない。
 3. **保護作成:** `relay-cpu-operator-approve.mjs`が保護領域（Operator-owned dir `0700`; regular files `0600`）内に`ExecutionTargetV1`、Capacity Evidence、Provider/Git proof、Operator Trust Recordを排他的に作る。Symlink・所有者/権限不一致・既存ファイル上書きは拒否する。秘密値は永続記録に載せない。
 4. **独立承認固定:** OperatorがTrust RecordのSHA-256を明示確認し、値をCaller非制御のOperator sessionに固定する。任意の2つのJSONと自己申告参照だけでは承認状態を作れない。
-5. **実行直前消費:** Resolverが上記8種類の保護実体・内容Hash・Operator承認・実Git HEAD・実Worker/Account/Stage・Deno Organization・Free適格性・Usage期間・15分鮮度・revision一致を再検証。1項目でも不明なら`undefined`、上位CLIは`PREFLIGHT_HOLD`終了コード`2`。新規Remote操作は0件。
+5. **実行直前消費:** Resolverが上記8種類の保護実体・内容Hash・Operator承認・実Git HEAD・実Worker/Account/Stage・Deno Organization・Free適格性・Usage期間・15分鮮度・revision一致を再検証する。`capacityEvidencePath`を同一`recordId`ディレクトリ内の保護ファイルとして一回だけOpen/Readし、同じFDの`fstat`前後照合、非Symlink、Operator UID/権限、承認済み`capacityEvidenceSha256`との実バイトSHA-256完全一致を必須とする。別セッションのTarget/Evidence/Proof、差替え・失効・パス外参照はHOLD。検証済みバイトをparseして`VerifiedCapacityInputV1 { target, capacityEvidence, capacityEvidenceSha256, trustRecordId }`を返す。失敗は`undefined`、上位CLIは`PREFLIGHT_HOLD`終了コード`2`。新規Remote操作0件。
 
 **Fail-Closed reason codes（ログはコードのみ）：** `TRUST_RECORD_MISSING`、`UNTRUSTED_RECORD_PATH`、`OPERATOR_NOT_CONFIRMED`、`PROOF_UNVERIFIED`、`HASH_MISMATCH`、`CROSS_ACCOUNT`、`CROSS_ENVIRONMENT`、`WRONG_REVISION`、`EXPIRED_EVIDENCE`、`FREE_PLAN_NOT_PROVEN`、`TARGET_NOT_VERIFIED`。`undefined`以外の成功値は全チェックを満たした正規Targetだけに限る。例外は`PASS`へ変換しない。
 
@@ -251,6 +262,13 @@ export function createOperatorVerifiedTargetResolver(deps: {
 - `git_commit_does_not_match_checkout_holds`
 - `unverifiable_free_plan_or_expired_usage_holds`
 - `verified_trust_record_and_independent_evidence_accepts_target`
+- `approved_target_with_unapproved_capacity_evidence_swap_holds`
+- `capacity_evidence_digest_mismatch_or_file_tamper_holds`
+- `capacity_evidence_replaced_during_read_holds`
+- `capacity_evidence_from_other_operator_session_holds`
+- `capacity_evidence_or_proof_expired_holds`
+- `capacity_evidence_actual_bytes_including_newline_hash_checked`
+- `capacity_evidence_verified_snapshot_is_exactly_evaluator_input`
 
 既存F-001の必須Rows Read/Written/Storage・上限境界テストは**維持**。これらの新テストは実装承認後に初めて実行し、文書訂正中には実行しない。
 
@@ -263,14 +281,14 @@ export function createOperatorVerifiedTargetResolver(deps: {
 
 **Interfaces:**
 - Existing entry function: `executeCpuGateCli(argv, env, io): Promise<number>`; keep `runRelayCpuGate({ mode, adapters, journalPath, ledgerPath, sourceRevision, signal })` unchanged.
-- New options on `stage1`, `stage2-preflight`, `stage2-series`: **`--capacity-evidence=<protected-json-path>`** and **`--execution-target=<independent-protected-json-path>`**. The latter is an Operator-reviewed target record with distinct provider/Git provenance, not a copy of CapacityEvidence. The CLI invokes `io.resolveVerifiedExecutionTarget({ mode, sourceRevision, workerName, scriptVersionId, environment, env, targetPath })` (future function supplied by the Task 3 implementation). It must read the protected target file, check independent Operator proof references, compare the fixed Git checkout SHA to `sourceRevision`, the CLI Worker/stage to actual config, the Cloudflare account to `CLOUDFLARE_ACCOUNT_ID` verified in the provider, and the Deno Organization/Free terms to independently Operator-verified Deno evidence; it returns `ExecutionTargetV1 | undefined`. If proof cannot be established from those independent sources or resolver is absent, it returns `undefined`, forcing HOLD. A caller-provided target field, unverified file, or matching pair of user-authored JSONs alone must never be sufficient.
+- New options on `stage1`, `stage2-preflight`, `stage2-series`: **`--capacity-evidence=<protected-json-path>`** and **`--execution-target=<independent-protected-json-path>`**. The latter is an Operator-reviewed Target record with independent Provider/Git provenance. The CLI invokes `io.resolveVerifiedExecutionTarget({ mode, sourceRevision, workerName, scriptVersionId, environment, targetPath: pairs["--execution-target"], capacityEvidencePath: pairs["--capacity-evidence"] })`. The production resolver (Task 2) checks the protected Target, Operator Trust Record and all independent Provider/Git proofs; it **reads and SHA-256 verifies the actual CapacityEvidence bytes from `capacityEvidencePath` against the approved Record in the same `recordId` session**. It returns `VerifiedCapacityInputV1 | undefined`, never an unbound Target. If that independent proof, same-session binding, digest or freshness cannot be established, return `undefined`/HOLD. A caller-provided Target field, unverified file, or two matching self-declared JSONs are insufficient.
 - Preserve existing `--execute`, `--origin`, `--worker-name`, `--pool`, `--model`, `--journal`, `--ledger`, `--source-revision`, `--preview-config`, `--script-version` flags. Require `--execution-target` only for new Stage 1/2 Cost Gate modes; never require it for `recover-operation`. For every measured Stage 1/2 mode, require explicit 40-hex `--source-revision`; for Stage 2 require the selected ScriptVersion identity where existing Task 6/12 prescribes it.
 - **Stage mapping**: `stage1` ⇒ `{stage:'stage1',environment:'preview'}`; `stage2-preflight` and `stage2-series` ⇒ `{stage:'stage2',environment:'production'}`. Target's Cloudflare account ID must come from actual authenticated deploy/account configuration; Deno Organization ID must be operator-verified independently from Deno Console; bind worker name/source SHA to actual checkout/target build metadata, not to Cost JSON. Stage 1 candidate ScriptVersion is verified again by the existing Preview preflight after upload; Stage 2 Version Override/DO version verification remains governed by old Task 12.
 - `recover-operation` remains accessible when Cost Gate is `PREFLIGHT_HOLD`, **only** under existing `--execute`, service bearer, `runRelayCpuGate` recovery preflight, authoritative slot/operation fences and terminal proof. Do not add a Cost Gate bypass for fresh setup or another mutating path.
 
 - [ ] **Step 1: Write RED CLI regression tests:** `stage1_missing_capacity_evidence_no_remote_calls`, `stage1_missing_independent_target_no_remote_calls`, `stage1_two_matching_unverified_jsons_hold`, `stage1_cross_cloudflare_account_holds`, `stage1_wrong_revision_or_preview_env_holds`, `stage1_expired_usage_holds`, `stage2_preflight_cross_environment_holds`, `stage2_series_other_deno_org_holds`, `stage2_wrong_source_sha_holds`, `stage2_no_actual_candidate_version_holds`, `missing_do_rows_written_blocks_stage1`, `missing_d1_rows_read_blocks_stage2`, `execute_flag_still_required`, `valid_capacity_reaches_existing_stage1_adapter`, `recover_operation_with_capacity_hold_preserves_existing_auth`, `cost_hold_does_not_block_terminal_cleanup_of_existing_operation`. Supply spy `fetchImpl`/`commandImpl`/`runGate` and independent operator target resolution. On every HOLD assert **zero calls** to upload/deploy/createFixture/callback/telemetry before existing cleanup.
 - [ ] **Step 2: Run RED:** `node --test scripts/run-relay-cpu-gate.test.mjs scripts/relay-cpu-stage1.test.mjs`; expected new tests fail against unchanged CLI.
-- [ ] **Step 3: Extend argument validation in `executeCpuGateCli(argv,env,io)`** for both new flags and call `io.resolveVerifiedExecutionTarget(...)` to load/verify the separate Operator record and independent Git/CLI/config/Cloudflare/Deno identity **before** `runStage1Provisioned`, `createRelayCpuHttpAdapters`, any version upload, secret mutation or Stage 2 operation. Call `evaluateCapacityPreflight(evidence, independentlyVerifiedTarget, nowUTC)` only if a Target with independent proof was resolved. Never obtain Target from evidence. Use fixed `nowUTC` from the trusted runtime clock and sanitized response `{status:'PREFLIGHT_HOLD',reasons:[...]}` with exit `2`; malformed CLI/IO errors retain exit `1`. Do not create a new remote preflight behind a Cost Gate guard; external Target proof must be gathered beforehand under separate authorization.
+- [ ] **Step 3: Extend argument validation in `executeCpuGateCli(argv,env,io)`** for both new flags, then pass `targetPath` **and `capacityEvidencePath`** into `io.resolveVerifiedExecutionTarget(...)` **before** `runStage1Provisioned`, `createRelayCpuHttpAdapters`, any upload, Secret mutation or Stage 2 action. The resolver itself reads the approved Evidence bytes **once**, computes their SHA-256, compares `OperatorTrustRecordV1.capacityEvidenceSha256`, validates protection/session/expiry, parses the exact bytes and returns `VerifiedCapacityInputV1 | undefined`. CLI **must not re-read** `--capacity-evidence` for Evaluator. Only after a complete verified result exists call `evaluateCapacityPreflight(verified.capacityEvidence, verified.target, nowUTC)` synchronously using that same parsed snapshot. Never obtain Target from Evidence. On HOLD emit non-secret reason codes and exit `2` before remote calls; malformed CLI/IO retains `1` only where the existing error contract requires it, but untrusted/tampered Evidence specifically produces `PREFLIGHT_HOLD / 2`. Provider facts are acquired only in separately authorized preflight.
 - [ ] **Step 4: Preserve recovery and failure cleanup:** `recover-operation` bypasses only this **new** capacity requirement, not existing authorization / source / slot checks. A previously active Grant's terminalization or Preview Secret teardown remains callable after capacity evidence expires; do not block it because normal measurements are HOLD.
 - [ ] **Step 5: Run GREEN:** `node --test scripts/run-relay-cpu-gate.test.mjs scripts/relay-cpu-stage1.test.mjs scripts/relay-cpu-capacity.test.mjs`, `npm test`, `npm run typecheck`; expected exit 0. This is a future implementation task; none were run during documentation correction.
 - [ ] **Step 6: Stop at scoped commit boundary only if Owner separately approves it.** No GitHub push, remote CPU measurement, Production changes or automatic next review.
@@ -322,7 +340,7 @@ export async function runCpuGateCli(argv = process.argv.slice(2), env = process.
 
 **入口引数と先行チェック:** `stage1`、`stage2-preflight`、`stage2-series`では`--execute`、`--capacity-evidence=<protected-path>`、`--execution-target=<protected-path>`、`--source-revision=<exact 40-hex>`を要求。原Task 6/12で必要な`--origin`、`--worker-name`、`--pool`、`--journal`、`--ledger`、`--preview-config`/`--script-version`等は残す。新しい引数を未実装の現行CLIで動くと主張しない。現在の`runCpuGateCli()`にResolverがない場合、将来の実装完了まで新Cost Gate経由の実行は`PREFLIGHT_HOLD`。Stage 1は`preview`、Stage 2は`production`に独立バインドする。
 
-**進行順序:** 引数検査 → `--execute`検査 → 本番Resolver生成（Trusted Sessionがない場合`undefined`/HOLD）→ 完全なOperator Trust Record検証 → `evaluateCapacityPreflight(evidence,verifiedTarget,nowUTC)` → `PREFLIGHT_PASS`の場合のみ**既存**`runStage1Provisioned`/`createRelayCpuHttpAdapters`/`runRelayCpuGate`へ接続。HOLD/例外では`Upload=Deploy=Secret=Fixture=MeasuredRequest=0`、機微情報はログなし。CPU 5/7/0・Quota/Grant/Streaming/Idempotency/Fail-ClosedとProduction HOLDは不変。
+**進行順序:** 引数検査 → `--execute`検査 → 本番Resolver生成（Trusted Sessionがない場合`undefined`/HOLD）→ `targetPath`と`capacityEvidencePath`をResolverへ渡す → 同一`recordId`のTarget/Evidence/Trust Record/Provider proof保護・有効性照合 → **容量証拠の実バイトSHA-256と承認Digestの完全一致** → `VerifiedCapacityInputV1`（同じバイト列からparseしたEvidence/Target） → `evaluateCapacityPreflight(verified.capacityEvidence,verified.target,nowUTC)` → `PREFLIGHT_PASS`の場合のみ**既存**`runStage1Provisioned`/`createRelayCpuHttpAdapters`/`runRelayCpuGate`へ接続。別ファイル再読込や後段でのEvidence上書きを禁止。HOLD/期限切れ/改変/差替え/例外は`PREFLIGHT_HOLD` / exit `2`、`Upload=Deploy=Secret=Fixture=MeasuredRequest=0`、機微情報はログなし。CPU 5/7/0・Quota/Grant/Streaming/Idempotency/Fail-ClosedとProduction HOLDは不変。
 
 **Cleanup:** `recover-operation`は従来通りの`--execute`、認証Bearer、Slot/Fence/Grant終端証明を必要とし、**新しい**Cost Gateと2つの新引数を要求しない。Cost Gateの失効後も活動中Operationの安全なCloseとSecret後始末は妨げない。回復経路が新規MeasurementやFixtureを開始する抜け道になることは禁止。
 
@@ -342,13 +360,20 @@ export async function runCpuGateCli(argv = process.argv.slice(2), env = process.
 - `production_entry_valid_operator_record_reaches_existing_gate_without_bypass`
 - `production_entry_recover_operation_retains_existing_authorization`
 - `production_entry_recovery_after_cost_expiry_allows_cleanup_only`
+- `production_entry_passes_capacity_evidence_path_to_real_resolver`
+- `production_entry_rejects_unapproved_evidence_swap_remote_zero`
+- `production_entry_rejects_digest_mismatch_remote_zero`
+- `production_entry_rejects_file_replacement_after_stat_remote_zero`
+- `production_entry_rejects_expired_approval_session_remote_zero`
+- `production_entry_same_session_verified_bytes_reach_evaluator`
+- `production_entry_recover_operation_works_without_cost_gate_evidence`
 
 **検証入口:** 将来の実装者は`npm run gate:relay-cpu`に結び付く`runCpuGateCli()`を直接テストし、実Factoryを介したHOLDと正常経路双方を確認する。単体テストで`executeCpuGateCli()`へFakeを直接渡すだけではこのTaskをPASSにしない。将来のローカル試験実行・GitHub push・Remote CPU Gateは**別承認**。
 
 ##### 相互整合・停止条件
 
 - Design訂正§8.6の`OperatorTrustRecordV1`が唯一のSchema。Plan Task 2の`ExecutionTargetV1`/`CapacityEvidenceV1`と`evaluateCapacityPreflight(evidence,target,nowUTC)`を変更しない。
-- `resolveVerifiedExecutionTarget`の正常戻り値は検証済み`ExecutionTargetV1`、失敗は`undefined`、上位は`PREFLIGHT_HOLD`終了コード`2`。例外・失効・証拠欠損をPASSにしない。
+- `resolveVerifiedExecutionTarget`の正常戻り値は検証済み`VerifiedCapacityInputV1`（Targetと承認済み実バイト由来Evidenceの不可分な組）、失敗は`undefined`、上位は`PREFLIGHT_HOLD`終了コード`2`。別パス・別セッション・改変・失効・証拠欠損・例外をPASSにしない。Plan Task 2の純粋Evaluator `evaluateCapacityPreflight(evidence,target,nowUTC)`、既存F-001の14メーター、本番Resolver配線は変更しない。
 - F-001はRESOLVEDとして維持。68系列・各500成功・p99<=5ms/max<=7ms/exceededCpu=0・Platform Telemetry完全・無料枠成立を緩めない。
 - 既存Issue #121 Tasks 1–5再実装禁止。Stage 1 CPU Gate RUNTIME_NOT_VERIFIED、Stage 2 NOT_AUTHORIZED、Production HOLDを維持。
 - 本限定訂正は文書候補であり、Owner採択と将来の実装承認は別の判断。完了後に自動的な独立再レビュー・GitHub書込み・次Taskを作らない。
