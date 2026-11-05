@@ -49,6 +49,7 @@ async function invoke(callback, input, ledger, identity, route, clock, isSuccess
   const response = await callback(input);
   const success = isSuccessfulSample(response);
   const { windows, ...callIdentity } = identity;
+  console.error(`>>> [call ${callOrdinal}] ${identity.invocationClass} ${identity.workloadClass} c=${identity.concurrency} status=${response.status} success=${success}`);
   ledger.calls.push({ ...callIdentity, callOrdinal, timestampMs, routeDiscriminator: route, status: response.status, success,
     outcomeHint: response.outcome ?? "unknown", ...(input.requestId ? { requestId: input.requestId } : {}),
     ...(typeof response.measurementId === "string" ? { measurementId: response.measurementId } : {}) });
