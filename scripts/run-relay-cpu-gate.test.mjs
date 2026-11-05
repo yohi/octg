@@ -496,15 +496,27 @@ test("a failed concurrent callback waits for the other callbacks before reconcil
   const server = fixtureServer();
   server.adapters.series[0] = { invocationClass: "renewal_normal", workloadClass: "baseline-small", concurrency: 2 };
   let calls = 0;
+  const callbackFailure = "first callback failed with secret sentinel";
   server.adapters.callback = async () => {
-    if (++calls === 1) throw new Error("first callback failed");
+    if (++calls === 1) throw new Error(callbackFailure);
     await new Promise((resolve) => setImmediate(resolve));
     server.events.push("slow-callback-complete");
     return { status: 200, scriptVersionId: "v" };
   };
-  const result = await runRelayCpuGate({ mode: "stage2-series", adapters: server.adapters });
+  const originalConsoleError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args.join(" "));
+  let result;
+  try {
+    result = await runRelayCpuGate({ mode: "stage2-series", adapters: server.adapters });
+  } finally {
+    console.error = originalConsoleError;
+  }
   assert.equal(result.status, "BLOCKED");
   assert.equal(calls, 2);
+  assert.ok(logs.some((line) => line.includes("[call 1] renewal_normal baseline-small") && line.includes("status=error")));
+  assert.ok(logs.some((line) => line.includes("[call 2] renewal_normal baseline-small") && line.includes("status=200 success=true")));
+  assert.equal(logs.some((line) => line.includes(callbackFailure)), false);
   assert.ok(server.events.includes("slow-callback-complete"));
   assert.ok(server.events.indexOf("slow-callback-complete") < server.events.indexOf("reconcile"));
   assert.equal(server.slot().kind, "idle");

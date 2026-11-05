@@ -422,15 +422,19 @@ test("applies CPU-gate quota limits when cpuGateQuota is provided", () => {
 });
 
 test("rejects a CPU-gate quota allocation over the provider ceiling", () => {
+  const config = {
+    ...baseConfig,
+    vars: { ...baseConfig.vars, QUOTA_LIMIT_STANDARD: "800000" },
+  };
   assert.throws(
-    () => buildPreviewWorkerConfig(baseConfig, {
+    () => buildPreviewWorkerConfig(config, {
       ...validOptions,
       cpuGateQuota: {
         standardLimit: "170000",
         miniLimit: "10000001",
       },
     }),
-    /quota allocation/,
+    /MINI quota allocation exceeds provider ceiling/,
   );
 });
 

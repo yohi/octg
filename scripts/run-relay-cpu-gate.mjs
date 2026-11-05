@@ -46,7 +46,13 @@ async function invoke(callback, input, ledger, identity, route, clock, isSuccess
   const timestampMs = clock();
   const callOrdinal = (ledger.issuedCalls ?? 0) + 1;
   ledger.issuedCalls = callOrdinal;
-  const response = await callback(input);
+  let response;
+  try {
+    response = await callback(input);
+  } catch (error) {
+    console.error(`>>> [call ${callOrdinal}] ${identity.invocationClass} ${identity.workloadClass} c=${identity.concurrency} status=error success=false`);
+    throw error;
+  }
   const success = isSuccessfulSample(response);
   const { windows, ...callIdentity } = identity;
   console.error(`>>> [call ${callOrdinal}] ${identity.invocationClass} ${identity.workloadClass} c=${identity.concurrency} status=${response.status} success=${success}`);
