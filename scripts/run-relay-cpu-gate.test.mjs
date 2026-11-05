@@ -4,9 +4,18 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile, rm, stat, lstat, rename, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runRelayCpuGate, runCpuGateCli, generateCpuGateBearer, withPreviewSecretsFile, runFixtureLifecycle, recoverSharedOperation, runPreviewLifecycle, assertNoCredentialLeak } from "./run-relay-cpu-gate.mjs";
+import { runRelayCpuGate, runCpuGateCli, generateCpuGateBearer, withPreviewSecretsFile, runFixtureLifecycle, recoverSharedOperation, runPreviewLifecycle, assertNoCredentialLeak, resolveActualWorkerConfig } from "./run-relay-cpu-gate.mjs";
 import { readAndVerifyProtectedFile } from "./relay-cpu-operator-trust.mjs";
 import { makeTrustRoot, baseResolverDeps, cleanupTrustRoot, SOURCE_REVISION, OTHER_REVISION, WORKER_NAME, CLOUDFLARE_ACCOUNT_ID, DENO_ORGANIZATION_ID, NOW_UTC, sha256 } from "./relay-cpu-test-fixtures.mjs";
+
+test("production_worker_config_uses_deploy_var_without_env_production", () => {
+  const config = { name: WORKER_NAME, vars: { OCTG_RELAY_ENVIRONMENT: "preview" } };
+  assert.deepEqual(resolveActualWorkerConfig(config, productionEnv(), "stage2-series"), {
+    workerName: WORKER_NAME,
+    environment: "production",
+    cloudflareAccountId: CLOUDFLARE_ACCOUNT_ID,
+  });
+});
 
 async function productionHoldCase(t, {
   mode = "stage1",

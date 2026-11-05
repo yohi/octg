@@ -1,5 +1,4 @@
-import { requiredSeriesMatrix } from "./relay-cpu-workloads.mjs";
-import { SUCCESS_SAMPLE_TARGET } from "./run-relay-cpu-gate.mjs";
+import { requiredSeriesMatrix, SUCCESS_SAMPLE_TARGET } from "./relay-cpu-workloads.mjs";
 
 /**
  * @typedef {Object} CapacityMatrixV1
@@ -328,8 +327,7 @@ function uniqueReasons(reasons) {
   return [...new Set(reasons)];
 }
 
-/**
- * Evaluates capacity preflight for a verified execution target.
+/** Evaluates capacity preflight for a verified execution target.
  * @param {CapacityEvidenceV1} evidence
  * @param {ExecutionTargetV1} target
  * @param {string} nowUTC

@@ -35,11 +35,24 @@ test("approve_cli_prints_help_in_non_interactive_mode", async () => {
   assert.equal(stderr.trim(), "");
 });
 
-test("approve_cli_exits_malformed_on_missing_record_argument", async () => {
-  const { exitCode, stdout } = await runCli([]);
-  assert.equal(exitCode, 2);
-  const result = JSON.parse(stdout);
-  assert.equal(result.status, "PREFLIGHT_HOLD");
+test("approve_cli_reports_missing_record_path_in_tty", async () => {
+  let readCount = 0;
+  let output = "";
+  const originalLog = console.log;
+  console.log = (line) => { output = line; };
+  try {
+    const exitCode = await runOperatorApproveCli([], {
+      isTTY: true,
+      readAndVerifyProtectedFile: async () => { readCount += 1; return undefined; },
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(readCount, 0);
+    const result = JSON.parse(output);
+    assert.equal(result.status, "PREFLIGHT_HOLD");
+    assert.deepEqual(result.reasons, ["MISSING_RECORD_PATH"]);
+  } finally {
+    console.log = originalLog;
+  }
 });
 
 test("approve_cli_accepts_matching_digest_in_injected_interactive_session", async () => {

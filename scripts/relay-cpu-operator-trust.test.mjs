@@ -94,6 +94,25 @@ test("record_wrong_uid_or_file_mode_holds", async () => {
   }
 });
 
+test("record_stage_mismatch_holds_even_when_target_matches_execution_mode", async () => {
+  const fixture = await makeTrustRoot();
+  try {
+    const target = { ...fixture.target, stage: "stage2" };
+    const targetText = JSON.stringify(target);
+    const evidence = { ...fixture.evidence, stage: "stage2" };
+    const evidenceText = JSON.stringify(evidence);
+    await writeFile(fixture.targetPath, targetText, { mode: 0o600 });
+    await writeFile(fixture.evidencePath, evidenceText, { mode: 0o600 });
+    fixture.record.targetSha256 = sha256(targetText);
+    fixture.record.capacityEvidenceSha256 = sha256(evidenceText);
+    fixture.recordSha256 = sha256(JSON.stringify(fixture.record));
+    await writeFile(fixture.recordPath, JSON.stringify(fixture.record), { mode: 0o600 });
+    await assertFixtureHolds(fixture, { args: { mode: "stage2-preflight" } });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("operator_session_digest_missing_holds", async () => {
   const fixture = await makeTrustRoot();
   try {

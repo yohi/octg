@@ -6,7 +6,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as ts from "typescript";
-import { buildWorkload, requiredSeriesMatrix } from "./relay-cpu-workloads.mjs";
+import { buildWorkload, requiredSeriesMatrix, SUCCESS_SAMPLE_TARGET } from "./relay-cpu-workloads.mjs";
 import { runFixtureLifecycle, recoverSharedOperation, closeOwnedOperation } from "./relay-cpu-operation.mjs";
 import { executeCpuGateCli } from "./relay-cpu-cli.mjs";
 import { createRequestId as ulid } from "./relay-cpu-request-id.mjs";
@@ -18,7 +18,6 @@ import { createOperatorVerifiedTargetResolver, resolveTrustedOperatorRuntimeDepe
 
 const CPU_GATE_PATH = "/internal/relay/v1/cpu-gate";
 const CALLBACK_PATHS = Object.freeze(["/internal/relay/v1/decision", "/internal/relay/v1/activation", "/internal/relay/v1/renewal", "/internal/relay/v1/terminal"]);
-export const SUCCESS_SAMPLE_TARGET = 500;
 const CLOCK_SKEW_TOLERANCE_MS = 1000;
 const now = () => Date.now();
 
@@ -211,6 +210,7 @@ async function runSeries(identity, adapters, ledger, options) {
   return { status: 200, outcome: "completed" };
 }
 
+/** Execute a relay CPU-gate mode using injected adapters and return its safe ledger result. */
 export async function runRelayCpuGate({ mode = "stage1", adapters = {}, journalPath, ledgerPath, sourceRevision, signal, runId = randomUUID() }) {
   if (!["stage1", "stage2-preflight", "stage2-series", "recover-operation"].includes(mode)) throw new TypeError("Unknown relay CPU gate mode");
   const ledger = { version: 1, runId, mode, operations: [], calls: [], series: [] };
@@ -298,7 +298,28 @@ export async function runRelayCpuGate({ mode = "stage1", adapters = {}, journalP
 
 const execFileAsync = promisify(execFile);
 
-async function resolveTrustedOperatorRuntimeDependencies({ env, io }) {
+/**
+ * Resolve the Worker identity and relay environment effective for this gate mode.
+ * Production gate deployments pass `--var OCTG_RELAY_ENVIRONMENT:production`,
+ * which takes precedence over Wrangler configuration values.
+ * @param {Object} config Parsed Wrangler configuration.
+ * @param {NodeJS.ProcessEnv} env Process environment used for account identity.
+ * @param {string} mode CPU gate execution mode.
+ * @returns {{workerName:string, environment:string, cloudflareAccountId:string}|undefined}
+ */
+export function resolveActualWorkerConfig(config, env, mode) {
+  if (config.account_id && config.account_id !== env.CLOUDFLARE_ACCOUNT_ID) return undefined;
+  const configuredEnvironment = config.env?.production?.vars?.OCTG_RELAY_ENVIRONMENT
+    ?? config.vars?.OCTG_RELAY_ENVIRONMENT;
+  const environment = mode === "stage1" ? config.vars?.OCTG_RELAY_ENVIRONMENT : "production";
+  return {
+    workerName: config.name,
+    environment: environment ?? configuredEnvironment,
+    cloudflareAccountId: env.CLOUDFLARE_ACCOUNT_ID ?? "",
+  };
+}
+
+async function resolveTrustedOperatorRuntimeDependencies({ env, io, mode }) {
   // Only these low-level session/filesystem adapters are injectable, never the factory.
   const supplied = io.trustedOperatorRuntimeDependencies;
   const session = supplied?.trustedOperatorSession ?? {
@@ -319,14 +340,12 @@ async function resolveTrustedOperatorRuntimeDependencies({ env, io }) {
     actualWorkerConfig: supplied?.actualWorkerConfig ?? (async () => {
       const parsed = ts.parseConfigFileTextToJson(io.workerConfigPath, await readFile(io.workerConfigPath, "utf8"));
       if (parsed.error || !parsed.config) return undefined;
-      const config = parsed.config;
-      if (config.account_id && config.account_id !== env.CLOUDFLARE_ACCOUNT_ID) return undefined;
-      return { workerName: config.name, environment: config.vars?.OCTG_RELAY_ENVIRONMENT,
-        cloudflareAccountId: env.CLOUDFLARE_ACCOUNT_ID ?? "" };
+      return resolveActualWorkerConfig(parsed.config, env, mode);
     }),
   };
 }
 
+/** Validate and run the CPU-gate CLI with production trust resolution enabled. */
 export async function runCpuGateCli(argv = process.argv.slice(2), env = process.env, io = {}) {
   const mode = argv[0] ?? "stage1";
   if (mode === "recover-operation") {
@@ -338,7 +357,7 @@ export async function runCpuGateCli(argv = process.argv.slice(2), env = process.
       const configOption = argv.find((arg) => arg.startsWith("--preview-config="));
       const workerConfigPath = mode === "stage1" ? configOption?.slice("--preview-config=".length)
         : fileURLToPath(new URL("../apps/gateway-worker/wrangler.jsonc", import.meta.url));
-      const deps = await resolveTrustedOperatorRuntimeDependencies({ env, io: { ...io, workerConfigPath } });
+      const deps = await resolveTrustedOperatorRuntimeDependencies({ env, mode, io: { ...io, workerConfigPath } });
       if (deps === undefined) return undefined;
       const directory = await lstat(dirname(args.targetPath));
       if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== deps.trustedOperatorSession.operatorUid

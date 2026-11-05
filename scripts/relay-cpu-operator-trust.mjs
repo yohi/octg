@@ -227,6 +227,7 @@ async function loadApprovedInputs(context, deps, operatorUid) {
     return undefined;
   }
   if (!isObject(target) || target.version !== 1 || !identityMatches(target, recordTarget)
+    || target.stage !== recordTarget.stage
     || target.stage !== (args.mode === "stage1" ? "stage1" : "stage2")
     || target.workerName !== args.workerName || target.environment !== args.environment
     || sha256Bytes(new TextEncoder().encode(JSON.stringify(target.usagePeriods))) !== recordTarget.usagePeriodsSha256) return undefined;
