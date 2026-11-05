@@ -61,6 +61,24 @@ function statsToSnapshot(stats) {
   };
 }
 
+function hasProtectedPermissions(stats, expectedUid) {
+  return stats.isFile() && !stats.isSymbolicLink() && (stats.mode & 0o777) === 0o600
+    && (expectedUid === undefined || stats.uid === expectedUid);
+}
+
+function hasProtectedSnapshot(snapshot, expectedUid) {
+  return snapshot.isFile && !snapshot.isSymlink && (snapshot.mode & 0o777) === 0o600
+    && (expectedUid === undefined || snapshot.uid === expectedUid);
+}
+
+function isStableSnapshot(beforeRead, afterRead) {
+  return beforeRead.isFile && !beforeRead.isSymlink && afterRead.isFile && !afterRead.isSymlink
+    && beforeRead.device === afterRead.device && beforeRead.inode === afterRead.inode
+    && beforeRead.size === afterRead.size && beforeRead.mtimeNs === afterRead.mtimeNs
+    && beforeRead.ctimeNs === afterRead.ctimeNs && beforeRead.uid === afterRead.uid
+    && beforeRead.mode === afterRead.mode;
+}
+
 /**
  * Read a protected file using a single FD and before/after stat.
  * Returns undefined if the file is a symlink, not a regular file, not owned by
@@ -78,8 +96,7 @@ export async function readAndVerifyProtectedFile(filePath, expectedUid) {
   } catch {
     return undefined;
   }
-  if (!parentStats.isDirectory()) return undefined;
-  if ((parentStats.mode & 0o022) !== 0) return undefined; // no group/other write
+  if (!parentStats.isDirectory() || (parentStats.mode & 0o022) !== 0) return undefined; // no group/other write
   if (expectedUid !== undefined && parentStats.uid !== expectedUid) return undefined;
 
   let pathStats;
@@ -88,9 +105,7 @@ export async function readAndVerifyProtectedFile(filePath, expectedUid) {
   } catch {
     return undefined;
   }
-  if (!pathStats.isFile() || pathStats.isSymbolicLink()) return undefined;
-  if ((pathStats.mode & 0o777) !== 0o600) return undefined;
-  if (expectedUid !== undefined && pathStats.uid !== expectedUid) return undefined;
+  if (!hasProtectedPermissions(pathStats, expectedUid)) return undefined;
 
   let handle;
   try {
@@ -101,23 +116,13 @@ export async function readAndVerifyProtectedFile(filePath, expectedUid) {
 
   try {
     const beforeRead = statsToSnapshot(await handle.stat({ bigint: true }));
-    if (!beforeRead.isFile || beforeRead.isSymlink) return undefined;
-    if (expectedUid !== undefined && beforeRead.uid !== expectedUid) return undefined;
-    if ((beforeRead.mode & 0o777) !== 0o600) return undefined;
+    if (!hasProtectedSnapshot(beforeRead, expectedUid)) return undefined;
 
     const bytes = new Uint8Array(await readFile(handle));
 
     const afterRead = statsToSnapshot(await handle.stat({ bigint: true }));
-    if (!afterRead.isFile || afterRead.isSymlink) return undefined;
-    if (expectedUid !== undefined && afterRead.uid !== expectedUid) return undefined;
-    if ((afterRead.mode & 0o777) !== 0o600) return undefined;
-
-    if (beforeRead.device !== afterRead.device || beforeRead.inode !== afterRead.inode
-      || beforeRead.size !== afterRead.size || beforeRead.mtimeNs !== afterRead.mtimeNs
-      || beforeRead.ctimeNs !== afterRead.ctimeNs || beforeRead.uid !== afterRead.uid
-      || beforeRead.mode !== afterRead.mode) {
-      return undefined;
-    }
+    if (!hasProtectedSnapshot(afterRead, expectedUid)
+      || !isStableSnapshot(beforeRead, afterRead)) return undefined;
 
     return {
       bytes,
@@ -173,6 +178,86 @@ function isValidSourceKind(value) {
   return value === "authenticated_provider_read" || value === "operator_verified_console" || value === "local_git" || value === "local_config";
 }
 
+async function loadApprovedRecord(args, deps, trustRootPath, operatorUid, approvedTrustRecordSha256, interactiveApprovalVerified) {
+  if (!isObject(args) || !isNonEmptyString(args.mode) || !VALID_MODES.has(args.mode)
+    || !isValidHexSha40(args.sourceRevision) || !isNonEmptyString(args.workerName)
+    || !isValidEnvironment(args.environment) || !isNonEmptyString(args.targetPath)
+    || !isNonEmptyString(args.capacityEvidencePath)) return undefined;
+  if (!isWithinTrustRoot(args.targetPath, trustRootPath) || !isWithinTrustRoot(args.capacityEvidencePath, trustRootPath)) return undefined;
+  const targetSession = dirname(resolvePath(args.targetPath));
+  if (dirname(resolvePath(args.capacityEvidencePath)) !== targetSession
+    || dirname(targetSession) !== resolvePath(trustRootPath)) return undefined;
+  const recordId = basename(targetSession);
+  if (!isNonEmptyString(recordId)) return undefined;
+  const snapshot = await deps.readAndVerifyProtectedFile(resolvePath(targetSession, "trust-record.json"), operatorUid);
+  if (snapshot === undefined) return undefined;
+  if (!isValidHex64(approvedTrustRecordSha256) || sha256Bytes(snapshot.bytes) !== approvedTrustRecordSha256
+    || !interactiveApprovalVerified) return undefined;
+  let record;
+  try {
+    record = JSON.parse(new TextDecoder().decode(snapshot.bytes));
+  } catch {
+    return undefined;
+  }
+  if (!isObject(record) || record.schemaVersion !== 1 || record.recordId !== recordId
+    || !isNonEmptyString(record.operatorId) || record.operatorDecision !== "VERIFIED_FOR_CAPACITY_PREFLIGHT"
+    || !isObject(record.target) || !Array.isArray(record.proofEntries)) return undefined;
+  const recordTarget = record.target;
+  if (!isValidEnvironment(recordTarget.environment) || !isNonEmptyString(recordTarget.cloudflareAccountId)
+    || !isNonEmptyString(recordTarget.denoOrganizationId) || !isNonEmptyString(recordTarget.workerName)
+    || !isValidStage(recordTarget.stage) || !isValidHexSha40(recordTarget.sourceRevision)
+    || !isObject(recordTarget.freePlans) || recordTarget.freePlans.cloudflare !== "free"
+    || recordTarget.freePlans.deno !== "free" || !isNonEmptyString(recordTarget.usagePeriodsSha256)) return undefined;
+  const nowMs = parseIsoUTC(deps.nowUTC());
+  if (nowMs === undefined || !isFresh(record.reviewedAtUTC, nowMs) || parseIsoUTC(record.expiresAtUTC) <= nowMs) return undefined;
+  return { args, record, recordId, recordTarget, targetSession, nowMs };
+}
+
+async function loadApprovedInputs(context, deps, operatorUid) {
+  const { args, record, recordTarget, targetSession } = context;
+  const targetSnapshot = await deps.readAndVerifyProtectedFile(args.targetPath, operatorUid);
+  if (targetSnapshot === undefined || !isValidHex64(record.targetSha256)
+    || sha256Bytes(targetSnapshot.bytes) !== record.targetSha256) return undefined;
+  let target;
+  try {
+    target = JSON.parse(new TextDecoder().decode(targetSnapshot.bytes));
+  } catch {
+    return undefined;
+  }
+  if (!isObject(target) || target.version !== 1 || !identityMatches(target, recordTarget)
+    || target.stage !== (args.mode === "stage1" ? "stage1" : "stage2")
+    || target.workerName !== args.workerName || target.environment !== args.environment
+    || sha256Bytes(new TextEncoder().encode(JSON.stringify(target.usagePeriods))) !== recordTarget.usagePeriodsSha256) return undefined;
+  const evidenceSnapshot = await deps.readAndVerifyProtectedFile(args.capacityEvidencePath, operatorUid);
+  if (evidenceSnapshot === undefined || !isValidHex64(record.capacityEvidenceSha256)
+    || sha256Bytes(evidenceSnapshot.bytes) !== record.capacityEvidenceSha256) return undefined;
+  let capacityEvidence;
+  try {
+    capacityEvidence = JSON.parse(new TextDecoder().decode(evidenceSnapshot.bytes));
+  } catch {
+    return undefined;
+  }
+  if (!isObject(capacityEvidence) || capacityEvidence.version !== 1 || !identityMatches(capacityEvidence, recordTarget)
+    || capacityEvidence.stage !== target.stage) return undefined;
+  return { target, capacityEvidence, capacityEvidenceSha256: record.capacityEvidenceSha256 };
+}
+
+async function verifyProofEntries(entries, targetSession, operatorUid, nowMs, readFile) {
+  const seen = new Set();
+  for (const entry of entries) {
+    if (!isObject(entry) || !REQUIRED_PROOF_KINDS.has(entry.kind) || !isValidSourceKind(entry.sourceKind)
+      || !isNonEmptyString(entry.sourceRef) || isAbsolute(entry.sourceRef) || !isValidHex64(entry.snapshotSha256)
+      || !isNonEmptyString(entry.observedAtUTC) || !isNonEmptyString(entry.checkedIdentity)
+      || !isNonEmptyString(entry.verificationMethod) || seen.has(entry.kind) || !isFresh(entry.observedAtUTC, nowMs)) return false;
+    seen.add(entry.kind);
+    const proofPath = resolvePath(targetSession, entry.sourceRef);
+    if (dirname(proofPath) !== targetSession) return false;
+    const proofSnapshot = await readFile(proofPath, operatorUid);
+    if (proofSnapshot === undefined || sha256Bytes(proofSnapshot.bytes) !== entry.snapshotSha256) return false;
+  }
+  return seen.size === REQUIRED_PROOF_KINDS.size;
+}
+
 /**
  * Create an Operator-verified target resolver.
  * @param {Object} deps
@@ -188,149 +273,29 @@ export function createOperatorVerifiedTargetResolver(deps) {
   const { operatorUid, approvedTrustRecordSha256, trustRootPath, interactiveApprovalVerified } = deps.trustedOperatorSession;
 
   return async (args) => {
-    if (!isObject(args)
-      || !isNonEmptyString(args.mode)
-      || !VALID_MODES.has(args.mode)
-      || !isValidHexSha40(args.sourceRevision)
-      || !isNonEmptyString(args.workerName)
-      || !isValidEnvironment(args.environment)
-      || !isNonEmptyString(args.targetPath)
-      || !isNonEmptyString(args.capacityEvidencePath)) {
-      return undefined;
-    }
-    const stage = args.mode === "stage1" ? "stage1" : "stage2";
-
-    if (!isWithinTrustRoot(args.targetPath, trustRootPath)
-      || !isWithinTrustRoot(args.capacityEvidencePath, trustRootPath)) {
-      return undefined;
-    }
-
-    const targetSession = dirname(resolvePath(args.targetPath));
-    const evidenceSession = dirname(resolvePath(args.capacityEvidencePath));
-    if (targetSession !== evidenceSession) return undefined;
-    if (dirname(targetSession) !== resolvePath(trustRootPath)) return undefined;
-
-    const recordId = basename(targetSession);
-    if (!isNonEmptyString(recordId)) return undefined;
-
-    const recordPath = resolvePath(targetSession, "trust-record.json");
-    const recordSnapshot = await readFile(recordPath, operatorUid);
-    if (recordSnapshot === undefined) return undefined;
-
-    const recordSha256 = sha256Bytes(recordSnapshot.bytes);
-    if (recordSha256 !== approvedTrustRecordSha256 || !isValidHex64(approvedTrustRecordSha256)) return undefined;
-
-    if (!interactiveApprovalVerified) return undefined;
-
-    let record;
-    try {
-      record = JSON.parse(new TextDecoder().decode(recordSnapshot.bytes));
-    } catch {
-      return undefined;
-    }
-
-    if (!isObject(record)
-      || record.schemaVersion !== 1
-      || record.recordId !== recordId
-      || !isNonEmptyString(record.operatorId)
-      || record.operatorDecision !== "VERIFIED_FOR_CAPACITY_PREFLIGHT") {
-      return undefined;
-    }
-
-    const nowMs = parseIsoUTC(deps.nowUTC());
-    if (nowMs === undefined) return undefined;
-    if (!isFresh(record.reviewedAtUTC, nowMs) || parseIsoUTC(record.expiresAtUTC) <= nowMs) return undefined;
-
-    if (!isObject(record.target) || !Array.isArray(record.proofEntries)) return undefined;
-    const recordTarget = record.target;
-    if (!isValidEnvironment(recordTarget.environment)
-      || !isNonEmptyString(recordTarget.cloudflareAccountId)
-      || !isNonEmptyString(recordTarget.denoOrganizationId)
-      || !isNonEmptyString(recordTarget.workerName)
-      || !isValidStage(recordTarget.stage)
-      || !isValidHexSha40(recordTarget.sourceRevision)
-      || !isObject(recordTarget.freePlans)
-      || recordTarget.freePlans.cloudflare !== "free" || recordTarget.freePlans.deno !== "free"
-      || !isNonEmptyString(recordTarget.usagePeriodsSha256)) {
-      return undefined;
-    }
-
-    const targetSnapshot = await readFile(args.targetPath, operatorUid);
-    if (targetSnapshot === undefined) return undefined;
-    const targetSha256 = sha256Bytes(targetSnapshot.bytes);
-    if (targetSha256 !== record.targetSha256 || !isValidHex64(record.targetSha256)) return undefined;
-
-    let target;
-    try {
-      target = JSON.parse(new TextDecoder().decode(targetSnapshot.bytes));
-    } catch {
-      return undefined;
-    }
-    if (!isObject(target) || target.version !== 1 || !identityMatches(target, recordTarget)) return undefined;
-    if (target.stage !== stage) return undefined;
-    if (target.workerName !== args.workerName || target.environment !== args.environment) return undefined;
-    const usagePeriodsSha256 = sha256Bytes(new TextEncoder().encode(JSON.stringify(target.usagePeriods)));
-    if (usagePeriodsSha256 !== recordTarget.usagePeriodsSha256) return undefined;
-    const evidenceSnapshot = await readFile(args.capacityEvidencePath, operatorUid);
-    if (evidenceSnapshot === undefined) return undefined;
-    const evidenceSha256 = sha256Bytes(evidenceSnapshot.bytes);
-    if (evidenceSha256 !== record.capacityEvidenceSha256 || !isValidHex64(record.capacityEvidenceSha256)) return undefined;
-
-    let capacityEvidence;
-    try {
-      capacityEvidence = JSON.parse(new TextDecoder().decode(evidenceSnapshot.bytes));
-    } catch {
-      return undefined;
-    }
-    if (!isObject(capacityEvidence) || capacityEvidence.version !== 1 || !identityMatches(capacityEvidence, recordTarget)) return undefined;
-    if (capacityEvidence.stage !== stage) return undefined;
-
+    const context = await loadApprovedRecord(args, deps, trustRootPath, operatorUid, approvedTrustRecordSha256, interactiveApprovalVerified);
+    if (!context) return undefined;
+    const inputs = await loadApprovedInputs(context, deps, operatorUid);
+    if (!inputs) return undefined;
     const gitHead = await deps.gitHead();
-    if (!isValidHexSha40(gitHead) || gitHead !== recordTarget.sourceRevision || gitHead !== args.sourceRevision) return undefined;
+    if (!isValidHexSha40(gitHead) || gitHead !== context.recordTarget.sourceRevision || gitHead !== args.sourceRevision) return undefined;
 
     const workerConfig = await deps.actualWorkerConfig();
     if (!isObject(workerConfig)
-      || workerConfig.workerName !== recordTarget.workerName
-      || workerConfig.environment !== recordTarget.environment
-      || workerConfig.cloudflareAccountId !== recordTarget.cloudflareAccountId) {
+      || workerConfig.workerName !== context.recordTarget.workerName
+      || workerConfig.environment !== context.recordTarget.environment
+      || workerConfig.cloudflareAccountId !== context.recordTarget.cloudflareAccountId) {
       return undefined;
     }
-
-    const seenProofKinds = new Set();
-    for (const entry of record.proofEntries) {
-      if (!isObject(entry)
-        || !REQUIRED_PROOF_KINDS.has(entry.kind)
-        || !isValidSourceKind(entry.sourceKind)
-        || !isNonEmptyString(entry.sourceRef)
-        || isAbsolute(entry.sourceRef)
-        || !isValidHex64(entry.snapshotSha256)
-        || !isNonEmptyString(entry.observedAtUTC)
-        || !isNonEmptyString(entry.checkedIdentity)
-        || !isNonEmptyString(entry.verificationMethod)) {
-        return undefined;
-      }
-      if (seenProofKinds.has(entry.kind)) return undefined;
-      seenProofKinds.add(entry.kind);
-      if (!isFresh(entry.observedAtUTC, nowMs)) return undefined;
-
-      const proofPath = resolvePath(targetSession, entry.sourceRef);
-      if (dirname(proofPath) !== targetSession) return undefined;
-      const proofSnapshot = await readFile(proofPath, operatorUid);
-      if (proofSnapshot === undefined) return undefined;
-      const proofSha256 = sha256Bytes(proofSnapshot.bytes);
-      if (proofSha256 !== entry.snapshotSha256) return undefined;
-    }
-    if (seenProofKinds.size !== REQUIRED_PROOF_KINDS.size) return undefined;
+    if (!await verifyProofEntries(context.record.proofEntries, context.targetSession, operatorUid, context.nowMs, readFile)) return undefined;
 
     // Capacity preflight must pass on the verified bytes.
-    const preflight = evaluateCapacityPreflight(capacityEvidence, target, deps.nowUTC());
+    const preflight = evaluateCapacityPreflight(inputs.capacityEvidence, inputs.target, deps.nowUTC());
     if (preflight.status !== "PREFLIGHT_PASS") return undefined;
 
     return {
-      target,
-      capacityEvidence,
-      capacityEvidenceSha256: evidenceSha256,
-      trustRecordId: recordId,
+      ...inputs,
+      trustRecordId: context.recordId,
     };
   };
 }

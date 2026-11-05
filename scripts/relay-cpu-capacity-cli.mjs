@@ -15,10 +15,10 @@ export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
   const seen = new Set();
   for (const argument of argv) {
     const separatorIndex = argument.indexOf("=");
-    if (separatorIndex <= 0) return await emitMalformed("INVALID_CLI_ARGUMENT");
+    if (separatorIndex <= 0) return emitMalformed("INVALID_CLI_ARGUMENT");
     const key = argument.slice(0, separatorIndex);
     const value = argument.slice(separatorIndex + 1);
-    if (!allowed.has(key) || seen.has(key)) return await emitMalformed("INVALID_CLI_ARGUMENT");
+    if (!allowed.has(key) || seen.has(key)) return emitMalformed("INVALID_CLI_ARGUMENT");
     seen.add(key);
     if (key === "--evidence") evidencePath = value;
     else if (key === "--target") targetPath = value;
@@ -31,12 +31,12 @@ export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
   }
 
   if (!evidencePath || !targetPath || !nowUTC) {
-    return await emitMalformed("MISSING_CLI_ARGUMENT");
+    return emitMalformed("MISSING_CLI_ARGUMENT");
   }
 
   // Trust boundary: same file cannot be both evidence and independently verified target.
   if (evidencePath === targetPath) {
-    return await emitResult({ status: "PREFLIGHT_HOLD", reasons: ["TARGET_NOT_VERIFIED"] });
+    return emitResult({ status: "PREFLIGHT_HOLD", reasons: ["TARGET_NOT_VERIFIED"] });
   }
 
   let evidenceText;
@@ -44,7 +44,7 @@ export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
   try {
     [evidenceText, targetText] = await Promise.all([readFile(evidencePath, "utf8"), readFile(targetPath, "utf8")]);
   } catch {
-    return await emitMalformed("IO_ERROR");
+    return emitMalformed("IO_ERROR");
   }
 
   let evidence;
@@ -53,11 +53,11 @@ export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
     evidence = JSON.parse(evidenceText);
     target = JSON.parse(targetText);
   } catch {
-    return await emitMalformed("JSON_PARSE_ERROR");
+    return emitMalformed("JSON_PARSE_ERROR");
   }
 
   const result = evaluateCapacityPreflight(evidence, target, nowUTC);
-  return await emitResult(result);
+  return emitResult(result);
 }
 
 async function emitMalformed(reason) {
@@ -74,10 +74,9 @@ async function emitResult(result) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runCapacityPreflightCli().then((code) => {
-    process.exitCode = code;
-  }).catch(async () => {
-    await emitMalformed("UNEXPECTED_ERROR");
-    process.exitCode = 1;
-  });
+  try {
+    process.exitCode = await runCapacityPreflightCli();
+  } catch {
+    process.exitCode = await emitMalformed("UNEXPECTED_ERROR");
+  }
 }

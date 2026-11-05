@@ -15,6 +15,21 @@ function emitResult(result) {
   console.log(JSON.stringify(result));
 }
 
+function parseArguments(argv) {
+  const allowed = new Set(["--record", "--help"]);
+  const seen = new Set();
+  let recordPath;
+  for (const argument of argv) {
+    const separatorIndex = argument.indexOf("=");
+    if (separatorIndex <= 0) return { error: "INVALID_CLI_ARGUMENT" };
+    const key = argument.slice(0, separatorIndex);
+    if (!allowed.has(key) || seen.has(key)) return { error: "INVALID_CLI_ARGUMENT" };
+    seen.add(key);
+    if (key === "--record") recordPath = argument.slice(separatorIndex + 1);
+  }
+  return { recordPath };
+}
+
 /**
  * Run the interactive Operator approval CLI.
  * @param {string[]} argv
@@ -37,24 +52,12 @@ export async function runOperatorApproveCli(
     return 2;
   }
 
-  let recordPath;
-  const allowed = new Set(["--record", "--help"]);
-  const seen = new Set();
-  for (const argument of argv) {
-    const separatorIndex = argument.indexOf("=");
-    if (separatorIndex <= 0) {
-      emitResult({ status: "PREFLIGHT_HOLD", reasons: ["INVALID_CLI_ARGUMENT"] });
-      return 1;
-    }
-    const key = argument.slice(0, separatorIndex);
-    const value = argument.slice(separatorIndex + 1);
-    if (!allowed.has(key) || seen.has(key)) {
-      emitResult({ status: "PREFLIGHT_HOLD", reasons: ["INVALID_CLI_ARGUMENT"] });
-      return 1;
-    }
-    seen.add(key);
-    if (key === "--record") recordPath = value;
+  const parsed = parseArguments(argv);
+  if (parsed.error) {
+    emitResult({ status: "PREFLIGHT_HOLD", reasons: [parsed.error] });
+    return 1;
   }
+  const { recordPath } = parsed;
 
   if (argv.includes("--help")) {
     console.log("Usage: node scripts/relay-cpu-operator-approve.mjs --record=<path>");
@@ -106,10 +109,10 @@ export async function runOperatorApproveCli(
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runOperatorApproveCli().then((code) => {
-    process.exitCode = code;
-  }).catch(() => {
+  try {
+    process.exitCode = await runOperatorApproveCli();
+  } catch {
     emitResult({ status: "PREFLIGHT_HOLD", reasons: ["UNEXPECTED_ERROR"] });
     process.exitCode = 1;
-  });
+  }
 }

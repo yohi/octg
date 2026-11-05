@@ -1,6 +1,6 @@
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { readAndVerifyProtectedFile } from "./relay-cpu-operator-trust.mjs";
 
@@ -169,11 +169,11 @@ export async function makeTrustRoot(overrides = {}) {
     "deno_free_plan",
     "deno_usage",
   ];
-  for (const kind of proofKinds) {
+  const proofFiles = await Promise.all(proofKinds.map(async (kind) => {
     const proofText = `proof:${kind}`;
     const proofPath = join(sessionDir, `${kind}.txt`);
     await writeFile(proofPath, proofText, { mode: 0o600 });
-    proofEntries.push({
+    return {
       kind,
       sourceKind: "operator_verified_console",
       sourceRef: `${kind}.txt`,
@@ -181,8 +181,9 @@ export async function makeTrustRoot(overrides = {}) {
       observedAtUTC: "2026-11-03T11:55:00.000Z",
       checkedIdentity: kind,
       verificationMethod: "console",
-    });
-  }
+    };
+  }));
+  proofEntries.push(...proofFiles);
 
   const targetSha256 = sha256(targetText);
   const evidenceSha256 = sha256(evidenceText);
@@ -235,7 +236,7 @@ export function baseResolverDeps(fixture, overrides = {}) {
     approvedTrustRecordSha256: fixture.recordSha256,
     trustRootPath: join(fixture.root, "approved"),
     interactiveApprovalVerified: true,
-    ...(overrides.trustedOperatorSession ?? {}),
+    ...overrides.trustedOperatorSession,
   };
   return {
     readAndVerifyProtectedFile: overrides.readAndVerifyProtectedFile ?? readAndVerifyProtectedFile,
