@@ -259,36 +259,48 @@ function validateTargetReferences(target, reasons) {
   }
 }
 
-function validateMeter(meter, target, nowMs) {
+function validateMeterShape(meter, target) {
   const expectedUnit = CANONICAL_UNITS[meter.id];
   const expectedKind = EXPECTED_RESET_KINDS[meter.id];
   const expectedScope = meter.id.startsWith("deno.") ? `deno:${target.denoOrganizationId}` : `cloudflare:${target.cloudflareAccountId}`;
-  if (expectedUnit === undefined || expectedKind === undefined) {
-    if (!isObject(meter.resetWindow) || !isNonEmptyString(meter.scope) || !isNonEmptyString(meter.unit)) {
-      return "METER_SCOPE_MISMATCH";
-    }
-  } else {
-    if (meter.unit !== expectedUnit || meter.scope !== expectedScope) return "METER_SCOPE_MISMATCH";
-    if (!isObject(meter.resetWindow) || meter.resetWindow.kind !== expectedKind) return "USAGE_PERIOD_MISMATCH";
+  const unknownMeter = expectedUnit === undefined || expectedKind === undefined;
+  if (unknownMeter && (!isObject(meter.resetWindow) || !isNonEmptyString(meter.scope) || !isNonEmptyString(meter.unit))) {
+    return { reason: "METER_SCOPE_MISMATCH", unknownMeter };
   }
-  if ((expectedUnit === undefined || expectedKind === undefined)
-    && (!isNonEmptyString(meter.limitSourceUrl) || !isNonEmptyString(meter.usageEvidenceRef)
-      || !isNonEmptyString(meter.normalForecastEvidenceRef) || !isNonEmptyString(meter.budgetEvidenceRef)
-      || !isNonEmptyString(meter.reserveEvidenceRef))) return "MISSING_EVIDENCE_REF";
+  if (!unknownMeter && (meter.unit !== expectedUnit || meter.scope !== expectedScope)) {
+    return { reason: "METER_SCOPE_MISMATCH", unknownMeter };
+  }
+  if (!unknownMeter && (!isObject(meter.resetWindow) || meter.resetWindow.kind !== expectedKind)) {
+    return { reason: "USAGE_PERIOD_MISMATCH", unknownMeter };
+  }
+  return { unknownMeter };
+}
+
+function hasMeterEvidenceRefs(meter) {
+  return ["limitSourceUrl", "usageEvidenceRef", "normalForecastEvidenceRef", "budgetEvidenceRef", "reserveEvidenceRef"]
+    .every((key) => isNonEmptyString(meter[key]));
+}
+
+function validateMeterUsage(meter, target, nowMs) {
   const targetPeriod = target.usagePeriods?.[meter.id];
   if (!isObject(targetPeriod) || !windowIdentity(meter.resetWindow, targetPeriod)) return "USAGE_PERIOD_MISMATCH";
   if (!isFresh(meter.usageObservedAtUTC, nowMs) || !isFresh(meter.limitVerifiedAtUTC, nowMs)) return "EXPIRED_EVIDENCE";
-  if (!isNonEmptyString(meter.limitSourceUrl) || !isNonEmptyString(meter.usageEvidenceRef)
-    || !isNonEmptyString(meter.normalForecastEvidenceRef) || !isNonEmptyString(meter.budgetEvidenceRef)
-    || !isNonEmptyString(meter.reserveEvidenceRef)) return "MISSING_EVIDENCE_REF";
+  if (!hasMeterEvidenceRefs(meter)) return "MISSING_EVIDENCE_REF";
   const values = [meter.verifiedFreeLimit, meter.consumedUsage, meter.normalForecast, meter.reserve, meter.gateBudget];
   if (!values.every(isNonNegativeFinite)) return "INSUFFICIENT_CAPACITY";
   const [limit, usage, forecast, reserve, budget] = values;
   if (limit - usage - forecast - reserve < budget) return "INSUFFICIENT_CAPACITY";
-  if (values.some((value) => value === 0) && !isNonEmptyString(meter.zeroIncrementJustificationRef)) {
+  if (values.includes(0) && !isNonEmptyString(meter.zeroIncrementJustificationRef)) {
     return "MISSING_ZERO_JUSTIFICATION";
   }
   return undefined;
+}
+
+function validateMeter(meter, target, nowMs) {
+  const shape = validateMeterShape(meter, target);
+  if (shape.reason !== undefined) return shape.reason;
+  if (shape.unknownMeter && !hasMeterEvidenceRefs(meter)) return "MISSING_EVIDENCE_REF";
+  return validateMeterUsage(meter, target, nowMs);
 }
 
 function validateMeters(evidence, target, nowMs, reasons) {

@@ -2,7 +2,7 @@ import { createRelayCpuHttpAdapters } from "./relay-cpu-http.mjs";
 import { runStage1Provisioned } from "./relay-cpu-stage1.mjs";
 import { evaluateCapacityPreflight } from "./relay-cpu-capacity.mjs";
 
-const VALID_MODES = ["stage1", "stage2-preflight", "stage2-series", "recover-operation"];
+const VALID_MODES = new Set(["stage1", "stage2-preflight", "stage2-series", "recover-operation"]);
 const ALLOWED_OPTIONS = ["--execute", "--origin", "--worker-name", "--script-version", "--pool", "--model", "--journal", "--ledger", "--source-revision", "--preview-config", "--capacity-evidence", "--execution-target"];
 
 function parseOptions(options) {
@@ -59,7 +59,7 @@ export async function executeCpuGateCli(argv, env, io) {
     writeSummary("gate:relay-cpu <stage1|stage2-preflight|stage2-series|recover-operation> --execute --origin=<https-origin> --worker-name=<name> --pool=<STANDARD|MINI> --journal=<path> --ledger=<path> --source-revision=<sha> --capacity-evidence=<path> --execution-target=<path> [--preview-config=<path> --model=<model>] [--script-version=<id>]");
     return 0;
   }
-  if (!VALID_MODES.includes(mode)) throw new TypeError("Unknown CPU-gate mode");
+  if (!VALID_MODES.has(mode)) throw new TypeError("Unknown CPU-gate mode");
   const pairs = parseOptions(options);
   if (!("--execute" in pairs)) { writeSummary(JSON.stringify({ status: "BLOCKED", reason: "explicit execution required" })); return 2; }
   const environment = mode === "stage1" ? "preview" : "production";

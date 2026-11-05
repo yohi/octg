@@ -8,6 +8,56 @@ import { runRelayCpuGate, runCpuGateCli, generateCpuGateBearer, withPreviewSecre
 import { readAndVerifyProtectedFile } from "./relay-cpu-operator-trust.mjs";
 import { makeTrustRoot, baseResolverDeps, cleanupTrustRoot, SOURCE_REVISION, OTHER_REVISION, WORKER_NAME, CLOUDFLARE_ACCOUNT_ID, DENO_ORGANIZATION_ID, NOW_UTC, sha256 } from "./relay-cpu-test-fixtures.mjs";
 
+async function productionHoldCase(t, {
+  mode = "stage1",
+  mutate = async () => {},
+  dependencies = (deps) => deps,
+  fixtureOverrides = {},
+  flags = [],
+  nowUTC = NOW_UTC,
+  expectedReason,
+  injectedResolver,
+} = {}) {
+  const stage = mode === "stage1" ? "stage1" : "stage2";
+  const environment = stage === "stage1" ? "preview" : "production";
+  const fixture = await makeTrustRoot({ stage, environment, ...fixtureOverrides });
+  t.after(() => cleanupTrustRoot(fixture));
+  const configPath = join(fixture.root, "worker.jsonc");
+  await writeFile(configPath, JSON.stringify({ name: WORKER_NAME, vars: { OCTG_RELAY_ENVIRONMENT: "production" } }));
+  await mutate(fixture);
+  const calls = [];
+  const summaries = [];
+  const io = {
+    trustedOperatorRuntimeDependencies: dependencies(baseResolverDeps(fixture), fixture),
+    nowUTC: () => nowUTC,
+    writeSummary: (line) => summaries.push(JSON.parse(line)),
+    fetchImpl: async () => { calls.push("fetch"); throw new Error("unexpected fetch"); },
+    commandImpl: async () => { calls.push("command"); throw new Error("unexpected command"); },
+    runGate: async () => { calls.push("gate"); throw new Error("unexpected gate"); },
+    deploymentFactory: async () => { calls.push("deployment"); throw new Error("unexpected deployment"); },
+  };
+  if (injectedResolver !== undefined) io.resolveVerifiedExecutionTarget = () => injectedResolver(fixture);
+  const code = await runCpuGateCli([
+    mode,
+    "--execute",
+    `--source-revision=${SOURCE_REVISION}`,
+    `--worker-name=${WORKER_NAME}`,
+    `--preview-config=${configPath}`,
+    "--script-version=candidate",
+    "--origin=https://preview.example",
+    "--pool=MINI",
+    "--journal=unused-journal",
+    "--ledger=unused-ledger",
+    `--capacity-evidence=${fixture.evidencePath}`,
+    `--execution-target=${fixture.targetPath}`,
+    ...flags,
+  ], productionEnv(), io);
+  assert.equal(code, 2);
+  assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
+  if (expectedReason !== undefined) assert.ok(summaries.at(-1).reasons.includes(expectedReason));
+  assert.deepEqual(calls, []);
+}
+
 test("supports safe stage modes and does not retain bearer values", async () => {
   const result = await runRelayCpuGate({ mode: "stage1", adapters: { runSeries: async () => ({ status: 200 }) } });
   assert.equal(result.status, "BLOCKED");
@@ -779,289 +829,74 @@ test("production_entry_without_trusted_operator_session_holds_before_remote", as
   }
 });
 
-test("production_entry_does_not_accept_injected_fake_resolver", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-fake-resolver-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      // Injected resolver must be ignored in favour of the real factory.
-      resolveVerifiedExecutionTarget: async () => ({ target: fixture.target, capacityEvidence: fixture.evidence }),
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { trustedOperatorSession: { approvedTrustRecordSha256: "0".repeat(64) } }),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_does_not_accept_injected_fake_resolver", async (t) => {
+  await productionHoldCase(t, {
+    dependencies: (deps) => ({ ...deps,
+      trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: "0".repeat(64) },
+    }),
+    injectedResolver: async (fixture) => ({ target: fixture.target, capacityEvidence: fixture.evidence }),
+  });
 });
 
-test("production_entry_rejects_matching_two_fake_jsons_without_approved_record", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-two-jsons-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const unapprovedRecord = { ...fixture.record, operatorDecision: "UNAPPROVED" };
-    await writeFile(fixture.recordPath, JSON.stringify(unapprovedRecord), { mode: 0o600 });
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { trustedOperatorSession: { approvedTrustRecordSha256: sha256(JSON.stringify(unapprovedRecord)) } }),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_rejects_matching_two_fake_jsons_without_approved_record", async (t) => {
+  await productionHoldCase(t, {
+    mutate: async (fixture) => {
+      fixture.record = { ...fixture.record, operatorDecision: "UNAPPROVED" };
+      await writeFile(fixture.recordPath, JSON.stringify(fixture.record), { mode: 0o600 });
+    },
+    dependencies: (deps, fixture) => ({ ...deps,
+      trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: sha256(JSON.stringify(fixture.record)) },
+    }),
+  });
 });
 
-test("production_entry_detects_tampered_protected_snapshot", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-tamper-"));
-  const summaries = [];
-  const events = [];
-  try {
-    await writeFile(fixture.evidencePath, "{\"tampered\":true}", { mode: 0o600 });
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_detects_tampered_protected_snapshot", async (t) => {
+  await productionHoldCase(t, {
+    mutate: (fixture) => writeFile(fixture.evidencePath, "{\"tampered\":true}", { mode: 0o600 }),
+  });
 });
 
-test("production_entry_wrong_cloudflare_account_holds_before_remote", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-wrong-cf-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { actualWorkerConfig: async () => ({ workerName: WORKER_NAME, environment: "preview", cloudflareAccountId: "cf-account-other" }) }),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_wrong_cloudflare_account_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps,
+    actualWorkerConfig: async () => ({ workerName: WORKER_NAME, environment: "preview", cloudflareAccountId: "cf-account-other" }),
+  }) });
 });
 
-test("production_entry_wrong_deno_organization_holds_before_remote", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview", target: { denoOrganizationId: "deno-org-other" }, evidence: { denoOrganizationId: "deno-org-other" } });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-wrong-deno-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_wrong_deno_organization_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { fixtureOverrides: { target: { denoOrganizationId: "deno-org-other" } } });
 });
 
-test("production_entry_stage1_wrong_source_sha_or_env_holds_before_remote", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage1", environment: "preview", target: { sourceRevision: OTHER_REVISION }, evidence: { sourceRevision: OTHER_REVISION } });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-wrong-sha-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { configPath, journalPath, ledgerPath } = await stage1TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage1", "--execute", "--origin=https://preview.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--preview-config=${configPath}`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
-      deploymentFactory: async () => { events.push("deploymentFactory"); throw new Error("must not start"); },
-      httpFactory: () => { events.push("httpFactory"); throw new Error("must not start"); },
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_stage1_wrong_source_sha_or_env_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { fixtureOverrides: {
+    target: { sourceRevision: OTHER_REVISION }, evidence: { sourceRevision: OTHER_REVISION },
+  } });
 });
 
-test("production_entry_rejects_digest_mismatch_remote_zero", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-digest-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { trustedOperatorSession: { approvedTrustRecordSha256: "0".repeat(64) } }),
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_rejects_digest_mismatch_remote_zero", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-preflight", dependencies: (deps) => ({ ...deps,
+    trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: "0".repeat(64) },
+  }) });
 });
 
-test("production_entry_rejects_file_replacement_after_stat_remote_zero", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-replacement-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { readAndVerifyProtectedFile: async (path, uid) => {
-        if (path === fixture.evidencePath) {
-          await lstat(path);
-          await rename(path, `${path}.original`);
-          await symlink(`${path}.original`, path);
-        }
-        return readAndVerifyProtectedFile(path, uid);
-      } }),
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_rejects_file_replacement_after_stat_remote_zero", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-preflight", dependencies: (deps, fixture) => ({ ...deps,
+    readAndVerifyProtectedFile: async (path, uid) => {
+      if (path === fixture.evidencePath) {
+        await lstat(path);
+        await rename(path, `${path}.original`);
+        await symlink(`${path}.original`, path);
+      }
+      return readAndVerifyProtectedFile(path, uid);
+    },
+  }) });
 });
 
-test("production_entry_rejects_expired_approval_session_remote_zero", async () => {
-  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-expired-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => "2026-11-03T13:00:00.000Z",
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { nowUTC: () => "2026-11-03T13:00:00.000Z" }),
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-    await cleanupTrustRoot(fixture);
-  }
+test("production_entry_rejects_expired_approval_session_remote_zero", async (t) => {
+  const expiredUTC = "2026-11-03T13:00:00.000Z";
+  await productionHoldCase(t, { mode: "stage2-preflight", nowUTC: expiredUTC, dependencies: (deps) => ({
+    ...deps,
+    nowUTC: () => expiredUTC,
+  }) });
 });
 
 test("production_entry_same_session_verified_bytes_reach_evaluator", async () => {
@@ -1168,29 +1003,6 @@ test("production_entry_recovery_after_cost_expiry_allows_cleanup_only", async ()
     await cleanupTrustRoot(fixture);
   }
 });
-
-async function productionHoldCase(t, { mode = "stage1", mutate = async () => {}, dependencies = (deps) => deps, flags = [] } = {}) {
-  const fixture = await makeTrustRoot({ stage: mode === "stage1" ? "stage1" : "stage2", environment: mode === "stage1" ? "preview" : "production" });
-  t.after(() => cleanupTrustRoot(fixture));
-  const configPath = join(fixture.root, "worker.jsonc");
-  await writeFile(configPath, JSON.stringify({ name: WORKER_NAME, vars: { OCTG_RELAY_ENVIRONMENT: "production" } }));
-  await mutate(fixture);
-  const calls = [];
-  const summaries = [];
-  const code = await runCpuGateCli([mode, "--execute", `--source-revision=${SOURCE_REVISION}`, `--worker-name=${WORKER_NAME}`,
-    `--preview-config=${configPath}`, "--script-version=candidate", "--origin=https://preview.example", "--pool=MINI",
-    "--journal=unused-journal", "--ledger=unused-ledger", `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`, ...flags], productionEnv(), {
-    trustedOperatorRuntimeDependencies: dependencies(baseResolverDeps(fixture)), nowUTC: () => NOW_UTC,
-    writeSummary: (line) => summaries.push(JSON.parse(line)),
-    fetchImpl: async () => { calls.push("fetch"); throw new Error("unexpected fetch"); },
-    commandImpl: async () => { calls.push("command"); throw new Error("unexpected command"); },
-    runGate: async () => { calls.push("gate"); throw new Error("unexpected gate"); },
-    deploymentFactory: async () => { calls.push("deployment"); throw new Error("unexpected deployment"); },
-  });
-  assert.equal(code, 2);
-  assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-  assert.deepEqual(calls, []);
-}
 
 test("production_entry_default_config_binding_rejects_actual_environment_mismatch", async (t) => {
   // Given an approved Preview target but a selected production config.

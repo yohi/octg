@@ -214,7 +214,7 @@ async function loadApprovedRecord(args, deps, trustRootPath, operatorUid, approv
 }
 
 async function loadApprovedInputs(context, deps, operatorUid) {
-  const { args, record, recordTarget, targetSession } = context;
+  const { args, record, recordTarget } = context;
   const targetSnapshot = await deps.readAndVerifyProtectedFile(args.targetPath, operatorUid);
   if (targetSnapshot === undefined || !isValidHex64(record.targetSha256)
     || sha256Bytes(targetSnapshot.bytes) !== record.targetSha256) return undefined;
