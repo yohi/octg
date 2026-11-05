@@ -46,10 +46,18 @@ async function invoke(callback, input, ledger, identity, route, clock, isSuccess
   const timestampMs = clock();
   const callOrdinal = (ledger.issuedCalls ?? 0) + 1;
   ledger.issuedCalls = callOrdinal;
-  const response = await callback(input);
+  let response;
+  try {
+    response = await callback(input);
+  } catch (error) {
+    console.error(`>>> [call ${callOrdinal}] ${identity.invocationClass} ${identity.workloadClass} c=${identity.concurrency} status=error success=false`);
+    throw error;
+  }
+  const workerVersionMatch = response.scriptVersionId === input.expectedVersionId;
   const success = isSuccessfulSample(response);
   const { windows, ...callIdentity } = identity;
-  ledger.calls.push({ ...callIdentity, callOrdinal, timestampMs, routeDiscriminator: route, status: response.status, success,
+  console.error(`>>> [call ${callOrdinal}] ${identity.invocationClass} ${identity.workloadClass} c=${identity.concurrency} status=${response.status} success=${success} workerVersionMatch=${workerVersionMatch}`);
+  ledger.calls.push({ ...callIdentity, callOrdinal, timestampMs, routeDiscriminator: route, status: response.status, success, workerVersionMatch,
     outcomeHint: response.outcome ?? "unknown", ...(input.requestId ? { requestId: input.requestId } : {}),
     ...(typeof response.measurementId === "string" ? { measurementId: response.measurementId } : {}) });
   return response;
@@ -60,8 +68,9 @@ async function runSeries(identity, adapters, ledger, options) {
   const { mode, journalPath, operations, signal } = options;
   const workload = buildWorkload(identity.workloadClass);
   const model = mode === "stage2-series" ? "octg-cpu-gate-reject-v1" : adapters.model ?? workload.model;
-  const isSuccessfulSample = (response) => adapters.isSuccessfulSample
-    ? adapters.isSuccessfulSample(response, identity, mode) : response.status >= 200 && response.status < 300;
+  const isSuccessfulSample = (response) => response.scriptVersionId === adapters.candidateVersionId
+    && (adapters.isSuccessfulSample
+      ? adapters.isSuccessfulSample(response, identity, mode) : response.status >= 200 && response.status < 300);
   const overrideHeader = adapters.workerName && adapters.candidateVersionId ? `${adapters.workerName}="${adapters.candidateVersionId}"` : undefined;
   const header = overrideHeader ? { "Cloudflare-Workers-Version-Overrides": overrideHeader } : {};
   const totalTarget = adapters.sampleCount ?? SUCCESS_SAMPLE_TARGET;

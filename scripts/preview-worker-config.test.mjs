@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -73,41 +73,91 @@ test("runs the CLI when the entrypoint path is relative", () => {
 });
 
 test("Preview config CLI includes only the explicitly configured MINI CPU-gate fixture", () => {
+const scriptPath = fileURLToPath(new URL("./preview-worker-config.mjs", import.meta.url));
+const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+const directory = mkdtempSync(join(tmpdir(), "preview-worker-config-"));
+const outputPath = join(directory, "preview.jsonc");
+try {
+const result = spawnSync(process.execPath, [scriptPath, "apps/gateway-worker/wrangler.jsonc", outputPath, "deno"], {
+cwd: projectRoot,
+encoding: "utf8",
+env: {
+...process.env,
+PREVIEW_DATABASE_ID: validOptions.databaseId,
+PREVIEW_DATABASE_NAME: validOptions.databaseName,
+PREVIEW_WORKER_NAME: validOptions.workerName,
+PREVIEW_UPSTREAM_BASE_URL: validOptions.upstreamBaseUrl,
+PREVIEW_QUOTA_LIMIT_STANDARD: validOptions.standardLimit,
+PREVIEW_QUOTA_LIMIT_MINI: validOptions.miniLimit,
+PREVIEW_MAX_INPUT_BYTES: validOptions.maxInputBytes,
+PREVIEW_DENO_TOKENIZER_ENDPOINT: "https://preview-tokenizer.deno.dev/tokenize",
+PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: "1",
+PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: "5000",
+PREVIEW_OCTG_RELAY_ENVIRONMENT: "preview",
+PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT: "https://preview-relay.deno.dev",
+PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID: "preview-mini-client",
+PREVIEW_RELAY_CPU_GATE_MINI_MODEL: "gpt-5-mini",
+},
+});
+assert.equal(result.status, 0, result.stderr);
+const config = JSON.parse(readFileSync(outputPath, "utf8"));
+assert.equal(config.vars.OCTG_RELAY_ENABLED, "true");
+assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, "preview");
+assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev");
+assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID, "preview-mini-client");
+assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_MODEL, "gpt-5-mini");
+assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID, undefined);
+    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_MODEL, undefined);
+    assert.equal(config.vars.QUOTA_LIMIT_STANDARD, validOptions.standardLimit);
+    assert.equal(config.vars.QUOTA_LIMIT_MINI, validOptions.miniLimit);
+} finally {
+rmSync(directory, { recursive: true, force: true });
+}
+});
+
+test("Preview config CLI applies CPU-gate quota limits when --cpu-gate is passed", () => {
   const scriptPath = fileURLToPath(new URL("./preview-worker-config.mjs", import.meta.url));
   const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-  const directory = mkdtempSync(join(tmpdir(), "preview-worker-config-"));
+  const directory = mkdtempSync(join(tmpdir(), "preview-worker-config-cpu-gate-"));
+  const sourcePath = join(directory, "wrangler.jsonc");
   const outputPath = join(directory, "preview.jsonc");
   try {
-    const result = spawnSync(process.execPath, [scriptPath, "apps/gateway-worker/wrangler.jsonc", outputPath, "deno"], {
-      cwd: projectRoot,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        PREVIEW_DATABASE_ID: validOptions.databaseId,
-        PREVIEW_DATABASE_NAME: validOptions.databaseName,
-        PREVIEW_WORKER_NAME: validOptions.workerName,
-        PREVIEW_UPSTREAM_BASE_URL: validOptions.upstreamBaseUrl,
-        PREVIEW_QUOTA_LIMIT_STANDARD: validOptions.standardLimit,
-        PREVIEW_QUOTA_LIMIT_MINI: validOptions.miniLimit,
-        PREVIEW_MAX_INPUT_BYTES: validOptions.maxInputBytes,
-        PREVIEW_DENO_TOKENIZER_ENDPOINT: "https://preview-tokenizer.deno.dev/tokenize",
-        PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: "1",
-        PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: "5000",
-        PREVIEW_OCTG_RELAY_ENVIRONMENT: "preview",
-        PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT: "https://preview-relay.deno.dev",
-        PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID: "preview-mini-client",
-        PREVIEW_RELAY_CPU_GATE_MINI_MODEL: "gpt-5-mini",
+    const sourceConfig = {
+      ...baseConfig,
+      vars: { ...baseConfig.vars, QUOTA_LIMIT_STANDARD: "800000", QUOTA_LIMIT_MINI: "9000000" },
+    };
+    writeFileSync(sourcePath, JSON.stringify(sourceConfig, null, 2));
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, sourcePath, outputPath, "deno", "--cpu-gate"],
+      {
+        cwd: projectRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PREVIEW_DATABASE_ID: validOptions.databaseId,
+          PREVIEW_DATABASE_NAME: validOptions.databaseName,
+          PREVIEW_WORKER_NAME: validOptions.workerName,
+          PREVIEW_UPSTREAM_BASE_URL: validOptions.upstreamBaseUrl,
+          PREVIEW_QUOTA_LIMIT_STANDARD: validOptions.standardLimit,
+          PREVIEW_QUOTA_LIMIT_MINI: validOptions.miniLimit,
+          PREVIEW_CPU_GATE_QUOTA_LIMIT_STANDARD: "170000",
+          PREVIEW_CPU_GATE_QUOTA_LIMIT_MINI: "170000",
+          PREVIEW_MAX_INPUT_BYTES: validOptions.maxInputBytes,
+          PREVIEW_DENO_TOKENIZER_ENDPOINT: "https://preview-tokenizer.deno.dev/tokenize",
+          PREVIEW_DENO_TOKENIZER_THRESHOLD_BYTES: "1",
+          PREVIEW_DENO_TOKENIZER_TIMEOUT_MS: "5000",
+          PREVIEW_OCTG_RELAY_ENVIRONMENT: "preview",
+          PREVIEW_OCTG_RELAY_INGRESS_ENDPOINT: "https://preview-relay.deno.dev",
+          PREVIEW_RELAY_CPU_GATE_MINI_CLIENT_ID: "preview-mini-client",
+          PREVIEW_RELAY_CPU_GATE_MINI_MODEL: "gpt-5-mini",
+        },
       },
-    });
+    );
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(readFileSync(outputPath, "utf8"));
-    assert.equal(config.vars.OCTG_RELAY_ENABLED, "true");
-    assert.equal(config.vars.OCTG_RELAY_ENVIRONMENT, "preview");
-    assert.equal(config.vars.OCTG_RELAY_INGRESS_ENDPOINT, "https://preview-relay.deno.dev");
-    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_CLIENT_ID, "preview-mini-client");
-    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_MINI_MODEL, "gpt-5-mini");
-    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_CLIENT_ID, undefined);
-    assert.equal(config.vars.OCTG_RELAY_CPU_GATE_STANDARD_MODEL, undefined);
+    assert.equal(config.vars.QUOTA_LIMIT_STANDARD, "170000");
+    assert.equal(config.vars.QUOTA_LIMIT_MINI, "170000");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -344,12 +394,47 @@ test("preserves Preview endpoint validation for non-string Production endpoints"
 });
 
 test("rejects a Preview quota allocation over the provider ceiling", () => {
+assert.throws(
+() => buildPreviewWorkerConfig(baseConfig, {
+...validOptions,
+miniLimit: "10000001",
+}),
+/quota allocation/,
+);
+});
+
+test("applies CPU-gate quota limits when cpuGateQuota is provided", () => {
+  const config = buildPreviewWorkerConfig({
+    ...baseConfig,
+    vars: { ...baseConfig.vars, QUOTA_LIMIT_STANDARD: "800000", QUOTA_LIMIT_MINI: "9000000" },
+  }, {
+    ...validOptions,
+    standardLimit: "0",
+    miniLimit: "50000",
+    cpuGateQuota: {
+      standardLimit: "170000",
+      miniLimit: "170000",
+    },
+  });
+
+  assert.equal(config.vars.QUOTA_LIMIT_STANDARD, "170000");
+  assert.equal(config.vars.QUOTA_LIMIT_MINI, "170000");
+});
+
+test("rejects a CPU-gate quota allocation over the provider ceiling", () => {
+  const config = {
+    ...baseConfig,
+    vars: { ...baseConfig.vars, QUOTA_LIMIT_STANDARD: "800000" },
+  };
   assert.throws(
-    () => buildPreviewWorkerConfig(baseConfig, {
+    () => buildPreviewWorkerConfig(config, {
       ...validOptions,
-      miniLimit: "10000001",
+      cpuGateQuota: {
+        standardLimit: "170000",
+        miniLimit: "10000001",
+      },
     }),
-    /quota allocation/,
+    /MINI quota allocation exceeds provider ceiling/,
   );
 });
 

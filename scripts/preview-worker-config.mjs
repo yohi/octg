@@ -50,6 +50,7 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     upstreamBaseUrl,
     standardLimit,
     miniLimit,
+    cpuGateQuota,
     maxInputBytes,
     deno,
     prepare,
@@ -64,6 +65,10 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
   requireNonEmpty("Preview MINI quota", miniLimit);
   requireNonEmpty("Preview project root", projectRoot);
   requirePositiveSafeInteger("Preview input limit", maxInputBytes);
+  if (cpuGateQuota !== undefined) {
+    requireNonEmpty("CPU-gate STANDARD quota", cpuGateQuota.standardLimit);
+    requireNonEmpty("CPU-gate MINI quota", cpuGateQuota.miniLimit);
+  }
 
   const productionDatabase = Array.isArray(config.d1_databases)
     ? config.d1_databases.find((entry) => entry?.binding === "DB")
@@ -92,24 +97,37 @@ export function buildPreviewWorkerConfig(baseConfig, options) {
     throw new TypeError("Deno Preview prepare configuration requires a tokenizer configuration");
   }
 
-  assertPreviewQuotaAllocation({
-    production: {
-      STANDARD: Number(config.vars?.QUOTA_LIMIT_STANDARD),
-      MINI: Number(config.vars?.QUOTA_LIMIT_MINI),
-    },
-    preview: {
-      STANDARD: Number(standardLimit),
-      MINI: Number(miniLimit),
-    },
-  });
+assertPreviewQuotaAllocation({
+production: {
+STANDARD: Number(config.vars?.QUOTA_LIMIT_STANDARD),
+MINI: Number(config.vars?.QUOTA_LIMIT_MINI),
+},
+preview: {
+STANDARD: Number(standardLimit),
+MINI: Number(miniLimit),
+},
+});
+
+  if (cpuGateQuota !== undefined) {
+    assertPreviewQuotaAllocation({
+      production: {
+        STANDARD: Number(config.vars?.QUOTA_LIMIT_STANDARD),
+        MINI: Number(config.vars?.QUOTA_LIMIT_MINI),
+      },
+      preview: {
+        STANDARD: Number(cpuGateQuota.standardLimit),
+        MINI: Number(cpuGateQuota.miniLimit),
+      },
+    });
+  }
 
   config.name = workerName;
   config.main = `${projectRoot}/apps/gateway-worker/src/index.ts`;
   config.assets = { ...config.assets, directory: `${projectRoot}/apps/gateway-worker/public` };
   config.vars = {
     ...config.vars,
-    QUOTA_LIMIT_STANDARD: standardLimit,
-    QUOTA_LIMIT_MINI: miniLimit,
+    QUOTA_LIMIT_STANDARD: cpuGateQuota?.standardLimit ?? standardLimit,
+    QUOTA_LIMIT_MINI: cpuGateQuota?.miniLimit ?? miniLimit,
     MAX_INPUT_BYTES: maxInputBytes.trim(),
     OCTG_UPSTREAM_BASE_URL: upstreamBaseUrl,
   };
@@ -301,9 +319,17 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  const [sourcePath, outputPath, mode = "do"] = process.argv.slice(2);
-  if (sourcePath === undefined || outputPath === undefined || !["do", "deno"].includes(mode)) {
-    console.error("usage: node scripts/preview-worker-config.mjs <source> <output> [do|deno]");
+  const args = process.argv.slice(2);
+  const [sourcePath, outputPath, mode = "do", cpuGateFlag] = args;
+  const validModes = ["do", "deno"];
+  const validCpuGateFlags = [undefined, "--cpu-gate"];
+  if (
+    sourcePath === undefined
+    || outputPath === undefined
+    || !validModes.includes(mode)
+    || !validCpuGateFlags.includes(cpuGateFlag)
+  ) {
+    console.error("usage: node scripts/preview-worker-config.mjs <source> <output> [do|deno] [--cpu-gate]");
     process.exitCode = 2;
   } else {
     const parsed = ts.parseConfigFileTextToJson(sourcePath, readFileSync(sourcePath, "utf8"));
@@ -319,6 +345,12 @@ if (isMainModule()) {
       upstreamBaseUrl: process.env.PREVIEW_UPSTREAM_BASE_URL,
       standardLimit: process.env.PREVIEW_QUOTA_LIMIT_STANDARD,
       miniLimit: process.env.PREVIEW_QUOTA_LIMIT_MINI,
+      cpuGateQuota: cpuGateFlag === "--cpu-gate"
+        ? {
+            standardLimit: process.env.PREVIEW_CPU_GATE_QUOTA_LIMIT_STANDARD,
+            miniLimit: process.env.PREVIEW_CPU_GATE_QUOTA_LIMIT_MINI,
+          }
+        : undefined,
       maxInputBytes: process.env.PREVIEW_MAX_INPUT_BYTES,
       deno: mode === "deno"
         ? {
