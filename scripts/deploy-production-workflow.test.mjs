@@ -337,7 +337,7 @@ test("deploy-production is a reusable workflow with a trusted checkout", () => {
   assert.doesNotMatch(productionWorkflow, /\n  push:/);
   assert.match(
     productionWorkflow,
-    /concurrency:\n  group: octg-deployment\n  cancel-in-progress: false/,
+    /concurrency:\n  group: octg-production-deployment\n  cancel-in-progress: false/,
   );
 });
 
@@ -573,4 +573,15 @@ test("deploy-deno-tokenizer deploys Deno before the Production Worker for the sa
   const denoCheckoutIndex = productionWorkflow.indexOf("- name: Checkout");
   assert.ok(gateIndex > denoCheckoutIndex, "the same-SHA gate must follow checkout");
   assert.match(productionWorkflow, /DENO_WORKFLOW_SHA: \$\{\{ github\.sha \}\}/);
+});
+
+test("preview and production deployments use isolated concurrency groups", () => {
+  const previewWorkflow = readFileSync(join(root, ".github/workflows/preview-smoke.yml"), "utf8");
+  const productionWorkflow = readFileSync(join(root, ".github/workflows/deploy-production.yml"), "utf8");
+  const previewGroup = previewWorkflow.match(/^  group: (.+)$/m)?.[1];
+  const productionGroup = productionWorkflow.match(/^  group: (.+)$/m)?.[1];
+
+  assert.equal(previewGroup, "octg-preview-deployment");
+  assert.equal(productionGroup, "octg-production-deployment");
+  assert.notEqual(previewGroup, productionGroup);
 });

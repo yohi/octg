@@ -6,7 +6,7 @@ on:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: octg-deployment
+  group: octg-preview-deployment
   cancel-in-progress: false
 
 jobs:
