@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { writeFile, readFile, mkdir, chmod } from "node:fs/promises";
-import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { writeFile, readFile, mkdir, chmod, lstat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import * as ts from "typescript";
 import { buildWorkload, requiredSeriesMatrix } from "./relay-cpu-workloads.mjs";
 import { runFixtureLifecycle, recoverSharedOperation, closeOwnedOperation } from "./relay-cpu-operation.mjs";
 import { executeCpuGateCli } from "./relay-cpu-cli.mjs";
@@ -10,10 +14,11 @@ import { assertNoCredentialLeak } from "./relay-cpu-protection.mjs";
 export { generateCpuGateBearer, withPreviewSecretsFile, assertNoCredentialLeak } from "./relay-cpu-protection.mjs";
 export { runPreviewLifecycle } from "./relay-cpu-preview.mjs";
 export { runFixtureLifecycle, recoverSharedOperation } from "./relay-cpu-operation.mjs";
+import { createOperatorVerifiedTargetResolver, resolveTrustedOperatorRuntimeDependencies as resolveOperatorSession } from "./relay-cpu-operator-trust.mjs";
 
 const CPU_GATE_PATH = "/internal/relay/v1/cpu-gate";
 const CALLBACK_PATHS = Object.freeze(["/internal/relay/v1/decision", "/internal/relay/v1/activation", "/internal/relay/v1/renewal", "/internal/relay/v1/terminal"]);
-const SUCCESS_SAMPLE_TARGET = 500;
+export const SUCCESS_SAMPLE_TARGET = 500;
 const CLOCK_SKEW_TOLERANCE_MS = 1000;
 const now = () => Date.now();
 
@@ -291,8 +296,64 @@ export async function runRelayCpuGate({ mode = "stage1", adapters = {}, journalP
   return { status: "PASS", ledger };
 }
 
+const execFileAsync = promisify(execFile);
+
+async function resolveTrustedOperatorRuntimeDependencies({ env, io }) {
+  // Only these low-level session/filesystem adapters are injectable, never the factory.
+  const supplied = io.trustedOperatorRuntimeDependencies;
+  const session = supplied?.trustedOperatorSession ?? {
+    trustRootPath: join(homedir(), ".local/state/octg/cpu-gate/approved"), operatorUid: process.getuid?.(),
+  };
+  const root = await lstat(session.trustRootPath);
+  if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== session.operatorUid || (root.mode & 0o777) !== 0o700) return undefined;
+  const base = supplied ?? await resolveOperatorSession();
+  if (base === undefined) return undefined;
+  return {
+    ...base,
+    gitHead: supplied?.gitHead ?? (async () => {
+      const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: fileURLToPath(new URL("../", import.meta.url)), encoding: "utf8", timeout: 5000,
+      });
+      return stdout.trim();
+    }),
+    actualWorkerConfig: supplied?.actualWorkerConfig ?? (async () => {
+      const parsed = ts.parseConfigFileTextToJson(io.workerConfigPath, await readFile(io.workerConfigPath, "utf8"));
+      if (parsed.error || !parsed.config) return undefined;
+      const config = parsed.config;
+      if (config.account_id && config.account_id !== env.CLOUDFLARE_ACCOUNT_ID) return undefined;
+      return { workerName: config.name, environment: config.vars?.OCTG_RELAY_ENVIRONMENT,
+        cloudflareAccountId: env.CLOUDFLARE_ACCOUNT_ID ?? "" };
+    }),
+  };
+}
+
 export async function runCpuGateCli(argv = process.argv.slice(2), env = process.env, io = {}) {
-  return executeCpuGateCli(argv, env, { ...io, runGate: runRelayCpuGate });
+  const mode = argv[0] ?? "stage1";
+  if (mode === "recover-operation") {
+    return executeCpuGateCli(argv, env, { ...io, runGate: runRelayCpuGate });
+  }
+  // Defer interactive approval and local proof reads until CLI validation succeeds.
+  const resolver = async (args) => {
+    try {
+      const configOption = argv.find((arg) => arg.startsWith("--preview-config="));
+      const workerConfigPath = mode === "stage1" ? configOption?.slice("--preview-config=".length)
+        : fileURLToPath(new URL("../apps/gateway-worker/wrangler.jsonc", import.meta.url));
+      const deps = await resolveTrustedOperatorRuntimeDependencies({ env, io: { ...io, workerConfigPath } });
+      if (deps === undefined) return undefined;
+      const directory = await lstat(dirname(args.targetPath));
+      if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== deps.trustedOperatorSession.operatorUid
+        || (directory.mode & 0o777) !== 0o700) return undefined;
+      return await createOperatorVerifiedTargetResolver(deps)(args);
+    } catch {
+      // Local trust/proof failures never authorize remote work or disclose paths.
+      return undefined;
+    }
+  };
+  return executeCpuGateCli(argv, env, {
+    ...io,
+    runGate: runRelayCpuGate,
+    resolveVerifiedExecutionTarget: resolver,
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runCpuGateCli().then((code) => { process.exitCode = code; }).catch(() => { console.error("CPU gate failed"); process.exitCode = 1; });
