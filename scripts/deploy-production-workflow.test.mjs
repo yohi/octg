@@ -123,9 +123,16 @@ function extractJobNeeds(jobBlock) {
 }
 
 function extractWorkflowSteps(jobBlock) {
-  return [...jobBlock.matchAll(/^ {6}- name: (.+)$/gm)].map((match) => {
+  const matches = [...jobBlock.matchAll(/^ {6}- name: (.+)$/gm)];
+  return matches.map((match, index) => {
     const name = match[1].trim();
-    return { name, run: extractStepRun(jobBlock.slice(match.index), name) };
+    const end = matches[index + 1]?.index ?? jobBlock.length;
+    const stepBlock = jobBlock.slice(match.index, end);
+    return {
+      name,
+      if: stepBlock.match(/^        if:\s*(.*)$/m)?.[1]?.trim() ?? null,
+      run: extractStepRun(stepBlock, name),
+    };
   });
 }
 
@@ -190,9 +197,13 @@ test("deploy-production fails closed before any release validation or mutation w
   const holdEnd = workflow.indexOf("\n      - name:", holdStart + holdMarker.length);
   const holdStep = workflow.slice(holdStart, holdEnd < 0 ? undefined : holdEnd);
   const holdRun = extractStepRun(workflow, "Enforce Issue 121 release HOLD");
+  assert.match(
+    holdStep,
+    /if: \$\{\{ github\.event_name != 'workflow_dispatch' \|\| inputs\.production_release_ack != 'RELEASE-ONCE' \|\| github\.run_attempt != 1 \}\}/,
+  );
   assert.ok(holdRun, "HOLD must have a run command");
   assert.match(holdRun, /exit\s+1/, "HOLD must unconditionally exit nonzero");
-  assert.doesNotMatch(holdStep, /^\s+(?:if|env|with):/m, "HOLD must not have conditional or env-driven bypasses");
+  assert.doesNotMatch(holdStep, /^\s+(?:env|with):/m, "HOLD must not have env-driven bypasses");
   assert.doesNotMatch(holdRun, /\$\{|\$[A-Za-z_][A-Za-z0-9_]*/, "HOLD must not depend on arguments or environment variables");
   assert.doesNotMatch(
     workflow.slice(workflow.indexOf("      - name: Checkout"), holdStart),
@@ -330,7 +341,7 @@ test("deploy-production is a reusable workflow with a trusted checkout", () => {
   );
 });
 
-test("deploy-deno-tokenizer keeps validation but holds both deployment jobs for every trigger", () => {
+test("deploy-deno-tokenizer permits one explicitly acknowledged manual release only", () => {
   const denoWorkflow = readFileSync(
     join(root, ".github/workflows/deploy-deno-tokenizer.yml"),
     "utf8",
@@ -340,27 +351,42 @@ test("deploy-deno-tokenizer keeps validation but holds both deployment jobs for 
   const triggers = extractWorkflowTriggers(denoWorkflow);
   assert.match(triggers, /^  push:/m, "push trigger must remain configured");
   assert.match(triggers, /^  workflow_dispatch:\s*$/m, "workflow_dispatch trigger must remain configured");
+  assert.match(
+    triggers,
+    /production_release_ack:\n\s+description:.*\n\s+required: true\n\s+type: choice\n\s+options:\n\s+- RELEASE-ONCE/,
+    "manual production deployment must require the explicit one-time acknowledgement",
+  );
   const pullRequestTrigger = triggers.match(/^  pull_request:\n((?:^    .*\n|^\n)*)/m);
   assert.ok(pullRequestTrigger, "pull_request trigger must remain configured");
   assert.match(pullRequestTrigger[1], /^    types:.*\blabeled\b/m, "pull_request must include labeled activity");
 
-  const deniedTriggerEvents = ["push", "pull_request.labeled", "workflow_dispatch"];
   for (const jobName of ["deploy", "deploy-production"]) {
     const job = jobs.find(({ id }) => id === jobName);
     assert.ok(job, `${jobName} job must remain present`);
-    assert.equal(job.if, "false", `${jobName} must be unconditionally denied during HOLD`);
-    for (const eventName of deniedTriggerEvents) {
-      const configured = eventName === "pull_request.labeled"
-        ? /^  pull_request:\n[\s\S]*?^    types:.*\blabeled\b/m.test(triggers)
-        : new RegExp(`^  ${eventName}:\\s*$`, "m").test(triggers);
-      assert.ok(configured, `${eventName} must be a configured workflow trigger`);
-      assert.equal(job.if, "false", `${jobName} is denied for configured ${eventName}`);
-    }
+    assert.equal(
+      job.if,
+      "github.event_name == 'workflow_dispatch' && inputs.production_release_ack == 'RELEASE-ONCE' && github.run_attempt == 1",
+      `${jobName} must only run for the explicitly acknowledged first manual attempt`,
+    );
   }
   assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Typecheck"));
   assert.ok(jobs.find(({ id }) => id === "validate")?.steps.some(({ name }) => name === "Unit tests"));
   assert.match(denoWorkflow, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
   assert.match(denoWorkflow, /secrets: inherit/);
+});
+
+test("reusable production workflow skips its HOLD only for the acknowledged first manual run", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/deploy-production.yml"), "utf8");
+  const jobs = extractWorkflowJobs(workflow);
+  const job = jobs.find(({ id }) => id === "test-and-deploy");
+  assert.ok(job, "reusable production deployment job must exist");
+
+  const holdStep = job.steps.find(({ name }) => name === "Enforce Issue 121 release HOLD");
+  assert.ok(holdStep, "defense-in-depth HOLD must remain present");
+  assert.equal(
+    holdStep.if,
+    "${{ github.event_name != 'workflow_dispatch' || inputs.production_release_ack != 'RELEASE-ONCE' || github.run_attempt != 1 }}",
+  );
 });
 
 test("deploy-production gates remote mutations on the current master SHA", () => {
@@ -530,8 +556,11 @@ test("deploy-deno-tokenizer deploys Deno before the Production Worker for the sa
   const productionJob = denoWorkflow.slice(productionStart);
 
   assert.match(productionJob, /needs: deploy\n/);
-  assert.match(productionJob, /if: false/);
+  assert.match(productionJob, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(productionJob, /inputs\.production_release_ack == 'RELEASE-ONCE'/);
+  assert.match(productionJob, /github\.run_attempt == 1/);
   assert.match(productionJob, /uses: \.\/\.github\/workflows\/deploy-production\.yml/);
+  assert.match(productionJob, /production_release_ack: \$\{\{ inputs\.production_release_ack \}\}/);
   assert.match(productionJob, /secrets: inherit/);
 
   const productionWorkflow = readFileSync(
