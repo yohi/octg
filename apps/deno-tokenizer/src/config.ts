@@ -84,7 +84,7 @@ function resolveGatewayBBaseUrl(raw: string): string {
     throw invalidRelayConfig();
   }
   const noExtras = url.username === "" && url.password === "" && url.search === "" && url.hash === "";
-  if (url.protocol !== "https:" || !noExtras || url.pathname !== "/openai") {
+  if (url.protocol !== "https:" || !noExtras || !url.pathname.endsWith("/openai")) {
     throw invalidRelayConfig();
   }
   return raw;
