@@ -157,11 +157,12 @@ describe("QuotaController.reserve", () => {
   it("uses the configured MINI pool limit", async () => {
     // Given: an unused MINI pool.
     const controller = stub("MINI", "2026-08-09");
+    const miniLimit = Number(env.QUOTA_LIMIT_MINI);
 
     // When: nearly all of the MINI limit is reserved.
-    const result = await controller.reserve("req-m", 9_949_999, 9_949_999);
+    const result = await controller.reserve("req-m", miniLimit - 1, miniLimit - 1);
 
-    // Then: the 9,950,000-token configured limit allows the reservation.
+    // Then: the configured limit allows the reservation and reports one token remaining.
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.remaining).toBe(1);
   });
