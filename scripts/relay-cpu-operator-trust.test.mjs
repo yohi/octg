@@ -218,6 +218,27 @@ test("capacity_evidence_or_proof_expired_holds", async () => {
   }
 });
 
+test("trust_record_with_missing_or_invalid_expiration_holds", async () => {
+  for (const expiresAtUTC of [undefined, "not-an-ISO-timestamp"]) {
+    const fixture = await makeTrustRoot();
+    try {
+      const record = { ...fixture.record };
+      if (expiresAtUTC === undefined) delete record.expiresAtUTC;
+      else record.expiresAtUTC = expiresAtUTC;
+      const recordText = JSON.stringify(record);
+      await writeFile(fixture.recordPath, recordText, { mode: 0o600 });
+      await assertFixtureHolds(fixture, { dependencies: { trustedOperatorSession: {
+        operatorUid: fixture.operatorUid,
+        approvedTrustRecordSha256: sha256(recordText),
+        trustRootPath: join(fixture.root, "approved"),
+        interactiveApprovalVerified: true,
+      } } });
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("unverifiable_free_plan_or_expired_usage_holds", async () => {
   const fixture = await makeTrustRoot();
   try {

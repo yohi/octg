@@ -28,6 +28,13 @@ test("approve_cli_holds_in_non_interactive_mode", async () => {
   assert.equal(result.status, "PREFLIGHT_HOLD");
 });
 
+test("approve_cli_prints_help_in_non_interactive_mode", async () => {
+  const { exitCode, stdout, stderr } = await runCli(["--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(stdout, /Usage: node scripts\/relay-cpu-operator-approve\.mjs/);
+  assert.equal(stderr.trim(), "");
+});
+
 test("approve_cli_exits_malformed_on_missing_record_argument", async () => {
   const { exitCode, stdout } = await runCli([]);
   assert.equal(exitCode, 2);

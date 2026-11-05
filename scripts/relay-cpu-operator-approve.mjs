@@ -16,7 +16,7 @@ function emitResult(result) {
 }
 
 function parseArguments(argv) {
-  const allowed = new Set(["--record", "--help"]);
+  const allowed = new Set(["--record"]);
   const seen = new Set();
   let recordPath;
   for (const argument of argv) {
@@ -44,6 +44,11 @@ export async function runOperatorApproveCli(
   argv = process.argv.slice(2),
   injected = {},
 ) {
+  if (argv.includes("--help")) {
+    console.log("Usage: node scripts/relay-cpu-operator-approve.mjs --record=<path>");
+    return 0;
+  }
+
   const isTTY = injected.isTTY ?? (process.stdin?.isTTY && process.stdout?.isTTY);
   const readFile = injected.readAndVerifyProtectedFile ?? readAndVerifyProtectedFile;
 
@@ -58,11 +63,6 @@ export async function runOperatorApproveCli(
     return 1;
   }
   const { recordPath } = parsed;
-
-  if (argv.includes("--help")) {
-    console.log("Usage: node scripts/relay-cpu-operator-approve.mjs --record=<path>");
-    return 0;
-  }
 
   if (!recordPath) {
     emitResult({ status: "PREFLIGHT_HOLD", reasons: ["MISSING_RECORD_PATH"] });

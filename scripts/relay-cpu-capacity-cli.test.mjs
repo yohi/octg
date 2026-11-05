@@ -43,6 +43,13 @@ test("cli_passes_with_valid_evidence_and_target", async () => {
   }
 });
 
+test("cli_prints_help_without_parsing_other_arguments", async () => {
+  const { stdout, stderr, exitCode } = await runCli(["--help"]);
+  assert.equal(exitCode, 0);
+  assert.match(stdout, /Usage: node scripts\/relay-cpu-capacity-cli\.mjs/);
+  assert.equal(stderr.trim(), "");
+});
+
 test("cli_holds_on_insufficient_capacity", async () => {
   const evidence = baseEvidence();
   evidence.meters = evidence.meters.map((m) =>

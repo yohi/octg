@@ -209,7 +209,9 @@ async function loadApprovedRecord(args, deps, trustRootPath, operatorUid, approv
     || !isObject(recordTarget.freePlans) || recordTarget.freePlans.cloudflare !== "free"
     || recordTarget.freePlans.deno !== "free" || !isNonEmptyString(recordTarget.usagePeriodsSha256)) return undefined;
   const nowMs = parseIsoUTC(deps.nowUTC());
-  if (nowMs === undefined || !isFresh(record.reviewedAtUTC, nowMs) || parseIsoUTC(record.expiresAtUTC) <= nowMs) return undefined;
+  const expiresAtMs = parseIsoUTC(record.expiresAtUTC);
+  if (nowMs === undefined || !isFresh(record.reviewedAtUTC, nowMs)
+    || expiresAtMs === undefined || expiresAtMs <= nowMs) return undefined;
   return { args, record, recordId, recordTarget, targetSession, nowMs };
 }
 

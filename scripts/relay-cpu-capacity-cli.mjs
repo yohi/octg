@@ -8,6 +8,11 @@ import { evaluateCapacityPreflight } from "./relay-cpu-capacity.mjs";
  * @returns {Promise<0|1|2>}
  */
 export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
+  if (argv.includes("--help")) {
+    console.log("Usage: node scripts/relay-cpu-capacity-cli.mjs --evidence=<path> --target=<path> --now=<ISO-UTC>");
+    return 0;
+  }
+
   let evidencePath;
   let targetPath;
   let nowUTC;
@@ -23,11 +28,6 @@ export async function runCapacityPreflightCli(argv = process.argv.slice(2)) {
     if (key === "--evidence") evidencePath = value;
     else if (key === "--target") targetPath = value;
     else if (key === "--now") nowUTC = value;
-  }
-
-  if (argv.includes("--help")) {
-    console.log("Usage: node scripts/relay-cpu-capacity-cli.mjs --evidence=<path> --target=<path> --now=<ISO-UTC>");
-    return 0;
   }
 
   if (!evidencePath || !targetPath || !nowUTC) {
