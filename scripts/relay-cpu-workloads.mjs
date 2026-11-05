@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 
 export const WORKLOAD_CLASSES = Object.freeze(["baseline-small", "baseline-large", "incident-regression-stream", "incident-regression-nonstream"]);
 export const CONCURRENCIES = Object.freeze([1, 2, 3]);
+export const SUCCESS_SAMPLE_TARGET = 500;
 const INVOCATION_CLASSES = Object.freeze(["ingress", "decision", "activation_normal", "activation_replay", "renewal_normal", "terminal_normal", "terminal_replay"]);
 const SMALL = "Synthetic CPU gate measurement input. ".repeat(8);
 const LARGE = "Synthetic CPU gate measurement input with representative history. ".repeat(14000);
@@ -12,6 +13,7 @@ const INCIDENT_MESSAGES = Object.freeze([
   { type: "function_call_output", call_id: "call_fixture", output: "Synthetic tool result." },
 ]);
 
+/** Build the deterministic synthetic request for a supported CPU-gate workload class. */
 export function buildWorkload(workloadClass) {
   switch (workloadClass) {
     case "baseline-small": return { model: "octg-cpu-measurement", input: [{ role: "user", content: SMALL }], stream: false };
@@ -22,6 +24,7 @@ export function buildWorkload(workloadClass) {
   }
 }
 
+/** Return every invocation, workload, and required concurrency measurement series. */
 export function requiredSeriesMatrix() {
   const rows = [];
   for (const invocationClass of INVOCATION_CLASSES) {
@@ -33,6 +36,7 @@ export function requiredSeriesMatrix() {
   return rows;
 }
 
+/** Print a synthetic workload or CLI help and return the process exit code. */
 export function runWorkloadCli(argv = process.argv.slice(2)) {
   if (argv.includes("--help")) {
     console.log("Usage: node scripts/relay-cpu-workloads.mjs <workload-class>");

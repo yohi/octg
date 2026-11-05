@@ -1,9 +1,74 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, writeFile, rm, stat, lstat, rename, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runRelayCpuGate, generateCpuGateBearer, withPreviewSecretsFile, runFixtureLifecycle, recoverSharedOperation, runPreviewLifecycle, assertNoCredentialLeak } from "./run-relay-cpu-gate.mjs";
+import { runRelayCpuGate, runCpuGateCli, generateCpuGateBearer, withPreviewSecretsFile, runFixtureLifecycle, recoverSharedOperation, runPreviewLifecycle, assertNoCredentialLeak, resolveActualWorkerConfig } from "./run-relay-cpu-gate.mjs";
+import { readAndVerifyProtectedFile } from "./relay-cpu-operator-trust.mjs";
+import { makeTrustRoot, baseResolverDeps, cleanupTrustRoot, SOURCE_REVISION, OTHER_REVISION, WORKER_NAME, CLOUDFLARE_ACCOUNT_ID, DENO_ORGANIZATION_ID, NOW_UTC, sha256 } from "./relay-cpu-test-fixtures.mjs";
+
+test("production_worker_config_uses_deploy_var_without_env_production", () => {
+  const config = { name: WORKER_NAME, vars: { OCTG_RELAY_ENVIRONMENT: "preview" } };
+  assert.deepEqual(resolveActualWorkerConfig(config, productionEnv(), "stage2-series"), {
+    workerName: WORKER_NAME,
+    environment: "production",
+    cloudflareAccountId: CLOUDFLARE_ACCOUNT_ID,
+  });
+});
+
+async function productionHoldCase(t, {
+  mode = "stage1",
+  mutate = async () => {},
+  dependencies = (deps) => deps,
+  fixtureOverrides = {},
+  flags = [],
+  nowUTC = NOW_UTC,
+  includeTrustedDependencies = true,
+  expectedReason,
+  injectedResolver,
+} = {}) {
+  const stage = mode === "stage1" ? "stage1" : "stage2";
+  const environment = stage === "stage1" ? "preview" : "production";
+  const fixture = await makeTrustRoot({ stage, environment, ...fixtureOverrides });
+  t.after(() => cleanupTrustRoot(fixture));
+  const configPath = join(fixture.root, "worker.jsonc");
+  await writeFile(configPath, JSON.stringify({ name: WORKER_NAME, vars: { OCTG_RELAY_ENVIRONMENT: "production" } }));
+  await mutate(fixture);
+  const calls = [];
+  const summaries = [];
+  const io = {
+    nowUTC: () => nowUTC,
+    writeSummary: (line) => summaries.push(JSON.parse(line)),
+    fetchImpl: async () => { calls.push("fetch"); throw new Error("unexpected fetch"); },
+    commandImpl: async () => { calls.push("command"); throw new Error("unexpected command"); },
+    runGate: async () => { calls.push("gate"); throw new Error("unexpected gate"); },
+    deploymentFactory: async () => { calls.push("deployment"); throw new Error("unexpected deployment"); },
+  };
+  if (includeTrustedDependencies) {
+    io.trustedOperatorRuntimeDependencies = dependencies(baseResolverDeps(fixture), fixture);
+  }
+  if (injectedResolver !== undefined) io.resolveVerifiedExecutionTarget = () => injectedResolver(fixture);
+  const code = await runCpuGateCli([
+    mode,
+    "--execute",
+    `--source-revision=${SOURCE_REVISION}`,
+    `--worker-name=${WORKER_NAME}`,
+    `--preview-config=${configPath}`,
+    "--script-version=candidate",
+    "--origin=https://preview.example",
+    "--pool=MINI",
+    "--journal=unused-journal",
+    "--ledger=unused-ledger",
+    `--capacity-evidence=${fixture.evidencePath}`,
+    `--execution-target=${fixture.targetPath}`,
+    ...flags,
+  ], productionEnv(), io);
+  assert.equal(code, 2);
+  assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
+  if (expectedReason !== undefined) assert.ok(summaries.at(-1).reasons.includes(expectedReason));
+  assert.deepEqual(calls, []);
+}
 
 test("supports safe stage modes and does not retain bearer values", async () => {
   const result = await runRelayCpuGate({ mode: "stage1", adapters: { runSeries: async () => ({ status: 200 }) } });
@@ -631,4 +696,434 @@ test("blocks when any supplied output artifact contains a credential sentinel", 
   } });
   assert.equal(result.status, "BLOCKED");
   assert.equal(JSON.stringify(result.ledger).includes("grant-secret"), false);
+});
+
+function productionEnv() {
+  return {
+    CLOUDFLARE_ACCOUNT_ID: CLOUDFLARE_ACCOUNT_ID,
+    CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
+    OCTG_RELAY_SERVICE_AUTH_TOKEN: "service-token-0123456789abcdef0123456789ab",
+    OCTG_CANARY_CLIENT_KEY: "octg_sk_preview_synthetic",
+    OCTG_RELAY_CPU_GATE_AUTH_TOKEN: "cpu-gate-token",
+  };
+}
+
+async function stage1TempFiles(tmpDir) {
+  const configPath = join(tmpDir, "preview.json");
+  const journalPath = join(tmpDir, "operations.json");
+  const ledgerPath = join(tmpDir, "ledger.json");
+  await writeFile(configPath, "{}", { mode: 0o600 });
+  return { configPath, journalPath, ledgerPath };
+}
+
+async function stage2TempFiles(tmpDir) {
+  const journalPath = join(tmpDir, "operations.json");
+  const ledgerPath = join(tmpDir, "ledger.json");
+  return { journalPath, ledgerPath };
+}
+
+function fakeStage2PreflightFetch(candidateVersionId, observe = () => {}) {
+  return async (url, options) => {
+    const parsed = new URL(url);
+    observe(parsed, options);
+    const headers = new Headers({ "X-OCTG-Worker-Version": candidateVersionId });
+    if (parsed.pathname.endsWith("/slot")) {
+      return Response.json({ version: 1, slot: { kind: "idle" } }, { headers });
+    }
+    if (parsed.pathname.endsWith("/cpu-gate/decision-context")) {
+      return new Response(JSON.stringify({ version: 1, requestId: "preflight-req", contextToken: "preflight-ctx" }), { status: 200, headers });
+    }
+    if (parsed.pathname.endsWith("/decision")) {
+      return new Response(JSON.stringify({ version: 1, kind: "reject", code: "model_requires_paid", requestId: "preflight-req" }), { status: 200, headers });
+    }
+    throw new Error(`unexpected fetch ${parsed.pathname}`);
+  };
+}
+
+async function runStage2Preflight({ fixture, tmpDir, summaries, candidateVersionId = "candidate", model, fetchImpl, resolverDependencies = (deps) => deps }) {
+  const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
+  const exitCode = await runCpuGateCli([
+    "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
+    "--pool=MINI", ...(model ? [`--model=${model}`] : []), `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
+    `--source-revision=${SOURCE_REVISION}`, `--script-version=${candidateVersionId}`,
+    `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
+  ], productionEnv(), {
+    writeSummary: (msg) => summaries.push(JSON.parse(msg)),
+    nowUTC: () => NOW_UTC,
+    trustedOperatorRuntimeDependencies: resolverDependencies(baseResolverDeps(fixture)),
+    fetchImpl: fetchImpl ?? fakeStage2PreflightFetch(candidateVersionId),
+    commandImpl: async () => { throw new Error("must not command"); },
+  });
+  return { exitCode, journalPath, ledgerPath };
+}
+
+test("production_entry_initializes_real_resolver_and_stage2_reaches_existing_gate", async () => {
+  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
+  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-init-"));
+  const summaries = [];
+  const events = [];
+  try {
+    const { exitCode } = await runStage2Preflight({ fixture, tmpDir, summaries, model: "production-model" });
+    assert.equal(exitCode, 0);
+    assert.equal(summaries.at(-1).status, "PASS");
+    assert.equal(events.length, 0);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+    await cleanupTrustRoot(fixture);
+  }
+});
+
+test("production_entry_stage2_preflight_and_series_bind_actual_target", async () => {
+  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
+  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-stage2-"));
+  const summaries = [];
+  const events = [];
+  try {
+    const { exitCode, journalPath, ledgerPath } = await runStage2Preflight({
+      fixture,
+      tmpDir,
+      summaries,
+      candidateVersionId: "candidate-v2",
+      model: "production-model",
+      fetchImpl: fakeStage2PreflightFetch("candidate-v2", (url, options) => events.push({
+        path: url.pathname,
+        override: options.headers["Cloudflare-Workers-Version-Overrides"],
+      })),
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(summaries.at(-1).status, "PASS");
+    assert.deepEqual(events.map(({ path }) => path), ["/internal/relay/v1/cpu-gate/slot", "/internal/relay/v1/cpu-gate/decision-context", "/internal/relay/v1/decision"]);
+    assert.ok(events.every(({ override }) => override === `${WORKER_NAME}="candidate-v2"`));
+    const seriesCalls = [];
+    const seriesCode = await runCpuGateCli([
+      "stage2-series", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
+      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`, `--source-revision=${SOURCE_REVISION}`,
+      "--script-version=candidate-v2", `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
+    ], productionEnv(), {
+      writeSummary: (msg) => summaries.push(JSON.parse(msg)), nowUTC: () => NOW_UTC,
+      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
+      fetchImpl: async (url, options) => {
+        seriesCalls.push({ path: new URL(url).pathname, override: options.headers["Cloudflare-Workers-Version-Overrides"] });
+        return Response.json({ version: 1, slot: { kind: "unavailable" } });
+      },
+      commandImpl: async () => { throw new Error("must not command"); },
+    });
+    assert.equal(seriesCode, 2);
+    assert.equal(summaries.at(-1).status, "BLOCKED");
+    assert.deepEqual(seriesCalls, [{ path: "/internal/relay/v1/cpu-gate/slot", override: `${WORKER_NAME}="candidate-v2"` }]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+    await cleanupTrustRoot(fixture);
+  }
+});
+
+test("production_entry_without_trusted_operator_session_holds_before_remote", async (t) => {
+  await productionHoldCase(t, {
+    mode: "stage2-preflight",
+    includeTrustedDependencies: false,
+    expectedReason: "UNVERIFIED_EXECUTION_TARGET",
+  });
+});
+
+test("production_entry_does_not_accept_injected_fake_resolver", async (t) => {
+  await productionHoldCase(t, {
+    dependencies: (deps) => ({ ...deps,
+      trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: "0".repeat(64) },
+    }),
+    injectedResolver: async (fixture) => ({ target: fixture.target, capacityEvidence: fixture.evidence }),
+  });
+});
+
+test("production_entry_rejects_matching_two_fake_jsons_without_approved_record", async (t) => {
+  await productionHoldCase(t, {
+    mutate: async (fixture) => {
+      fixture.record = { ...fixture.record, operatorDecision: "UNAPPROVED" };
+      await writeFile(fixture.recordPath, JSON.stringify(fixture.record), { mode: 0o600 });
+    },
+    dependencies: (deps, fixture) => ({ ...deps,
+      trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: sha256(JSON.stringify(fixture.record)) },
+    }),
+  });
+});
+
+test("production_entry_detects_tampered_protected_snapshot", async (t) => {
+  await productionHoldCase(t, {
+    mutate: (fixture) => writeFile(fixture.evidencePath, "{\"tampered\":true}", { mode: 0o600 }),
+  });
+});
+
+test("production_entry_wrong_cloudflare_account_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps,
+    actualWorkerConfig: async () => ({ workerName: WORKER_NAME, environment: "preview", cloudflareAccountId: "cf-account-other" }),
+  }) });
+});
+
+test("production_entry_wrong_deno_organization_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { fixtureOverrides: { target: { denoOrganizationId: "deno-org-other" } } });
+});
+
+test("production_entry_stage1_wrong_source_sha_or_env_holds_before_remote", async (t) => {
+  await productionHoldCase(t, { fixtureOverrides: {
+    target: { sourceRevision: OTHER_REVISION }, evidence: { sourceRevision: OTHER_REVISION },
+  } });
+});
+
+test("production_entry_rejects_digest_mismatch_remote_zero", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-preflight", dependencies: (deps) => ({ ...deps,
+    trustedOperatorSession: { ...deps.trustedOperatorSession, approvedTrustRecordSha256: "0".repeat(64) },
+  }) });
+});
+
+test("production_entry_rejects_file_replacement_after_stat_remote_zero", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-preflight", dependencies: (deps, fixture) => ({ ...deps,
+    readAndVerifyProtectedFile: async (path, uid) => {
+      if (path === fixture.evidencePath) {
+        await lstat(path);
+        await rename(path, `${path}.original`);
+        await symlink(`${path}.original`, path);
+      }
+      return readAndVerifyProtectedFile(path, uid);
+    },
+  }) });
+});
+
+test("production_entry_rejects_expired_approval_session_remote_zero", async (t) => {
+  const expiredUTC = "2026-11-03T13:00:00.000Z";
+  await productionHoldCase(t, { mode: "stage2-preflight", nowUTC: expiredUTC, dependencies: (deps) => ({
+    ...deps,
+    nowUTC: () => expiredUTC,
+  }) });
+});
+
+test("production_entry_same_session_verified_bytes_reach_evaluator", async () => {
+  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
+  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-bytes-"));
+  const summaries = [];
+  const events = [];
+  let evidenceReads = 0;
+  try {
+    const { exitCode } = await runStage2Preflight({
+      fixture,
+      tmpDir,
+      summaries,
+      resolverDependencies: (deps) => ({ ...deps, readAndVerifyProtectedFile: async (path, uid) => {
+        const snapshot = await readAndVerifyProtectedFile(path, uid);
+        if (path === fixture.evidencePath) {
+          evidenceReads += 1;
+          await writeFile(path, "unapproved replacement after verified snapshot");
+        }
+        return snapshot;
+      } }),
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(summaries.at(-1).status, "PASS");
+    assert.deepEqual(events, []);
+    assert.equal(evidenceReads, 1);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+    await cleanupTrustRoot(fixture);
+  }
+});
+
+test("production_entry_recover_operation_works_without_cost_gate_evidence", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-recover-"));
+  const summaries = [];
+  const events = [];
+  try {
+    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
+    const exitCode = await runCpuGateCli([
+      "recover-operation", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
+      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
+      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
+    ], productionEnv(), {
+      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
+      fetchImpl: async (url) => {
+        events.push(new URL(url).pathname);
+        return Response.json({ version: 1, slot: { kind: "idle" } });
+      },
+      commandImpl: async () => { throw new Error("must not command"); },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(summaries.at(-1).status, "PASS");
+    assert.deepEqual(events, ["/internal/relay/v1/cpu-gate/slot"]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("production_entry_recovery_after_cost_expiry_allows_cleanup_only", async () => {
+  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
+  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-recover-expired-"));
+  const summaries = [];
+  const events = [];
+  let closed = false;
+  try {
+    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
+    const exitCode = await runCpuGateCli([
+      "recover-operation", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
+      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
+      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
+    ], productionEnv(), {
+      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
+      nowUTC: () => "2026-11-03T13:00:00.000Z",
+      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { nowUTC: () => "2026-11-03T13:00:00.000Z" }),
+      fetchImpl: async (url, options) => {
+        const action = new URL(url).pathname.split("/").at(-1);
+        events.push(action);
+        assert.equal(options.headers.Authorization, `Bearer ${productionEnv().OCTG_RELAY_CPU_GATE_AUTH_TOKEN}`);
+        switch (action) {
+          case "slot": return Response.json({ version: 1, slot: closed ? { kind: "idle" }
+            : { kind: "held", owner: { pool: "MINI", requestId: "existing-operation" }, generation: 1 } });
+          case "setup-fence": return Response.json({ version: 1, kind: "fenced" });
+          case "operation-inspection": return Response.json({ version: 1, kind: "fixture", inspection: {
+            kind: "fixture", cpuGateFixture: true, state: "released", requestState: "released", activeLease: false,
+          } });
+          case "close-operation": closed = true; return Response.json({ version: 1, kind: "closed" });
+          default: throw new Error("recovery cannot start measurements or setup");
+        }
+      },
+      commandImpl: async () => { throw new Error("must not command"); },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(summaries.at(-1).status, "PASS");
+    assert.deepEqual(events, ["slot", "setup-fence", "operation-inspection", "close-operation", "slot"]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+    await cleanupTrustRoot(fixture);
+  }
+});
+
+test("production_entry_default_config_binding_rejects_actual_environment_mismatch", async (t) => {
+  // Given an approved Preview target but a selected production config.
+  // When no actual config adapter is injected, Then argv cannot supply its identity.
+  await productionHoldCase(t, { dependencies: ({ actualWorkerConfig, ...deps }) => deps });
+});
+
+test("production_entry_protected_io_failure_holds_without_remote", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps, readAndVerifyProtectedFile: async () => { throw new Error("private path unavailable"); } }) });
+});
+
+test("production_entry_git_failure_holds_without_remote", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps, gitHead: async () => { throw new Error("git unavailable"); } }) });
+});
+
+test("production_entry_rejects_unapproved_evidence_swap_remote_zero", async (t) => {
+  await productionHoldCase(t, { mutate: async (fixture) => {
+    await writeFile(fixture.evidencePath, JSON.stringify({ ...fixture.evidence, budgetMethodRef: "unapproved-replacement" }));
+  } });
+});
+
+test("production_entry_validates_execute_before_loading_operator_session", async () => {
+  const summaries = [];
+  const io = { writeSummary: (line) => summaries.push(JSON.parse(line)),
+    trustedOperatorRuntimeDependencies: { get trustedOperatorSession() { throw new Error("must not request approval"); } } };
+  assert.equal(await runCpuGateCli(["stage1"], {}, io), 2);
+  assert.equal(summaries.at(-1).status, "BLOCKED");
+});
+
+test("production_entry_non_tty_or_env_digest_alone_cannot_authorize", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps,
+    trustedOperatorSession: { ...deps.trustedOperatorSession, interactiveApprovalVerified: false } }) });
+});
+
+test("production_entry_stage1_wrong_environment_holds", async (t) => {
+  await productionHoldCase(t, { dependencies: (deps) => ({ ...deps,
+    actualWorkerConfig: async () => ({ workerName: WORKER_NAME, cloudflareAccountId: CLOUDFLARE_ACCOUNT_ID, environment: "production" }) }) });
+});
+
+test("production_entry_stage2_series_wrong_revision_holds", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-series", dependencies: (deps) => ({ ...deps, gitHead: async () => OTHER_REVISION }) });
+});
+
+test("production_entry_stage2_missing_d1_rows_read_holds", async (t) => {
+  await productionHoldCase(t, { mode: "stage2-preflight", mutate: async (fixture) => {
+    const evidence = { ...fixture.evidence, meters: fixture.evidence.meters.filter(({ id }) => id !== "d1.rows_read.daily") };
+    const text = JSON.stringify(evidence);
+    await writeFile(fixture.evidencePath, text);
+    const record = { ...fixture.record, capacityEvidenceSha256: sha256(text) };
+    await writeFile(fixture.recordPath, JSON.stringify(record));
+    fixture.recordSha256 = sha256(JSON.stringify(record));
+  } });
+});
+
+test("production_entry_recover_operation_retains_existing_authorization", async () => {
+  const calls = [];
+  const args = ["recover-operation", "--execute", "--origin=https://production.example", "--worker-name=worker", "--script-version=candidate", "--pool=MINI"];
+  await assert.rejects(runCpuGateCli(args, {}, {
+    fetchImpl: async () => calls.push("fetch"), commandImpl: async () => calls.push("command"), runGate: async () => calls.push("gate"),
+  }), TypeError);
+  const summaries = [];
+  assert.equal(await runCpuGateCli(args.filter((arg) => arg !== "--execute"), productionEnv(), {
+    writeSummary: (line) => summaries.push(JSON.parse(line)), fetchImpl: async () => calls.push("fetch"),
+  }), 2);
+  assert.equal(summaries[0].status, "BLOCKED");
+  assert.deepEqual(calls, []);
+});
+
+test("production_entry_stage1_reads_actual_config_before_upload_fixture_and_cleanup", async (t) => {
+  // Given approved bytes, an independent real config, and only local deployment/HTTP adapters.
+  const fixture = await makeTrustRoot();
+  t.after(() => cleanupTrustRoot(fixture));
+  const configPath = join(fixture.root, "preview.jsonc");
+  await writeFile(configPath, JSON.stringify({ name: WORKER_NAME, account_id: CLOUDFLARE_ACCOUNT_ID,
+    vars: { OCTG_RELAY_ENVIRONMENT: "preview" } }));
+  const { actualWorkerConfig, ...deps } = baseResolverDeps(fixture);
+  const events = [];
+  const summaries = [];
+  // When the production entry drives the existing gate, not an injected runGate.
+  const code = await runCpuGateCli(["stage1", "--execute", `--source-revision=${SOURCE_REVISION}`, `--worker-name=${WORKER_NAME}`,
+    "--origin=https://preview.example", "--pool=MINI", "--model=model", `--preview-config=${configPath}`,
+    `--journal=${join(fixture.root, "journal.json")}`, `--ledger=${join(fixture.root, "ledger.json")}`,
+    `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`], productionEnv(), {
+    trustedOperatorRuntimeDependencies: deps, nowUTC: () => NOW_UTC,
+    writeSummary: (line) => summaries.push(JSON.parse(line)),
+    runGate: async () => { throw new Error("fake gate cannot replace production gate"); },
+    deploymentFactory: async () => ({
+      uploadCandidate: async () => { events.push("upload-secret"); return { versionId: "candidate" }; },
+      deployCandidate: async () => { events.push("deploy"); }, observeCandidate: async () => ({ observed: true }),
+      deleteVersionSecret: async () => { events.push("delete-secret"); return { versionId: "secretless" }; },
+      setTraffic: async () => { events.push("traffic"); },
+      verifyMetadata: async () => ({ secretAbsent: true, bindingsUnchanged: true, deployedPercent: 100 }),
+      verifyExactVersion: async () => ({ status: 404 }),
+    }),
+    httpFactory: () => ({ workerName: WORKER_NAME, candidateVersionId: "candidate", pool: "MINI", sampleCount: 1,
+      series: [{ invocationClass: "activation_normal", workloadClass: "baseline-small", concurrency: 1 }],
+      previewPreflight: async () => ({ ready: true }),
+      createFixture: async ({ requestId }) => { events.push("fixture"); return { requestId }; },
+      callback: async () => { events.push("measure"); return { status: 200, scriptVersionId: "candidate" }; },
+      terminalizeFixture: async () => { events.push("terminal"); return { accepted: true, state: "released" }; },
+      closeKnownGrants: async () => ({ closed: true }), readSharedSlot: async () => ({ version: 1, slot: { kind: "idle" } }),
+      setupFence: async () => { throw new Error("closed journal requires no fence"); },
+      inspectOperation: async () => { throw new Error("closed journal requires no inspection"); },
+      closeOperation: async () => { throw new Error("idle slot requires no close"); },
+    }),
+  });
+  // Then capacity PASS precedes setup and the existing cleanup removes the ephemeral secret.
+  assert.equal(code, 0);
+  assert.equal(summaries.at(-1).cleanupVerified, true);
+  assert.deepEqual(events, ["upload-secret", "deploy", "fixture", "measure", "terminal", "delete-secret", "traffic"]);
+});
+
+test("production_entry_default_git_reader_binds_to_this_checkout", async (t) => {
+  const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: new URL("../", import.meta.url), encoding: "utf8" }).trim();
+  const fixture = await makeTrustRoot({ stage: "stage2", environment: "production", target: { sourceRevision }, evidence: { sourceRevision } });
+  t.after(() => cleanupTrustRoot(fixture));
+  const { gitHead, ...deps } = baseResolverDeps(fixture);
+  const summaries = [];
+  const code = await runCpuGateCli(["stage2-preflight", "--execute", `--source-revision=${sourceRevision}`,
+    `--worker-name=${WORKER_NAME}`, "--script-version=candidate", "--origin=https://production.example", "--pool=MINI",
+    `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`], productionEnv(), {
+    trustedOperatorRuntimeDependencies: deps, nowUTC: () => NOW_UTC,
+    writeSummary: (line) => summaries.push(JSON.parse(line)), fetchImpl: fakeStage2PreflightFetch("candidate"),
+  });
+  assert.equal(code, 0);
+  assert.equal(summaries.at(-1).status, "PASS");
+});
+
+test("production_entry_requires_private_root_and_session_directories", async (t) => {
+  for (const directory of ["root", "session"]) {
+    await productionHoldCase(t, { mutate: async (fixture) => {
+      await chmod(directory === "root" ? join(fixture.root, "approved") : fixture.sessionDir, 0o755);
+    } });
+  }
 });
