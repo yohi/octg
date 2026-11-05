@@ -88,6 +88,25 @@ test("a semantically failed callback blocks the series instead of collecting rep
   assert.equal(result.ledger.calls[0].success, false);
 });
 
+test("a successful HTTP status with a mismatched Worker version is logged as unsuccessful", async () => {
+  const logs = [];
+  const originalError = console.error;
+  console.error = (line) => logs.push(line);
+  try {
+    const result = await runRelayCpuGate({ mode: "stage1", adapters: {
+      workerName: "worker", candidateVersionId: "candidate", sampleCount: 1,
+      series: [{ invocationClass: "ingress", workloadClass: "baseline-small", concurrency: 1 }],
+      callback: async () => ({ status: 200, scriptVersionId: "other-version" }),
+    } });
+
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.ledger.calls[0].success, false);
+    assert.match(logs[0], /success=false workerVersionMatch=false/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test("runs runner-owned concurrent decision callbacks and terminalizes each grant before continuing", async () => {
   const observed = [];
   const result = await runRelayCpuGate({
