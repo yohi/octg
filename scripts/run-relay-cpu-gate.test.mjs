@@ -15,6 +15,7 @@ async function productionHoldCase(t, {
   fixtureOverrides = {},
   flags = [],
   nowUTC = NOW_UTC,
+  includeTrustedDependencies = true,
   expectedReason,
   injectedResolver,
 } = {}) {
@@ -28,7 +29,6 @@ async function productionHoldCase(t, {
   const calls = [];
   const summaries = [];
   const io = {
-    trustedOperatorRuntimeDependencies: dependencies(baseResolverDeps(fixture), fixture),
     nowUTC: () => nowUTC,
     writeSummary: (line) => summaries.push(JSON.parse(line)),
     fetchImpl: async () => { calls.push("fetch"); throw new Error("unexpected fetch"); },
@@ -36,6 +36,9 @@ async function productionHoldCase(t, {
     runGate: async () => { calls.push("gate"); throw new Error("unexpected gate"); },
     deploymentFactory: async () => { calls.push("deployment"); throw new Error("unexpected deployment"); },
   };
+  if (includeTrustedDependencies) {
+    io.trustedOperatorRuntimeDependencies = dependencies(baseResolverDeps(fixture), fixture);
+  }
   if (injectedResolver !== undefined) io.resolveVerifiedExecutionTarget = () => injectedResolver(fixture);
   const code = await runCpuGateCli([
     mode,
@@ -728,25 +731,30 @@ function fakeStage2PreflightFetch(candidateVersionId, observe = () => {}) {
   };
 }
 
+async function runStage2Preflight({ fixture, tmpDir, summaries, candidateVersionId = "candidate", model, fetchImpl, resolverDependencies = (deps) => deps }) {
+  const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
+  const exitCode = await runCpuGateCli([
+    "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
+    "--pool=MINI", ...(model ? [`--model=${model}`] : []), `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
+    `--source-revision=${SOURCE_REVISION}`, `--script-version=${candidateVersionId}`,
+    `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
+  ], productionEnv(), {
+    writeSummary: (msg) => summaries.push(JSON.parse(msg)),
+    nowUTC: () => NOW_UTC,
+    trustedOperatorRuntimeDependencies: resolverDependencies(baseResolverDeps(fixture)),
+    fetchImpl: fetchImpl ?? fakeStage2PreflightFetch(candidateVersionId),
+    commandImpl: async () => { throw new Error("must not command"); },
+  });
+  return { exitCode, journalPath, ledgerPath };
+}
+
 test("production_entry_initializes_real_resolver_and_stage2_reaches_existing_gate", async () => {
   const fixture = await makeTrustRoot({ stage: "stage2", environment: "production" });
   const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-init-"));
   const summaries = [];
   const events = [];
   try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", "--model=production-model", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
-      fetchImpl: fakeStage2PreflightFetch("candidate"),
-      commandImpl: async () => { throw new Error("must not command"); },
-    });
+    const { exitCode } = await runStage2Preflight({ fixture, tmpDir, summaries, model: "production-model" });
     assert.equal(exitCode, 0);
     assert.equal(summaries.at(-1).status, "PASS");
     assert.equal(events.length, 0);
@@ -762,18 +770,16 @@ test("production_entry_stage2_preflight_and_series_bind_actual_target", async ()
   const summaries = [];
   const events = [];
   try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", "--model=production-model", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate-v2`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture),
-      fetchImpl: fakeStage2PreflightFetch("candidate-v2", (url, options) => events.push({ path: url.pathname, override: options.headers["Cloudflare-Workers-Version-Overrides"] })),
-      commandImpl: async () => { throw new Error("must not command"); },
+    const { exitCode, journalPath, ledgerPath } = await runStage2Preflight({
+      fixture,
+      tmpDir,
+      summaries,
+      candidateVersionId: "candidate-v2",
+      model: "production-model",
+      fetchImpl: fakeStage2PreflightFetch("candidate-v2", (url, options) => events.push({
+        path: url.pathname,
+        override: options.headers["Cloudflare-Workers-Version-Overrides"],
+      })),
     });
     assert.equal(exitCode, 0);
     assert.equal(summaries.at(-1).status, "PASS");
@@ -802,31 +808,12 @@ test("production_entry_stage2_preflight_and_series_bind_actual_target", async ()
   }
 });
 
-test("production_entry_without_trusted_operator_session_holds_before_remote", async () => {
-  const tmpDir = await mkdtemp(join(tmpdir(), "cpu-prod-no-session-"));
-  const summaries = [];
-  const events = [];
-  try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      "--capacity-evidence=/tmp/missing-evidence.json", "--execution-target=/tmp/missing-target.json",
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      runGate: async () => { events.push("runGate"); throw new Error("must not run"); },
-      fetchImpl: async () => { events.push("fetch"); throw new Error("must not fetch"); },
-      commandImpl: async () => { events.push("command"); throw new Error("must not command"); },
-    });
-    assert.equal(exitCode, 2);
-    assert.equal(summaries.at(-1).status, "PREFLIGHT_HOLD");
-    assert.ok(summaries.at(-1).reasons.includes("UNVERIFIED_EXECUTION_TARGET"));
-    assert.deepEqual(events, []);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true });
-  }
+test("production_entry_without_trusted_operator_session_holds_before_remote", async (t) => {
+  await productionHoldCase(t, {
+    mode: "stage2-preflight",
+    includeTrustedDependencies: false,
+    expectedReason: "UNVERIFIED_EXECUTION_TARGET",
+  });
 });
 
 test("production_entry_does_not_accept_injected_fake_resolver", async (t) => {
@@ -906,16 +893,11 @@ test("production_entry_same_session_verified_bytes_reach_evaluator", async () =>
   const events = [];
   let evidenceReads = 0;
   try {
-    const { journalPath, ledgerPath } = await stage2TempFiles(tmpDir);
-    const exitCode = await runCpuGateCli([
-      "stage2-preflight", "--execute", "--origin=https://production.example", `--worker-name=${WORKER_NAME}`,
-      "--pool=MINI", `--journal=${journalPath}`, `--ledger=${ledgerPath}`,
-      `--source-revision=${SOURCE_REVISION}`, `--script-version=candidate`,
-      `--capacity-evidence=${fixture.evidencePath}`, `--execution-target=${fixture.targetPath}`,
-    ], productionEnv(), {
-      writeSummary: (msg) => summaries.push(JSON.parse(msg)),
-      nowUTC: () => NOW_UTC,
-      trustedOperatorRuntimeDependencies: baseResolverDeps(fixture, { readAndVerifyProtectedFile: async (path, uid) => {
+    const { exitCode } = await runStage2Preflight({
+      fixture,
+      tmpDir,
+      summaries,
+      resolverDependencies: (deps) => ({ ...deps, readAndVerifyProtectedFile: async (path, uid) => {
         const snapshot = await readAndVerifyProtectedFile(path, uid);
         if (path === fixture.evidencePath) {
           evidenceReads += 1;
@@ -923,8 +905,6 @@ test("production_entry_same_session_verified_bytes_reach_evaluator", async () =>
         }
         return snapshot;
       } }),
-      fetchImpl: fakeStage2PreflightFetch("candidate"),
-      commandImpl: async () => { throw new Error("must not command"); },
     });
     assert.equal(exitCode, 0);
     assert.equal(summaries.at(-1).status, "PASS");
