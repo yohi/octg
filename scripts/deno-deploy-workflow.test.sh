@@ -242,11 +242,9 @@ pull_request = require_mapping(triggers["pull_request"], "on.pull_request")
 unless triggers.key?("workflow_dispatch")
   fail_contract("on.workflow_dispatch must be configured for pre-merge deployment verification")
 end
-dispatch = require_mapping(triggers["workflow_dispatch"], "on.workflow_dispatch")
-dispatch_inputs = require_mapping(dispatch["inputs"], "on.workflow_dispatch.inputs")
-release_ack = require_mapping(dispatch_inputs["production_release_ack"], "on.workflow_dispatch.inputs.production_release_ack")
-unless release_ack["required"] == true && release_ack["type"] == "choice" && release_ack["options"] == ["RELEASE-ONCE"]
-  fail_contract("workflow_dispatch must require the RELEASE-ONCE acknowledgement")
+dispatch = triggers["workflow_dispatch"]
+unless dispatch.nil? || (dispatch.is_a?(Hash) && !dispatch.key?("inputs"))
+  fail_contract("workflow_dispatch must not expose a production release bypass input")
 end
 pull_request_types = pull_request["types"]
 unless pull_request_types.is_a?(Array) && pull_request_types.include?("labeled")
@@ -377,11 +375,12 @@ end
 
 %w[deploy deploy-production].each do |job_name|
   job = require_mapping(jobs[job_name], "jobs.#{job_name}")
-  condition = job["if"]
-  unless condition.is_a?(String) && condition.include?("github.event_name == 'workflow_dispatch'") &&
-      condition.include?("inputs.production_release_ack == 'RELEASE-ONCE'") && condition.include?("github.run_attempt == 1")
-    fail_contract("jobs.#{job_name}.if must allow only the acknowledged first manual release run")
+  unless job["if"] == "github.event_name == 'workflow_call'"
+    fail_contract("jobs.#{job_name}.if must exclude every configured event during the Issue 121 HOLD")
   end
+end
+if triggers.key?("workflow_call")
+  fail_contract("the Deno workflow must not expose workflow_call while production release is held")
 end
 
 unless deploy["environment"] == "deno-production"
