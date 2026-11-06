@@ -2,10 +2,6 @@ name: Deploy Production
 
 on:
   workflow_call:
-    inputs:
-      production_release_ack:
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -26,7 +22,6 @@ jobs:
           ref: master
 
       - name: Enforce Issue 121 release HOLD
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.production_release_ack != 'RELEASE-ONCE' || github.run_attempt != 1 }}
         run: |
           echo "::error::Production Worker deployment is held for Issue 121 release safety."
           exit 1

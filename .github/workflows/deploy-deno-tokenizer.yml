@@ -13,13 +13,6 @@ on:
       - scripts/deno-deploy-failure-diagnostics.mjs
       - .github/workflows/deploy-deno-tokenizer.yml
   workflow_dispatch:
-    inputs:
-      production_release_ack:
-        description: Type RELEASE-ONCE to authorize a one-time production deployment without CPU measurements
-        required: true
-        type: choice
-        options:
-          - RELEASE-ONCE
 
 permissions:
   contents: read
@@ -69,7 +62,7 @@ jobs:
     name: Deploy to Deno Deploy
     needs: validate
     # TODO(Task 10): Replace this HOLD only after the reviewed staging CPU-gate release safety is ready.
-    if: github.event_name == 'workflow_dispatch' && inputs.production_release_ack == 'RELEASE-ONCE' && github.run_attempt == 1
+    if: github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: deno-production
@@ -318,8 +311,6 @@ jobs:
     name: Deploy Production
     needs: deploy
     # TODO(Task 10): Keep Production mutation held until the reviewed CPU-gate replacement is ready.
-    if: github.event_name == 'workflow_dispatch' && inputs.production_release_ack == 'RELEASE-ONCE' && github.run_attempt == 1
+    if: github.event_name == 'workflow_call'
     uses: ./.github/workflows/deploy-production.yml
-    with:
-      production_release_ack: ${{ inputs.production_release_ack }}
     secrets: inherit
